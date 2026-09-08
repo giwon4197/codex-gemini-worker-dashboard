@@ -87,28 +87,29 @@ export interface CodexAccountUsageState {
 }
 
 export interface GeminiQuotaPool {
-  poolId: string;
-  poolName: string;
-  windowMinutes?: number | null;
-  usedPercent: number;
-  remainingPercent: number;
-  resetsAt: string | null;
-  remainingDuration: string | null;
+  id: string;
+  name: string;
+  window: '5h' | 'weekly';
+  usedPercent: number | null;
+  remainingPercent: number | null;
+  resetTime: string | null;
+  remainingDurationText: string | null;
+  isAvailable: boolean;
 }
 
 export interface GeminiQuotaSnapshot {
-  fiveHourPool: GeminiQuotaPool | null;
-  weeklyPool: GeminiQuotaPool | null;
-  confirmedAt: string;
-  source: 'cli' | 'cache' | 'file';
-  isAvailable: boolean;
+  fiveHour: GeminiQuotaPool | null;
+  weekly: GeminiQuotaPool | null;
+  description: string | null;
 }
 
 export interface GeminiQuotaResponse {
+  ok: boolean;
+  status: 'available' | 'unavailable' | 'error';
   quota: GeminiQuotaSnapshot | null;
-  isAvailable: boolean;
-  error?: string | null;
   lastSyncedAt: string;
+  cached?: boolean;
+  message?: string;
 }
 
 export interface GeminiQuotaState {
@@ -510,6 +511,21 @@ export function getWorkerStageContext(worker: LiveWorkerData): {
     phaseDetail: '워크트리 준비 및 Antigravity CLI 초기화 중',
     badgeStyle: 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30',
   };
+}
+
+export function getWorkerProgressPercent(worker: LiveWorkerData): number {
+  if (worker.status !== 'running') return 100;
+  if (worker.commitHashes?.length) return 95;
+  if (worker.verification?.verifiedAt || worker.verification?.commands?.length) return 85;
+  if (worker.changedFiles?.length) return 65;
+
+  const messages = (worker.recentLogs || []).map(item =>
+    typeof item === 'string' ? item : item?.message || ''
+  );
+  if (messages.some(message => /검증|테스트|build|lint/i.test(message))) return 80;
+  if (messages.some(message => /tool|파일|수정|생성/i.test(message))) return 45;
+  if (messages.some(message => /agent_response|응답|분석/i.test(message))) return 25;
+  return 10;
 }
 
 export function getModelTierInfo(modelStr?: string) {
@@ -970,7 +986,7 @@ export default function Home() {
         throw new Error(`API 응답 오류 (${res.status})`);
       }
       const json = (await res.json()) as GeminiQuotaResponse;
-      if (json.quota && json.isAvailable) {
+      if (json.quota && json.status === 'available') {
         setGeminiQuota({
           status: 'loaded',
           quota: json.quota,
@@ -979,9 +995,9 @@ export default function Home() {
         });
       } else {
         setGeminiQuota({
-          status: json.error ? 'error' : 'unavailable',
+          status: json.status === 'error' ? 'error' : 'unavailable',
           quota: json.quota ?? null,
-          errorMessage: json.error ?? null,
+          errorMessage: json.message ?? null,
           lastSyncedAt: json.lastSyncedAt || new Date().toISOString(),
         });
       }
@@ -1292,9 +1308,9 @@ export default function Home() {
   // Gemini Account Quota Data (for 4th Donut Card)
   const geminiQuotaData = useMemo(() => {
     const snapshot = geminiQuota.quota;
-    const fiveHour = snapshot?.fiveHourPool ?? null;
-    const weekly = snapshot?.weeklyPool ?? null;
-    const isAvailable = Boolean(snapshot?.isAvailable && (fiveHour || weekly));
+    const fiveHour = snapshot?.fiveHour ?? null;
+    const weekly = snapshot?.weekly ?? null;
+    const isAvailable = Boolean(fiveHour?.isAvailable || weekly?.isAvailable);
 
     // Choose primary pool for donut center: 5h pool preferred, weekly as fallback
     const primaryPool = fiveHour || weekly;
@@ -1773,14 +1789,14 @@ export default function Home() {
             subtitle="공식 5시간 및 주간 공유 쿼터 (토큰 점유율과 무관)"
             icon={<Sparkles className="h-5 w-5" />}
             accent="emerald"
-            percent={geminiQuotaData.primaryPool ? geminiQuotaData.primaryPool.remainingPercent : null}
-            centerValue={geminiQuotaData.primaryPool ? `${geminiQuotaData.primaryPool.remainingPercent.toFixed(1)}%` : '확인 불가'}
-            centerTokenValue={geminiQuotaData.primaryPool ? `사용률 ${geminiQuotaData.primaryPool.usedPercent.toFixed(1)}%` : '한도 정보 없음'}
-            centerLabel={geminiQuotaData.primaryPool ? `${geminiQuotaData.primaryPool.poolName} 잔여` : '계정 잔여 한도'}
+            percent={geminiQuotaData.primaryPool?.remainingPercent ?? null}
+            centerValue={geminiQuotaData.primaryPool?.remainingPercent != null ? `${geminiQuotaData.primaryPool.remainingPercent.toFixed(1)}%` : '확인 불가'}
+            centerTokenValue={geminiQuotaData.primaryPool?.usedPercent != null ? `사용률 ${geminiQuotaData.primaryPool.usedPercent.toFixed(1)}%` : '한도 정보 없음'}
+            centerLabel={geminiQuotaData.primaryPool ? `${geminiQuotaData.primaryPool.name} 잔여` : '계정 잔여 한도'}
             badge={
-              geminiQuotaData.primaryPool ? (
+              geminiQuotaData.primaryPool?.remainingPercent != null ? (
                 <Badge variant="secondary" className="text-emerald-300 border border-emerald-400/20 bg-black/20">
-                  {geminiQuotaData.primaryPool.poolName} {geminiQuotaData.primaryPool.remainingPercent.toFixed(1)}% 잔여
+                  {geminiQuotaData.primaryPool.name} {geminiQuotaData.primaryPool.remainingPercent.toFixed(1)}% 잔여
                 </Badge>
               ) : (
                 <Badge variant="secondary" className="text-slate-400 border border-slate-700 bg-slate-800/60 text-[10px] py-0.5 px-2 font-normal">
@@ -1789,15 +1805,15 @@ export default function Home() {
               )
             }
             tokenCountLabel={geminiQuotaData.fiveHour ? '5시간 풀 사용률' : geminiQuotaData.weekly ? '주간 풀 사용률' : '공유 풀 사용률'}
-            tokenCountValue={geminiQuotaData.primaryPool ? `${geminiQuotaData.primaryPool.usedPercent.toFixed(1)}% 사용` : '확인 불가'}
+            tokenCountValue={geminiQuotaData.primaryPool?.usedPercent != null ? `${geminiQuotaData.primaryPool.usedPercent.toFixed(1)}% 사용` : '확인 불가'}
             basisText={
               geminiQuotaData.isAvailable
                 ? `공식 Antigravity CLI 기준 · 5시간 및 주간 공유 풀 할당량 (토큰 점유율과 무관한 계정 API 쿼터)`
                 : '리셋 시각: 확인 불가 · Gemini 쿼터 정보를 불러올 수 없거나 CLI 환경이 구성되지 않았습니다. (토큰 점유율과 무관)'
             }
             ariaLabel={
-              geminiQuotaData.primaryPool
-                ? `Gemini 계정 잔여 한도 (${geminiQuotaData.primaryPool.poolName}): 잔여 ${geminiQuotaData.primaryPool.remainingPercent.toFixed(1)}%, 사용률 ${geminiQuotaData.primaryPool.usedPercent.toFixed(1)}% (토큰 점유율과 무관한 계정 한도)`
+              geminiQuotaData.primaryPool?.remainingPercent != null && geminiQuotaData.primaryPool.usedPercent != null
+                ? `Gemini 계정 잔여 한도 (${geminiQuotaData.primaryPool.name}): 잔여 ${geminiQuotaData.primaryPool.remainingPercent.toFixed(1)}%, 사용률 ${geminiQuotaData.primaryPool.usedPercent.toFixed(1)}% (토큰 점유율과 무관한 계정 한도)`
                 : 'Gemini 계정 잔여 한도: 확인 불가 (토큰 점유율과 무관한 계정 한도)'
             }
             isUnavailable={!geminiQuotaData.isAvailable || !geminiQuotaData.primaryPool}
@@ -1807,7 +1823,7 @@ export default function Home() {
                 <div className="flex flex-col gap-1 rounded bg-black/20 p-2 border border-border/30">
                   <div className="flex items-center justify-between">
                     <span className="font-medium text-slate-300">5시간 공유 풀 (5h)</span>
-                    {geminiQuotaData.fiveHour ? (
+                    {geminiQuotaData.fiveHour?.remainingPercent != null && geminiQuotaData.fiveHour.usedPercent != null ? (
                       <span className="font-mono font-semibold text-emerald-400">
                         잔여 {geminiQuotaData.fiveHour.remainingPercent.toFixed(1)}% (사용 {geminiQuotaData.fiveHour.usedPercent.toFixed(1)}%)
                       </span>
@@ -1818,14 +1834,14 @@ export default function Home() {
                   <div className="flex items-center justify-between text-[11px] text-slate-400">
                     <span>리셋 시각</span>
                     <span className="font-mono text-slate-300">
-                      {geminiQuotaData.fiveHour ? formatResetTime(geminiQuotaData.fiveHour.resetsAt) : '확인 불가'}
+                      {geminiQuotaData.fiveHour ? formatResetTime(geminiQuotaData.fiveHour.resetTime) : '확인 불가'}
                     </span>
                   </div>
-                  {geminiQuotaData.fiveHour?.remainingDuration && (
+                  {geminiQuotaData.fiveHour?.remainingDurationText && (
                     <div className="flex items-center justify-between text-[11px] text-slate-400">
                       <span>남은 시간</span>
                       <span className="font-mono text-cyan-300">
-                        {geminiQuotaData.fiveHour.remainingDuration}
+                        {geminiQuotaData.fiveHour.remainingDurationText}
                       </span>
                     </div>
                   )}
@@ -1835,7 +1851,7 @@ export default function Home() {
                 <div className="flex flex-col gap-1 rounded bg-black/20 p-2 border border-border/30">
                   <div className="flex items-center justify-between">
                     <span className="font-medium text-slate-300">주간 공유 풀 (Weekly)</span>
-                    {geminiQuotaData.weekly ? (
+                    {geminiQuotaData.weekly?.remainingPercent != null && geminiQuotaData.weekly.usedPercent != null ? (
                       <span className="font-mono font-semibold text-emerald-400">
                         잔여 {geminiQuotaData.weekly.remainingPercent.toFixed(1)}% (사용 {geminiQuotaData.weekly.usedPercent.toFixed(1)}%)
                       </span>
@@ -1846,14 +1862,14 @@ export default function Home() {
                   <div className="flex items-center justify-between text-[11px] text-slate-400">
                     <span>리셋 시각</span>
                     <span className="font-mono text-slate-300">
-                      {geminiQuotaData.weekly ? formatResetTime(geminiQuotaData.weekly.resetsAt) : '확인 불가'}
+                      {geminiQuotaData.weekly ? formatResetTime(geminiQuotaData.weekly.resetTime) : '확인 불가'}
                     </span>
                   </div>
-                  {geminiQuotaData.weekly?.remainingDuration && (
+                  {geminiQuotaData.weekly?.remainingDurationText && (
                     <div className="flex items-center justify-between text-[11px] text-slate-400">
                       <span>남은 시간</span>
                       <span className="font-mono text-cyan-300">
-                        {geminiQuotaData.weekly.remainingDuration}
+                        {geminiQuotaData.weekly.remainingDurationText}
                       </span>
                     </div>
                   )}
@@ -3423,6 +3439,7 @@ function LiveWorkerPanel({
   const statusConfig = getWorkerStatusConfig(live.status);
   const StatusIcon = statusConfig.icon;
   const stage = getWorkerStageContext(live);
+  const progressPercent = getWorkerProgressPercent(live);
   const tierInfo = getModelTierInfo(live.model);
   const isRunning = live.status === 'running';
   const isPolicyViolation = live.status === 'policy_violation';
@@ -3519,6 +3536,18 @@ function LiveWorkerPanel({
               )}
             </button>
           </div>
+        </div>
+
+        <div className="mt-3.5" aria-label={`작업 진행률 ${progressPercent}%`}>
+          <div className="mb-1.5 flex items-center justify-between text-xs">
+            <span className="font-semibold text-slate-300">작업 진행률</span>
+            <span className="font-mono font-bold text-cyan-300">{progressPercent}%</span>
+          </div>
+          <progress
+            className="h-2 w-full overflow-hidden rounded-full bg-slate-800 accent-cyan-400"
+            value={progressPercent}
+            max={100}
+          />
         </div>
 
         {/* 2. CONTEXT & SPECS STRIP: Priority Layout */}
