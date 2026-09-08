@@ -296,7 +296,8 @@ try {
       $changed = @(Get-ChangedFiles $wt.path $baseCommit)
       $violations = @($changed | Where-Object { -not (Test-AllowedPath $_ @($task.allowed_files)) })
       $tests = if (-not $wasCancelled -and -not $wasTimedOut -and $state.status -eq 'completed' -and $violations.Count -eq 0) { @(Invoke-Verification $wt.path @($task.test_commands)) } else { @() }
-      $failureText = @($state.error, $state.finalResponse, @($tests | Where-Object status -eq 'FAIL' | ForEach-Object { $_.output })) -join "`n"
+      $failureParts = @($state.error, $state.finalResponse) + @($tests | Where-Object status -eq 'FAIL' | ForEach-Object { $_.output })
+      $failureText = $failureParts -join "`n"
       $classification = Get-FailureClassification $failureText
       $decision = if ($wasCancelled) { 'CANCELLED' } elseif ($wasTimedOut) { 'TIMED_OUT' } elseif ($violations.Count -gt 0) { 'POLICY_VIOLATION' } elseif ($classification) { $classification } elseif ($state.status -ne 'completed') { 'WORKER_FAILED' } elseif (@($tests | Where-Object status -eq 'FAIL').Count -gt 0) { 'TEST_FAILED' } else { 'PASS' }
 
