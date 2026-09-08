@@ -397,6 +397,15 @@ try {
         Record-Action 'GEMINI_QUOTA_UPDATER_STARTED'
     }
 
+    $codexLimitUpdater = Join-Path (Split-Path -Parent $targetDashboardDir) 'refresh-codex-rate-limits.ps1'
+    if (Test-Path -LiteralPath $codexLimitUpdater) {
+        Start-Process -FilePath 'powershell.exe' `
+            -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $codexLimitUpdater + '"'), '-DashboardDir', ('"' + $targetDashboardDir + '"')) `
+            -WorkingDirectory (Split-Path -Parent $targetDashboardDir) `
+            -WindowStyle Hidden | Out-Null
+        Record-Action 'CODEX_RATE_LIMIT_UPDATER_STARTED'
+    }
+
     $serverProcess = $null
     if ($MockProcessMode -eq 'early_exit') {
         Record-Action 'MOCK_EARLY_EXIT'

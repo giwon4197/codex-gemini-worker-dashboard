@@ -944,13 +944,23 @@ export default function Home() {
 
       const lastSyncedAt = (!Array.isArray(json) && json?.lastSyncedAt) ? json.lastSyncedAt : new Date().toISOString();
 
-      // Parse and update Codex account usage state
-      const accountLimits = extractCodexAccountUsage(json);
+      // The donut uses the live app-server snapshot when available. Daily token
+      // history continues to come from the existing local session API.
+      let liveLimitPayload: unknown = null;
+      try {
+        const liveLimitResponse = await fetch(`/data/codex-rate-limits.json?t=${Date.now()}`, { cache: 'no-store' });
+        if (liveLimitResponse.ok) liveLimitPayload = await liveLimitResponse.json();
+      } catch {}
+      const accountLimits = extractCodexAccountUsage(liveLimitPayload) || extractCodexAccountUsage(json);
+      const liveSyncedAt = liveLimitPayload && typeof liveLimitPayload === 'object'
+        ? (liveLimitPayload as { lastSyncedAt?: unknown }).lastSyncedAt
+        : null;
+      const accountSyncedAt = typeof liveSyncedAt === 'string' ? liveSyncedAt : lastSyncedAt;
       setCodexAccountUsage({
         status: accountLimits ? 'loaded' : 'unavailable',
         rateLimits: accountLimits,
         errorMessage: null,
-        lastSyncedAt,
+        lastSyncedAt: accountSyncedAt,
       });
 
       if (entries.length > 0) {
