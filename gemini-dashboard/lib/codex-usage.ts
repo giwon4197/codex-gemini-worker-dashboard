@@ -369,8 +369,8 @@ function readLatestFromFile(filePath: string): FileReadResult | null {
 
       for (let i = lines.length - 1; i >= startIndex; i--) {
         const line = lines[i].trim();
-        // Candidate filter: inspect only lines containing 'token_usage_record'
-        if (!line || !line.includes('token_usage_record')) {
+        // Accept the legacy normalized record and Codex CLI's actual event_msg/token_count shape.
+        if (!line || (!line.includes('token_usage_record') && !line.includes('token_count'))) {
           continue;
         }
 
@@ -380,6 +380,7 @@ function readLatestFromFile(filePath: string): FileReadResult | null {
             timestamp?: unknown;
             ordinal?: unknown;
             payload?: {
+              type?: unknown;
               session_id?: unknown;
               thread_id?: unknown;
               thread_token_usage?: {
@@ -389,20 +390,35 @@ function readLatestFromFile(filePath: string): FileReadResult | null {
                 output_tokens?: unknown;
                 reasoning_output_tokens?: unknown;
               };
+              info?: {
+                total_token_usage?: {
+                  total_tokens?: unknown;
+                  cached_input_tokens?: unknown;
+                  input_tokens?: unknown;
+                  output_tokens?: unknown;
+                  reasoning_output_tokens?: unknown;
+                };
+              };
               rate_limits?: unknown;
             };
           };
 
-          if (parsed.type !== 'token_usage_record' || !parsed.payload || typeof parsed.payload !== 'object') {
+          if (!parsed.payload || typeof parsed.payload !== 'object') {
             continue;
           }
+          const isLegacyRecord = parsed.type === 'token_usage_record';
+          const isCodexTokenEvent = parsed.type === 'event_msg' && parsed.payload.type === 'token_count';
+          if (!isLegacyRecord && !isCodexTokenEvent) continue;
 
           const ordinal = typeof parsed.ordinal === 'number' && Number.isFinite(parsed.ordinal) ? parsed.ordinal : 0;
           const timestampStr = typeof parsed.timestamp === 'string' ? parsed.timestamp : undefined;
 
           // 1. Thread token usage for daily aggregation
-          if (!foundRecord && parsed.payload.thread_token_usage && typeof parsed.payload.thread_token_usage === 'object') {
-            const usage = parsed.payload.thread_token_usage;
+          const tokenUsage = isLegacyRecord
+            ? parsed.payload.thread_token_usage
+            : parsed.payload.info?.total_token_usage;
+          if (!foundRecord && tokenUsage && typeof tokenUsage === 'object') {
+            const usage = tokenUsage;
             const sessionId =
               (typeof parsed.payload.session_id === 'string' && parsed.payload.session_id) ||
               (typeof parsed.payload.thread_id === 'string' && parsed.payload.thread_id) ||

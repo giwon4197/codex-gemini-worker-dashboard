@@ -535,6 +535,40 @@ void describe('Codex Usage and Rate Limits', () => {
     }
   });
 
+  void test('parses the actual Codex event_msg token_count shape and ignores lookalikes', () => {
+    const sessionsDir = createTempSessionsDir();
+    const dayDir = path.join(sessionsDir, '2026', '09', '08');
+    fs.mkdirSync(dayDir, { recursive: true });
+    const lines = [
+      JSON.stringify({
+        type: 'response_item',
+        timestamp: '2026-09-08T20:00:00.000Z',
+        payload: { type: 'custom_tool_call', input: 'rate_limits', rate_limits: { primary: { used_percent: 99 } } },
+      }),
+      JSON.stringify({
+        type: 'event_msg',
+        timestamp: '2026-09-08T19:00:00.000Z',
+        payload: {
+          type: 'token_count',
+          info: { total_token_usage: { total_tokens: 900, cached_input_tokens: 600, input_tokens: 800, output_tokens: 100, reasoning_output_tokens: 25 } },
+          rate_limits: {
+            primary: { used_percent: 75, window_minutes: 10080, resets_at: 1789451036 },
+            secondary: null,
+            credits: { balance: '482.02', has_credits: true, unlimited: false },
+            plan_type: 'plus',
+          },
+        },
+      }),
+    ];
+    fs.writeFileSync(path.join(dayDir, 'rollout-real-shape.jsonl'), lines.join('\n') + '\n');
+    const result = getCodexDailyUsage();
+    assert.strictEqual(result.rateLimits?.primary?.used_percent, 75);
+    assert.strictEqual(result.rateLimits?.primary?.remaining_percent, 25);
+    assert.strictEqual(result.rateLimits?.credits?.balance, '482.02');
+    assert.strictEqual(result.codexDaily[0]?.totalTokens, 900);
+    assert.strictEqual(result.codexDaily[0]?.activeTokens, 300);
+  });
+
   void test('existing cumulative token usage regression verification', () => {
     const sessionsDir = createTempSessionsDir();
     const dayDir = path.join(sessionsDir, '2026', '09', '08');
