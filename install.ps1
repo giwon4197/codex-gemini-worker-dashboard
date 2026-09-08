@@ -120,7 +120,9 @@ $root = '__INSTALL_ROOT__'
 $dashboard = Join-Path $root 'gemini-dashboard'
 $url = 'http://localhost:3000/'
 try { if ((Invoke-WebRequest -UseBasicParsing $url -TimeoutSec 2).StatusCode -eq 200) { Write-Host $url; exit 0 } } catch {}
-$npm = (Get-Command npm.cmd -ErrorAction Stop).Source
+$npmCommand = Get-Command npm.cmd -ErrorAction SilentlyContinue
+$npm = if ($npmCommand) { $npmCommand.Source } else { 'C:\Program Files\nodejs\npm.cmd' }
+if (-not (Test-Path -LiteralPath $npm)) { throw 'npm.cmd를 찾을 수 없습니다. Node.js LTS 설치를 확인하세요.' }
 $outLog = Join-Path $dashboard '.dev-server.stdout.log'
 $errLog = Join-Path $dashboard '.dev-server.stderr.log'
 Start-Process -FilePath $npm -ArgumentList 'run dev' -WorkingDirectory $dashboard -WindowStyle Hidden -RedirectStandardOutput $outLog -RedirectStandardError $errLog | Out-Null
