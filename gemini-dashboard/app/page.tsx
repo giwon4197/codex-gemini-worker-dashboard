@@ -1563,35 +1563,6 @@ export default function Home() {
           </div>
         </header>
 
-        {/* 0. OVERALL EXECUTION SUMMARY & REAL-TIME LIVE WORKER MONITOR */}
-        <div className="space-y-4">
-          <OverallExecutionSummary
-            runInfo={liveRunInfo}
-            workers={liveWorkers}
-            autoRefresh={autoRefresh}
-            onCopy={handleCopy}
-            copiedId={copiedJobId}
-          />
-
-          <section className="space-y-4" aria-label="실시간 병렬 워커 목록">
-            {(liveWorkers.length > 0 ? liveWorkers : [null]).map((worker, index) => (
-              <LiveWorkerPanel
-                key={worker?.taskId || worker?.runId || `idle-${index}`}
-                live={worker}
-                onCopy={handleCopy}
-                copiedJobId={copiedJobId}
-              />
-            ))}
-          </section>
-        </div>
-
-        {/* CODEX ACCOUNT RATE LIMITS & USAGE CARD */}
-        <CodexAccountUsageCard
-          usageState={codexAccountUsage}
-          onRefresh={() => { void fetchCodexUsage(); }}
-          isRefreshing={isRefreshing}
-        />
-
         {/* 1. TOP STATS: 4 CIRCULAR DONUT CHARTS (Codex active, Gemini active, Cumulative savings, Codex primary account limit) */}
         <section className="grid gap-5 grid-cols-1 sm:grid-cols-2 xl:grid-cols-4" aria-label="4대 핵심 통계 원형 그래프">
           {/* Donut 1: Codex 누적 실질 사용량 */}
@@ -1711,6 +1682,35 @@ export default function Home() {
             isUnavailable={!primaryLimitData.isAvailable}
           />
         </section>
+
+        {/* 0. OVERALL EXECUTION SUMMARY & REAL-TIME LIVE WORKER MONITOR */}
+        <div className="mt-6 space-y-4">
+          <OverallExecutionSummary
+            runInfo={liveRunInfo}
+            workers={liveWorkers}
+            autoRefresh={autoRefresh}
+            onCopy={handleCopy}
+            copiedId={copiedJobId}
+          />
+
+          <section className="space-y-4" aria-label="실시간 병렬 워커 목록">
+            {(liveWorkers.length > 0 ? liveWorkers : [null]).map((worker, index) => (
+              <LiveWorkerPanel
+                key={worker?.taskId || worker?.runId || `idle-${index}`}
+                live={worker}
+                onCopy={handleCopy}
+                copiedJobId={copiedJobId}
+              />
+            ))}
+          </section>
+        </div>
+
+        {/* CODEX ACCOUNT RATE LIMITS & USAGE CARD */}
+        <CodexAccountUsageCard
+          usageState={codexAccountUsage}
+          onRefresh={() => { void fetchCodexUsage(); }}
+          isRefreshing={isRefreshing}
+        />
 
         {/* 2. DAILY ACTIVITY HEATMAP SECTION */}
         <section className="mt-6 panel p-5">
@@ -2618,7 +2618,7 @@ function CodexAccountUsageCard({
   return (
     <section
       aria-label="Codex 계정 사용량 및 요금제 한도"
-      className="panel p-4 sm:p-5 transition-all"
+      className="mt-6 panel p-4 sm:p-5 transition-all"
     >
       {/* Top Card Bar */}
       <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-border/60">
