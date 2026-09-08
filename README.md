@@ -125,7 +125,7 @@ Codex 계획 호출은 `read-only`, `ephemeral`, JSON Schema 강제 모드로 �
 `.git/**`, `.agent/**`, 저장소 전체 wildcard, 중복 ownership을 거부합니다. 현재 실행 계획은 같은 base에서
 독립적으로 수행 가능한 task만 허용하며 dependency chain은 하나의 task로 합쳐 계획합니다.
 
-성공 시 최종 상태는 `awaiting_human_approval`입니다. 라우터와 Codex review는 main을 수정하지 않으며,
+Codex review가 깨끗하면 최종 상태는 `awaiting_human_approval`, 수정 사항을 발견하면 `changes_requested`입니다. 라우터와 Codex review는 main을 수정하지 않으며,
 `.agent/runs/<run-id>/codex-review.md`를 확인한 사용자가 명시적으로 승인해야 병합할 수 있습니다.
 리뷰 호출만 실패한 경우 Worker를 다시 실행하지 않고 `review-integration -RunId <run-id>`로 재시도할 수 있습니다.
 
