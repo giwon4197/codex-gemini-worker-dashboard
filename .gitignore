@@ -27,6 +27,7 @@ test_workspace_*/
 .agent/worktrees/
 .agent/integration/
 .agent/plans/
+.agent/background/
 .agent/runs/*/cancel.requested
 gemini-dashboard/public/data/live-workers.json
 
