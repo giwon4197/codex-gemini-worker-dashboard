@@ -85,7 +85,8 @@ function New-MockWorkerState(
     [int64]$LatencyMs = 1000,
     [double]$Elapsed = 1.0,
     [string]$FinalResponse = '성공',
-    [string]$Error = $null
+    [string]$Error = $null,
+    [int]$Attempt = 1
 ) {
     if (-not (Test-Path -LiteralPath $WorkersDir)) {
         New-Item -ItemType Directory -Path $WorkersDir -Force | Out-Null
@@ -93,7 +94,7 @@ function New-MockWorkerState(
     $state = [ordered]@{
         runId          = $RunId
         taskId         = $TaskId
-        attempt        = 1
+        attempt        = $Attempt
         task           = $TaskName
         model          = $Model
         status         = $Status
@@ -116,9 +117,42 @@ function New-MockWorkerState(
         finalResponse  = $FinalResponse
         error          = $Error
     }
+    $runRoot = Split-Path -Parent $WorkersDir
     $filePath = Join-Path $WorkersDir "$TaskId.json"
     $json = $state | ConvertTo-Json -Depth 8
     [System.IO.File]::WriteAllText($filePath, $json, [System.Text.Encoding]::UTF8)
+
+    $attemptsDir = Join-Path $runRoot 'attempts'
+    if (-not (Test-Path -LiteralPath $attemptsDir)) {
+        New-Item -ItemType Directory -Path $attemptsDir -Force | Out-Null
+    }
+    $attemptFilePath = Join-Path $attemptsDir "$TaskId.attempt-$Attempt.json"
+    [System.IO.File]::WriteAllText($attemptFilePath, $json, [System.Text.Encoding]::UTF8)
+
+    $eventsDir = Join-Path $runRoot 'events'
+    if (-not (Test-Path -LiteralPath $eventsDir)) {
+        New-Item -ItemType Directory -Path $eventsDir -Force | Out-Null
+    }
+    $eventFilePath = Join-Path $eventsDir "$TaskId.ndjson"
+    $evt = [pscustomobject]@{
+        timestamp = (Get-Date).ToString('o')
+        runId     = $RunId
+        taskId    = $TaskId
+        attempt   = $Attempt
+        type      = 'confirmed_usage'
+        status    = $Status
+        usage     = [pscustomobject]@{
+            prompt     = $Prompt
+            candidates = $Candidates
+            cached     = $Cached
+            thoughts   = $Thoughts
+            total      = $Total
+            requests   = $Requests
+            latencyMs  = $LatencyMs
+        }
+    }
+    Add-Content -LiteralPath $eventFilePath -Value ($evt | ConvertTo-Json -Compress) -Encoding utf8
+
     return $filePath
 }
 
@@ -346,10 +380,193 @@ try {
     Assert-Test '원자적 교체 후 임시 파일(.tmp) 잔존 없음' ($tmpFiles.Count -eq 0)
 
     # ---------------------------------------------------------------
-    # 9. 변경 파일들에 대한 PowerShell Parser (Lint) 검사
+    # 9. 재시도 워커 확정 사용량 합산 및 단일 논리 작업 카운트 검증 (Criterion 1, 3, 7)
     # ---------------------------------------------------------------
     Write-Host ''
-    Write-Host '9. 수정 및 생성된 모든 PowerShell 스크립트 문법(Lint) 검사' -ForegroundColor Cyan
+    Write-Host '9. 재시도 워커 확정 사용량 합산 및 단일 논리 작업 카운트 검증' -ForegroundColor Cyan
+    $testRetryDir = Join-Path $testTempRoot 'test-retry'
+    $dashRetry = Join-Path $testRetryDir 'data\dashboard.json'
+    New-InitialDashboard -Path $dashRetry -IncludeProcessedKeys $true | Out-Null
+
+    $runRetryRoot = Join-Path $testRetryDir 'runs\RUN-RETRY-01'
+    $workersRetryDir = Join-Path $runRetryRoot 'workers'
+
+    # Attempt 1: Failed during tests, confirmed usage: 400 prompt + 100 cand = 500 total
+    New-MockWorkerState -WorkersDir $workersRetryDir -RunId 'RUN-RETRY-01' -TaskId 'TASK-RETRY' -TaskName '재시도 테스트' `
+        -Attempt 1 -Status 'failed' `
+        -Prompt 400 -Candidates 100 -Cached 50 -Thoughts 20 -Total 500 -Requests 1 -LatencyMs 4000 -Elapsed 4.0 `
+        -FinalResponse $null -Error '테스트 실패' | Out-Null
+
+    # Attempt 2: Succeeded, confirmed usage: 600 prompt + 200 cand = 800 total
+    New-MockWorkerState -WorkersDir $workersRetryDir -RunId 'RUN-RETRY-01' -TaskId 'TASK-RETRY' -TaskName '재시도 테스트' `
+        -Attempt 2 -Status 'completed' `
+        -Prompt 600 -Candidates 200 -Cached 80 -Thoughts 30 -Total 800 -Requests 1 -LatencyMs 5500 -Elapsed 5.5 `
+        -FinalResponse '재시도 성공 완료' | Out-Null
+
+    & pwsh.exe -NoProfile -File $parallelScript -SyncStateRoot $runRetryRoot -DashboardPath $dashRetry
+    Assert-Test '재시도 작업 동기화 성공' ($LASTEXITCODE -eq 0)
+
+    $dRetry = Get-Content -Raw -LiteralPath $dashRetry | ConvertFrom-Json
+    # 1) Confirmed usage from both attempts is summed: 500 + 800 = 1300
+    Assert-Test '두 시도의 확정 사용량 합산 (500 + 800 = 1300)' ($dRetry.summary.tokens -eq 1300) "실제 값: $($dRetry.summary.tokens)"
+    Assert-Test 'tokens.prompt 합산 (400 + 600 = 1000)' ($dRetry.tokens.prompt -eq 1000) "실제 값: $($dRetry.tokens.prompt)"
+    Assert-Test 'tokens.candidates 합산 (100 + 200 = 300)' ($dRetry.tokens.candidates -eq 300) "실제 값: $($dRetry.tokens.candidates)"
+    Assert-Test 'tokens.cached 합산 (50 + 80 = 130)' ($dRetry.tokens.cached -eq 130) "실제 값: $($dRetry.tokens.cached)"
+    Assert-Test 'tokens.thoughts 합산 (20 + 30 = 50)' ($dRetry.tokens.thoughts -eq 50) "실제 값: $($dRetry.tokens.thoughts)"
+    Assert-Test 'summary.requests 합산 (1 + 1 = 2)' ($dRetry.summary.requests -eq 2) "실제 값: $($dRetry.summary.requests)"
+
+    # 2) Logical task count changes once: 1 completed, 0 failed
+    Assert-Test '논리적 작업 완료 수 1회만 반영 (1)' ($dRetry.summary.completed -eq 1) "실제 값: $($dRetry.summary.completed)"
+    Assert-Test '논리적 작업 실패 수 0 유지 (0)' ($dRetry.summary.failed -eq 0) "실제 값: $($dRetry.summary.failed)"
+    Assert-Test 'jobs 내역 1건만 등록' ($dRetry.jobs.Count -eq 1) "실제 값: $($dRetry.jobs.Count)"
+    Assert-Test 'jobs 최종 상태 완료' ($dRetry.jobs[0].status -eq '완료')
+    Assert-Test 'jobs 총 토큰 합산 표기 (1,300)' ($dRetry.jobs[0].tokens -eq '1,300')
+
+    # Re-sync idempotency test
+    & pwsh.exe -NoProfile -File $parallelScript -SyncStateRoot $runRetryRoot -DashboardPath $dashRetry
+    $dRetryResync = Get-Content -Raw -LiteralPath $dashRetry | ConvertFrom-Json
+    Assert-Test '재동기화 후 summary.tokens 불변 (1300)' ($dRetryResync.summary.tokens -eq 1300)
+    Assert-Test '재동기화 후 summary.completed 불변 (1)' ($dRetryResync.summary.completed -eq 1)
+    Assert-Test '재동기화 후 summary.failed 불변 (0)' ($dRetryResync.summary.failed -eq 0)
+    Assert-Test '재동기화 후 jobs 건수 1건 유지' ($dRetryResync.jobs.Count -eq 1)
+
+    # ---------------------------------------------------------------
+    # 10. 타임아웃 및 실패 시도의 확정 사용량 보존 검증 (Criterion 2, 7)
+    # ---------------------------------------------------------------
+    Write-Host ''
+    Write-Host '10. 타임아웃 및 실패 시도의 확정 사용량 보존 검증' -ForegroundColor Cyan
+    $testTimeoutDir = Join-Path $testTempRoot 'test-timeout'
+    $dashTimeout = Join-Path $testTimeoutDir 'data\dashboard.json'
+    New-InitialDashboard -Path $dashTimeout -IncludeProcessedKeys $true | Out-Null
+
+    $runTimeoutRoot = Join-Path $testTimeoutDir 'runs\RUN-TIMEOUT-01'
+    $workersTimeoutDir = Join-Path $runTimeoutRoot 'workers'
+
+    # Worker timed out after partial streaming: 350 prompt + 70 cand = 420 total
+    New-MockWorkerState -WorkersDir $workersTimeoutDir -RunId 'RUN-TIMEOUT-01' -TaskId 'TASK-TIMEDOUT' -TaskName '시간 초과 작업' `
+        -Attempt 1 -Status 'timed_out' `
+        -Prompt 350 -Candidates 70 -Cached 30 -Thoughts 10 -Total 420 -Requests 1 -LatencyMs 10000 -Elapsed 10.0 `
+        -FinalResponse $null -Error '작업 시간 초과 (오케스트레이터 강제 종료)' | Out-Null
+
+    & pwsh.exe -NoProfile -File $parallelScript -SyncStateRoot $runTimeoutRoot -DashboardPath $dashTimeout
+    Assert-Test '타임아웃 작업 동기화 성공' ($LASTEXITCODE -eq 0)
+
+    $dTimeout = Get-Content -Raw -LiteralPath $dashTimeout | ConvertFrom-Json
+    Assert-Test '타임아웃 작업 확정 summary.tokens 적산 확인 (420)' ($dTimeout.summary.tokens -eq 420) "실제 값: $($dTimeout.summary.tokens)"
+    Assert-Test 'tokens.prompt 적산 (350)' ($dTimeout.tokens.prompt -eq 350)
+    Assert-Test 'tokens.candidates 적산 (70)' ($dTimeout.tokens.candidates -eq 70)
+    Assert-Test 'tokens.cached 적산 (30)' ($dTimeout.tokens.cached -eq 30)
+    Assert-Test 'summary.failed 증가 (1)' ($dTimeout.summary.failed -eq 1) "실제 값: $($dTimeout.summary.failed)"
+    Assert-Test 'summary.completed 유지 (0)' ($dTimeout.summary.completed -eq 0)
+    Assert-Test 'jobs에 타임아웃 실패 내역 기록' ($dTimeout.jobs[0].status -eq '실패')
+
+    # ---------------------------------------------------------------
+    # 11. 기존 runId+taskId 레거시 데이터 호환 및 재동기화 중복 방지 검증 (Criterion 4, 7)
+    # ---------------------------------------------------------------
+    Write-Host ''
+    Write-Host '11. 기존 runId+taskId 레거시 데이터 호환 및 재동기화 중복 방지 검증' -ForegroundColor Cyan
+    $testLegacyDir = Join-Path $testTempRoot 'test-legacy'
+    $dashLegacy = Join-Path $testLegacyDir 'data\dashboard.json'
+    New-InitialDashboard -Path $dashLegacy -IncludeProcessedKeys $true | Out-Null
+
+    # Pre-populate dashboard with legacy format (key is runId+taskId, no attempt suffix)
+    $dLegInit = Get-Content -Raw -LiteralPath $dashLegacy | ConvertFrom-Json
+    $dLegInit.summary.tokens = 500
+    $dLegInit.summary.requests = 1
+    $dLegInit.summary.completed = 1
+    $dLegInit.tokens.prompt = 300
+    $dLegInit.tokens.candidates = 200
+    $dLegInit.processedKeys = @('RUN-LEGACY+TASK-L1')
+    $dLegInit.jobs = @([pscustomobject]@{
+        name = '레거시 작업'; model = 'gemini-3.8-flash-medium'; status = '완료'
+        tokens = '500'; duration = '5초'; time = '10:00'; timestamp = (Get-Date).ToString('o')
+        snippet = '레거시 완료'; runId = 'RUN-LEGACY'; taskId = 'TASK-L1'; stats = $null
+    })
+    $dLegInit | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $dashLegacy -Encoding utf8
+
+    # Now observe the same run in orchestrator sync (legacy state without attempt or attempt=1)
+    $runLegRoot = Join-Path $testLegacyDir 'runs\RUN-LEGACY'
+    $workersLegDir = Join-Path $runLegRoot 'workers'
+    New-MockWorkerState -WorkersDir $workersLegDir -RunId 'RUN-LEGACY' -TaskId 'TASK-L1' -TaskName '레거시 작업' `
+        -Attempt 1 -Status 'completed' -Prompt 300 -Candidates 200 -Total 500 | Out-Null
+
+    & pwsh.exe -NoProfile -File $parallelScript -SyncStateRoot $runLegRoot -DashboardPath $dashLegacy
+    Assert-Test '레거시 데이터 동기화 종료 코드 0' ($LASTEXITCODE -eq 0)
+
+    $dLegAfter = Get-Content -Raw -LiteralPath $dashLegacy | ConvertFrom-Json
+    Assert-Test '레거시 데이터 summary.tokens 중복 적산 안됨 (500 유지)' ($dLegAfter.summary.tokens -eq 500) "실제 값: $($dLegAfter.summary.tokens)"
+    Assert-Test '레거시 데이터 summary.completed 중복 적산 안됨 (1 유지)' ($dLegAfter.summary.completed -eq 1) "실제 값: $($dLegAfter.summary.completed)"
+    Assert-Test '레거시 데이터 jobs 건수 1건 유지' ($dLegAfter.jobs.Count -eq 1)
+
+    # ---------------------------------------------------------------
+    # 12. 동시 실행 단독 워커 간 크로스 프로세스 락 및 Lost Update 방지 검증 (Criterion 5, 7)
+    # ---------------------------------------------------------------
+    Write-Host ''
+    Write-Host '12. 동시 실행 단독 워커 간 크로스 프로세스 락 및 Lost Update 방지 검증' -ForegroundColor Cyan
+    $testConcDir = Join-Path $testTempRoot 'test-concurrent'
+    $dashConc = Join-Path $testConcDir 'data\dashboard.json'
+    New-InitialDashboard -Path $dashConc -IncludeProcessedKeys $true | Out-Null
+
+    $mock1Lines = @(
+        '{"event":"init","init":{"model":"gemini-3.8-flash-medium"}}',
+        '{"event":"step_update","step_update":{"text_delta":"워커1 완료"}}',
+        '{"event":"result","result":{"response":"워커1 완료","usage":{"input_tokens":150,"output_tokens":50,"cache_read_tokens":0,"thinking_tokens":0,"total_tokens":200},"num_turns":1,"duration_seconds":0.5,"status":"SUCCESS"}}'
+    )
+    $mock1Json = ($mock1Lines -join "`n")
+
+    $mock2Lines = @(
+        '{"event":"init","init":{"model":"gemini-3.8-flash-medium"}}',
+        '{"event":"step_update","step_update":{"text_delta":"워커2 완료"}}',
+        '{"event":"result","result":{"response":"워커2 완료","usage":{"input_tokens":250,"output_tokens":100,"cache_read_tokens":0,"thinking_tokens":0,"total_tokens":350},"num_turns":1,"duration_seconds":0.5,"status":"SUCCESS"}}'
+    )
+    $mock2Json = ($mock2Lines -join "`n")
+
+    # Start two concurrent standalone pwsh worker processes targeting the same dashboard.json
+    $pwshExe = (Get-Process -Id $PID).Path
+    if (-not $pwshExe) { $pwshExe = 'pwsh.exe' }
+
+    $job1 = Start-Job -ScriptBlock {
+        param($exe, $script, $dash, $dataDir, $json)
+        $out = & $exe -NoProfile -File $script -Task '동시 워커 1' -Prompt '테스트1' `
+            -OrchestrationRunId 'RUN-CONCURRENT' -TaskId 'TASK-CONC-1' `
+            -DashboardPath $dash -DataDir $dataDir `
+            -MockOutputJson $json -MockExitCode 0
+        return [int]$LASTEXITCODE
+    } -ArgumentList $pwshExe, $singleScript, $dashConc, (Split-Path -Parent $dashConc), $mock1Json
+
+    $job2 = Start-Job -ScriptBlock {
+        param($exe, $script, $dash, $dataDir, $json)
+        $out = & $exe -NoProfile -File $script -Task '동시 워커 2' -Prompt '테스트2' `
+            -OrchestrationRunId 'RUN-CONCURRENT' -TaskId 'TASK-CONC-2' `
+            -DashboardPath $dash -DataDir $dataDir `
+            -MockOutputJson $json -MockExitCode 0
+        return [int]$LASTEXITCODE
+    } -ArgumentList $pwshExe, $singleScript, $dashConc, (Split-Path -Parent $dashConc), $mock2Json
+
+    $null = Wait-Job $job1, $job2
+    $out1 = Receive-Job -Job $job1
+    $out2 = Receive-Job -Job $job2
+    $exit1 = [int]($out1 | Select-Object -Last 1)
+    $exit2 = [int]($out2 | Select-Object -Last 1)
+    Remove-Job -Job $job1, $job2 -Force
+
+    Assert-Test '동시 워커 1 정상 종료 (ExitCode 0)' ($exit1 -eq 0 -and $job1.State -eq 'Completed')
+    Assert-Test '동시 워커 2 정상 종료 (ExitCode 0)' ($exit2 -eq 0 -and $job2.State -eq 'Completed')
+
+    $dConc = Get-Content -Raw -LiteralPath $dashConc | ConvertFrom-Json
+    # Verify NO LOST UPDATE: both 200 and 350 must be reflected = 550!
+    Assert-Test '동시 실행 후 Lost Update 없이 summary.tokens 합산 (200 + 350 = 550)' ($dConc.summary.tokens -eq 550) "실제 값: $($dConc.summary.tokens)"
+    Assert-Test '동시 실행 후 summary.requests 합산 (1 + 1 = 2)' ($dConc.summary.requests -eq 2) "실제 값: $($dConc.summary.requests)"
+    Assert-Test '동시 실행 후 summary.completed 합산 (2)' ($dConc.summary.completed -eq 2) "실제 값: $($dConc.summary.completed)"
+    Assert-Test '동시 실행 후 jobs 건수 2건 모두 포함' ($dConc.jobs.Count -eq 2) "실제 건수: $($dConc.jobs.Count)"
+    Assert-Test 'processedKeys에 TASK-CONC-1 포함' (@($dConc.processedKeys) -contains 'RUN-CONCURRENT+TASK-CONC-1')
+    Assert-Test 'processedKeys에 TASK-CONC-2 포함' (@($dConc.processedKeys) -contains 'RUN-CONCURRENT+TASK-CONC-2')
+
+    # ---------------------------------------------------------------
+    # 13. 수정 및 생성된 모든 PowerShell 스크립트 문법(Lint) 검사
+    # ---------------------------------------------------------------
+    Write-Host ''
+    Write-Host '13. 수정 및 생성된 모든 PowerShell 스크립트 문법(Lint) 검사' -ForegroundColor Cyan
     $filesToLint = @(
         (Join-Path $repoRoot 'run-parallel-workers.ps1'),
         (Join-Path $repoRoot 'run-gemini-worker.ps1'),

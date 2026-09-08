@@ -202,6 +202,11 @@ $liveWorkerPath = if ($isParallelWorker) {
 } else {
   Join-Path $dataDir 'live-worker.json'
 }
+$attemptStatePath = if ($isParallelWorker) {
+  $attemptsDir = Join-Path $StateRoot 'attempts'
+  New-Item -ItemType Directory -Path $attemptsDir -Force | Out-Null
+  Join-Path $attemptsDir "$workerKey.attempt-$Attempt.json"
+} else { $null }
 $liveWorkerRootPath = if ($isParallelWorker) { $null } else { Join-Path $PSScriptRoot 'live-worker.json' }
 $eventPath = if ($isParallelWorker) {
   $eventsDir = Join-Path $StateRoot 'events'
@@ -290,6 +295,7 @@ function Add-WorkerLog {
       timestamp = (Get-Date).ToString('o')
       runId = if ($OrchestrationRunId) { $OrchestrationRunId } else { $workerRunId }
       taskId = $workerKey
+      attempt = $Attempt
       type = $Type
       message = $clean
     }
@@ -345,6 +351,9 @@ function Sync-LiveWorker {
   }
 
   Write-AtomicJson -Path $liveWorkerPath -Data $liveObj
+  if ($attemptStatePath) {
+    try { Write-AtomicJson -Path $attemptStatePath -Data $liveObj } catch {}
+  }
   try {
     if (-not $liveWorkerRootPath) { return }
     Write-AtomicJson -Path $liveWorkerRootPath -Data $liveObj
@@ -548,6 +557,7 @@ if ($eventPath) {
     timestamp = (Get-Date).ToString('o')
     runId     = if ($OrchestrationRunId) { $OrchestrationRunId } else { $workerRunId }
     taskId    = $workerKey
+    attempt   = $Attempt
     type      = 'confirmed_usage'
     status    = $finalStatus
     usage     = [pscustomobject]@{
@@ -574,136 +584,231 @@ if ($isParallelWorker) {
   exit $exitCode
 }
 
-# 2. EXACTLY ONCE update to dashboard.json
-$data = $null
-if (Test-Path -LiteralPath $dashboardPath) {
+# 2. EXACTLY ONCE update to dashboard.json enclosed by deterministic cross-process lock
+$normDashPath = [System.IO.Path]::GetFullPath($dashboardPath).ToLowerInvariant()
+$normBytes = [System.Text.Encoding]::UTF8.GetBytes($normDashPath)
+$sha = [System.Security.Cryptography.SHA256]::Create()
+$dashHash = try {
+  [System.BitConverter]::ToString($sha.ComputeHash($normBytes)) -replace '-', ''
+} finally {
+  $sha.Dispose()
+}
+$lockName = "Local\CodexDashboardLock_$dashHash"
+
+$mutex = New-Object System.Threading.Mutex($false, $lockName)
+$hasLock = $false
+try {
   try {
-    $data = Get-Content -Raw -LiteralPath $dashboardPath | ConvertFrom-Json
-  } catch {
-    $data = $null
+    $hasLock = $mutex.WaitOne(60000)
+  } catch [System.Threading.AbandonedMutexException] {
+    $hasLock = $true
   }
-}
-
-# Fallback/Initial layout if dashboard data is missing or corrupt
-if (-not $data) {
-  $data = [pscustomobject]@{
-    updatedAt     = (Get-Date).ToString('o')
-    summary       = [pscustomobject]@{
-      tokens           = 0
-      requests         = 0
-      completed        = 0
-      failed           = 0
-      averageLatencyMs = 0
-    }
-    tokens        = [pscustomobject]@{
-      prompt     = 0
-      candidates = 0
-      cached     = 0
-      thoughts   = 0
-    }
-    codexDaily    = @()
-    jobs          = @()
-    processedKeys = @()
+  if (-not $hasLock) {
+    throw "대시보드 잠금 획득 타임아웃 ($lockName)"
   }
-}
 
-$effectiveRunId = if ($OrchestrationRunId) { $OrchestrationRunId } else { $workerRunId }
-$effectiveTaskId = $workerKey
-$processingKey = "$effectiveRunId+$effectiveTaskId"
-$colonKey = "$($effectiveRunId):$($effectiveTaskId)"
+  $data = $null
+  if (Test-Path -LiteralPath $dashboardPath) {
+    try {
+      $data = Get-Content -Raw -LiteralPath $dashboardPath | ConvertFrom-Json
+    } catch {
+      $data = $null
+    }
+  }
 
-$processedKeys = if ($data.PSObject.Properties.Name -contains 'processedKeys' -and $data.processedKeys) {
-  @($data.processedKeys | ForEach-Object { [string]$_ })
-} else {
-  @()
-}
+  # Fallback/Initial layout if dashboard data is missing or corrupt
+  if (-not $data) {
+    $data = [pscustomobject]@{
+      updatedAt      = (Get-Date).ToString('o')
+      summary        = [pscustomobject]@{
+        tokens           = 0
+        requests         = 0
+        completed        = 0
+        failed           = 0
+        averageLatencyMs = 0
+      }
+      tokens         = [pscustomobject]@{
+        prompt     = 0
+        candidates = 0
+        cached     = 0
+        thoughts   = 0
+      }
+      codexDaily     = @()
+      jobs           = @()
+      processedKeys  = @()
+      processedTasks = [pscustomobject]@{}
+    }
+  }
 
-$alreadyProcessed = ($processedKeys -contains $processingKey) -or ($processedKeys -contains $colonKey)
-if (-not $alreadyProcessed -and $data.PSObject.Properties.Name -contains 'jobs' -and $data.jobs) {
+  if (-not ($data.PSObject.Properties.Name -contains 'summary') -or -not $data.summary) {
+    $data | Add-Member -NotePropertyName 'summary' -NotePropertyValue ([pscustomobject]@{
+      tokens = 0; requests = 0; completed = 0; failed = 0; averageLatencyMs = 0
+    }) -Force
+  }
+  if (-not ($data.PSObject.Properties.Name -contains 'tokens') -or -not $data.tokens) {
+    $data | Add-Member -NotePropertyName 'tokens' -NotePropertyValue ([pscustomobject]@{
+      prompt = 0; candidates = 0; cached = 0; thoughts = 0
+    }) -Force
+  }
+  if (-not ($data.PSObject.Properties.Name -contains 'jobs') -or -not $data.jobs) {
+    $data | Add-Member -NotePropertyName 'jobs' -NotePropertyValue @() -Force
+  }
+  if (-not ($data.PSObject.Properties.Name -contains 'processedKeys') -or -not $data.processedKeys) {
+    $data | Add-Member -NotePropertyName 'processedKeys' -NotePropertyValue @() -Force
+  }
+  if (-not ($data.PSObject.Properties.Name -contains 'processedTasks') -or -not $data.processedTasks) {
+    $data | Add-Member -NotePropertyName 'processedTasks' -NotePropertyValue ([pscustomobject]@{}) -Force
+  }
+
+  $effectiveRunId = if ($OrchestrationRunId) { $OrchestrationRunId } else { $workerRunId }
+  $effectiveTaskId = $workerKey
+  $attemptNum = if ($Attempt) { [int]$Attempt } else { 1 }
+
+  $usageKey = "$effectiveRunId+$effectiveTaskId+$attemptNum"
+  $colonUsageKey = "$($effectiveRunId):$($effectiveTaskId):$attemptNum"
+  $taskKey = "$effectiveRunId+$effectiveTaskId"
+  $colonTaskKey = "$($effectiveRunId):$($effectiveTaskId)"
+
+  $existingKeys = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+  foreach ($k in @($data.processedKeys)) {
+    if (-not [string]::IsNullOrWhiteSpace($k)) {
+      [void]$existingKeys.Add([string]$k)
+    }
+  }
+
+  # Check if usage already processed
+  $usageAlreadyProcessed = $existingKeys.Contains($usageKey) -or $existingKeys.Contains($colonUsageKey)
+  if (-not $usageAlreadyProcessed -and ($existingKeys.Contains($taskKey) -or $existingKeys.Contains($colonTaskKey))) {
+    $hasAttemptKey = $false
+    foreach ($k in $existingKeys) {
+      if ($k.StartsWith("$taskKey+") -or $k.StartsWith($colonTaskKey + ':')) {
+        $hasAttemptKey = $true
+        break
+      }
+    }
+    if (-not $hasAttemptKey) {
+      $usageAlreadyProcessed = $true
+    }
+  }
+
+  if (-not $usageAlreadyProcessed) {
+    $prevRequests = [int64]$data.summary.requests
+    $totalRequests = $prevRequests + $requests
+    $totalLatency = ([int64]$data.summary.averageLatencyMs * $prevRequests) + $latency
+
+    $data.summary.tokens = [int64]$data.summary.tokens + $runTokens
+    $data.summary.requests = $totalRequests
+    $data.summary.averageLatencyMs = if ($totalRequests -gt 0) { [math]::Round($totalLatency / $totalRequests) } else { 0 }
+
+    $data.tokens.prompt = [int64]$data.tokens.prompt + $promptTokens
+    $data.tokens.candidates = [int64]$data.tokens.candidates + $candidateTokens
+    $data.tokens.cached = [int64]$data.tokens.cached + $cachedTokens
+    $data.tokens.thoughts = [int64]$data.tokens.thoughts + $thoughtTokens
+  }
+
+  # Logical task count deduplication (counted only once per runId+taskId)
+  $targetLogicalStatus = if ($isSuccess) { 'completed' } else { 'failed' }
+  $prevCountStatus = $null
+  if ($data.processedTasks.PSObject.Properties.Name -contains $taskKey) {
+    $prevCountStatus = [string]$data.processedTasks.$taskKey
+  } elseif ($existingKeys.Contains($taskKey) -or $existingKeys.Contains($colonTaskKey)) {
+    $hasAttemptKey = $false
+    foreach ($k in $existingKeys) {
+      if ($k.StartsWith("$taskKey+") -or $k.StartsWith($colonTaskKey + ':')) {
+        $hasAttemptKey = $true
+        break
+      }
+    }
+    if (-not $hasAttemptKey) {
+      $prevCountStatus = 'legacy_counted'
+      $data.processedTasks | Add-Member -NotePropertyName $taskKey -NotePropertyValue 'legacy_counted' -Force
+    }
+  }
+
+  if (-not $prevCountStatus) {
+    if ($targetLogicalStatus -eq 'completed') {
+      $data.summary.completed = [int64]$data.summary.completed + 1
+    } else {
+      $data.summary.failed = [int64]$data.summary.failed + 1
+    }
+    $data.processedTasks | Add-Member -NotePropertyName $taskKey -NotePropertyValue $targetLogicalStatus -Force
+  } elseif ($prevCountStatus -eq 'failed' -and $targetLogicalStatus -eq 'completed') {
+    $data.summary.failed = [math]::Max(0, [int64]$data.summary.failed - 1)
+    $data.summary.completed = [int64]$data.summary.completed + 1
+    $data.processedTasks.$taskKey = 'completed'
+  }
+
+  # Prepare detailed Job Object
+  $jobModel = if ($modelNames.Count -gt 0) { ($modelNames | Select-Object -Unique) -join ', ' } else { $targetModel }
+  $jobStatus = if ($isSuccess) { '완료' } else { '실패' }
+
+  $jobStats = [pscustomobject]@{
+    prompt     = $promptTokens
+    candidates = $candidateTokens
+    cached     = $cachedTokens
+    thoughts   = $thoughtTokens
+    requests   = $requests
+    latency    = $latency
+  }
+
+  $snippet = ""
+  if ($isSuccess) {
+    $snippet = $parsedResponse
+    if ($snippet.Length -gt 800) {
+      $snippet = $snippet.Substring(0, 770) + "..."
+    }
+  } else {
+    if ($errorMessage) {
+      $snippet = "에러: $errorMessage"
+    } else {
+      $snippet = "알 수 없는 오류 (Exit Code: $exitCode)"
+    }
+  }
+
+  $existingJob = $null
   foreach ($j in @($data.jobs)) {
     if ($j.PSObject.Properties.Name -contains 'runId' -and $j.PSObject.Properties.Name -contains 'taskId') {
       if ($j.runId -eq $effectiveRunId -and $j.taskId -eq $effectiveTaskId) {
-        $alreadyProcessed = $true
+        $existingJob = $j
         break
       }
     }
   }
-}
 
-if ($alreadyProcessed) {
-  if ($parsedResponse) {
-    $parsedResponse
-  } elseif ($errorMessage) {
-    Write-Error $errorMessage
-  }
-  exit $exitCode
-}
-
-$completedCount = if ($isSuccess) { 1 } else { 0 }
-$failedCount = if ($isSuccess) { 0 } else { 1 }
-
-$prevRequests = [int64]$data.summary.requests
-$totalRequests = $prevRequests + $requests
-$totalLatency = ([int64]$data.summary.averageLatencyMs * $prevRequests) + $latency
-
-$data.updatedAt = (Get-Date).ToString('o')
-# summary.tokens: 캐시 제외 실질 토큰(total_tokens) 분리 누적
-$data.summary.tokens = [int64]$data.summary.tokens + $runTokens
-$data.summary.requests = $totalRequests
-$data.summary.completed = [int64]$data.summary.completed + $completedCount
-$data.summary.failed = [int64]$data.summary.failed + $failedCount
-$data.summary.averageLatencyMs = if ($totalRequests -gt 0) { [math]::Round($totalLatency / $totalRequests) } else { 0 }
-
-$data.tokens.prompt = [int64]$data.tokens.prompt + $promptTokens
-$data.tokens.candidates = [int64]$data.tokens.candidates + $candidateTokens
-# tokens.cached: 캐시 토큰(cache_read_tokens) 별도 분리 누적
-$data.tokens.cached = [int64]$data.tokens.cached + $cachedTokens
-$data.tokens.thoughts = [int64]$data.tokens.thoughts + $thoughtTokens
-
-# Prepare detailed Job Object
-$jobModel = if ($modelNames.Count -gt 0) { ($modelNames | Select-Object -Unique) -join ', ' } else { $targetModel }
-$jobStatus = if ($isSuccess) { '완료' } else { '실패' }
-
-$jobStats = [pscustomobject]@{
-  prompt     = $promptTokens
-  candidates = $candidateTokens
-  cached     = $cachedTokens
-  thoughts   = $thoughtTokens
-  requests   = $requests
-  latency    = $latency
-}
-
-$snippet = ""
-if ($isSuccess) {
-  $snippet = $parsedResponse
-  if ($snippet.Length -gt 800) {
-    $snippet = $snippet.Substring(0, 770) + "..."
-  }
-} else {
-  if ($errorMessage) {
-    $snippet = "에러: $errorMessage"
+  if ($existingJob) {
+    $existingJob.status = $jobStatus
+    $existingJob.tokens = $runTokens.ToString('N0')
+    $existingJob.duration = "${elapsed}초"
+    $existingJob.snippet = $snippet
+    $existingJob.stats = $jobStats
   } else {
-    $snippet = "알 수 없는 오류 (Exit Code: $exitCode)"
+    $job = [pscustomobject]@{
+      name      = $Task
+      model     = $jobModel
+      status    = $jobStatus
+      tokens    = $runTokens.ToString('N0')
+      duration  = "${elapsed}초"
+      time      = (Get-Date).ToString('tt h:mm')
+      timestamp = (Get-Date).ToString('o')
+      snippet   = $snippet
+      runId     = $effectiveRunId
+      taskId    = $effectiveTaskId
+      stats     = $jobStats
+    }
+    $data.jobs = @($job) + @($data.jobs) | Select-Object -First 50
+  }
+
+  $data.updatedAt = (Get-Date).ToString('o')
+  $data.processedKeys = @($data.processedKeys) + @($usageKey, $taskKey) | Select-Object -Unique
+  Write-AtomicJson -Path $dashboardPath -Data $data
+} finally {
+  if ($hasLock) {
+    try { $mutex.ReleaseMutex() } catch {}
+  }
+  if ($mutex) {
+    $mutex.Dispose()
   }
 }
-
-$job = [pscustomobject]@{
-  name      = $Task
-  model     = $jobModel
-  status    = $jobStatus
-  tokens    = $runTokens.ToString('N0')
-  duration  = "${elapsed}초"
-  time      = (Get-Date).ToString('tt h:mm')
-  timestamp = (Get-Date).ToString('o')
-  snippet   = $snippet
-  runId     = $effectiveRunId
-  taskId    = $effectiveTaskId
-  stats     = $jobStats
-}
-
-$data.jobs = @($job) + @($data.jobs) | Select-Object -First 50
-$data.processedKeys = @($processedKeys) + @($processingKey) | Select-Object -Unique
-Write-AtomicJson -Path $dashboardPath -Data $data
 
 if ($parsedResponse) {
   $parsedResponse
