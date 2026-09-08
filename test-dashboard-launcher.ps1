@@ -208,6 +208,7 @@ try {
     Assert-Test '자손 프로세스 PID 수집' ($launcherContent -match 'Get-CimInstance Win32_Process' -and $launcherContent -match 'ParentProcessId')
     Assert-Test '자식부터 fallback 종료' ($launcherContent -match '\$treeIds \| Select-Object -Reverse')
     Assert-Test '종료 후 전체 PID와 포트 재확인' ($launcherContent -match '\$aliveIds\.Count -gt 0' -and $launcherContent -match 'Get-NetTCPConnection -LocalPort \$Port')
+    Assert-Test '부모 선종료 시 cleanup 조기 반환 없음' ($launcherContent -notmatch 'if \(\$Process\.HasExited\) \{ return \}')
 
     # 11. Finding dashboard from repo root and install root
     Write-Host ''

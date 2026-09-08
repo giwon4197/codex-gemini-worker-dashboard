@@ -99,7 +99,6 @@ function Stop-ServerProcess($Process) {
         if ($MockProcessMode) { Record-Action 'PROCESS_TREE_STOPPED' }
         return
     }
-    if ($Process.HasExited) { return }
     $treeIds = [Collections.Generic.List[int]]::new()
     try {
         $allProcesses = @(Get-CimInstance Win32_Process -ErrorAction Stop)
