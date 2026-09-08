@@ -7,7 +7,8 @@ param(
   [string]$Timeout = '24h',
   [string]$OrchestrationRunId = '',
   [string]$TaskId = '',
-  [string]$StateRoot = ''
+  [string]$StateRoot = '',
+  [string]$BaseCommit = ''
 )
 
 $antigravity = Join-Path $env:LOCALAPPDATA 'agy\bin\agy.exe'
@@ -143,6 +144,8 @@ $eventPath = if ($isParallelWorker) {
   New-Item -ItemType Directory -Path $eventsDir -Force | Out-Null
   Join-Path $eventsDir "$workerKey.ndjson"
 } else { $null }
+$runnerProcessId = $PID
+$agentProcessId = $null
 
 function Write-AtomicJson {
   param(
@@ -250,6 +253,9 @@ function Sync-LiveWorker {
   $liveObj = [pscustomobject]@{
     runId          = if ($OrchestrationRunId) { $OrchestrationRunId } else { $workerRunId }
     taskId         = $workerKey
+    baseCommit     = if ($BaseCommit) { $BaseCommit } else { $null }
+    runnerProcessId = $runnerProcessId
+    agentProcessId = $agentProcessId
     task           = $Task
     model          = if ($modelNames.Count -gt 0) { ($modelNames | Select-Object -Unique) -join ', ' } else { $targetModel }
     status         = $Status
@@ -296,6 +302,8 @@ $lastHeartbeat = [System.Diagnostics.Stopwatch]::StartNew()
 
 try {
   $runner.Start($antigravity, [string[]]$cliArgs, $Workspace)
+  $agentProcessId = $runner.Process.Id
+  Sync-LiveWorker -Status 'running'
 
   while (-not $runner.Process.HasExited -or -not $runner.Lines.IsEmpty) {
     $hasData = $false

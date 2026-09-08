@@ -3,12 +3,18 @@
     "id": "TASK-001",
     "name": "첫 번째 독립 작업",
     "prompt": "docs/worker-a.md 파일을 만들고 이 작업이 worker A에서 수행되었다고 한 줄로 기록하세요. 다른 파일은 수정하지 마세요.",
-    "tier": "fast"
+    "tier": "fast",
+    "allowed_files": ["docs/worker-a.md"],
+    "test_commands": ["if (-not (Test-Path -LiteralPath 'docs/worker-a.md')) { exit 1 }"],
+    "timeout_seconds": 300
   },
   {
     "id": "TASK-002",
     "name": "두 번째 독립 작업",
     "prompt": "docs/worker-b.md 파일을 만들고 이 작업이 worker B에서 수행되었다고 한 줄로 기록하세요. 다른 파일은 수정하지 마세요.",
-    "tier": "fast"
+    "tier": "fast",
+    "allowed_files": ["docs/worker-b.md"],
+    "test_commands": ["if (-not (Test-Path -LiteralPath 'docs/worker-b.md')) { exit 1 }"],
+    "timeout_seconds": 300
   }
 ]

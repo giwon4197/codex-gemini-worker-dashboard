@@ -119,15 +119,29 @@ param(
   [Parameter(Mandatory=$true,Position=0)][string]$TasksFile,
   [string]$Repository='',
   [ValidateRange(1,2)][int]$MaxWorkers=2,
+  [ValidateRange(1,86400)][int]$WorkerTimeoutSeconds=3600,
   [string]$Timeout='24h',
   [switch]$CleanupWorktrees
 )
 $root = '__INSTALL_ROOT__'
 $repo = if ([string]::IsNullOrWhiteSpace($Repository)) { (Get-Location).Path } else { (Resolve-Path -LiteralPath $Repository).Path }
-& (Join-Path $root 'run-parallel-workers.ps1') -TasksFile $TasksFile -Repository $repo -MaxWorkers $MaxWorkers -Timeout $Timeout -CleanupWorktrees:$CleanupWorktrees
+& (Join-Path $root 'run-parallel-workers.ps1') -TasksFile $TasksFile -Repository $repo -MaxWorkers $MaxWorkers -WorkerTimeoutSeconds $WorkerTimeoutSeconds -Timeout $Timeout -CleanupWorktrees:$CleanupWorktrees
 exit $LASTEXITCODE
 '@.Replace('__INSTALL_ROOT__', $escapedRoot)
     Set-Content -LiteralPath (Join-Path $launcherDir 'parallel-gemini-workers.ps1') -Value $parallelLauncher -Encoding utf8
+
+    $stopParallelLauncher = @'
+[CmdletBinding()]
+param(
+  [Parameter(Mandatory=$true,Position=0)][string]$RunId,
+  [string]$Repository=''
+)
+$root = '__INSTALL_ROOT__'
+$repo = if ([string]::IsNullOrWhiteSpace($Repository)) { (Get-Location).Path } else { (Resolve-Path -LiteralPath $Repository).Path }
+& (Join-Path $root 'stop-parallel-run.ps1') -RunId $RunId -Repository $repo
+exit $LASTEXITCODE
+'@.Replace('__INSTALL_ROOT__', $escapedRoot)
+    Set-Content -LiteralPath (Join-Path $launcherDir 'stop-parallel-run.ps1') -Value $stopParallelLauncher -Encoding utf8
 
     $dashboardLauncher = @'
 [CmdletBinding()]
@@ -160,9 +174,14 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0worker-dashboard.p
 @echo off
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0parallel-gemini-workers.ps1" %*
 '@
+    $stopParallelCmd = @'
+@echo off
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0stop-parallel-run.ps1" %*
+'@
     Set-Content -LiteralPath (Join-Path $launcherDir 'gemini-worker.cmd') -Value $workerCmd -Encoding ascii
     Set-Content -LiteralPath (Join-Path $launcherDir 'worker-dashboard.cmd') -Value $dashboardCmd -Encoding ascii
     Set-Content -LiteralPath (Join-Path $launcherDir 'parallel-gemini-workers.cmd') -Value $parallelCmd -Encoding ascii
+    Set-Content -LiteralPath (Join-Path $launcherDir 'stop-parallel-run.cmd') -Value $stopParallelCmd -Encoding ascii
     Add-UserPath $launcherDir
 
     Write-Host "설치 완료: $InstallRoot" -ForegroundColor Green

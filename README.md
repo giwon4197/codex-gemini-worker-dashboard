@@ -51,6 +51,30 @@ parallel-gemini-workers -TasksFile .\parallel-tasks.json -MaxWorkers 2
 `agent/<run-id>/<task-id>` 브랜치와 독립 worktree를 사용합니다. 기본적으로 검토를 위해 worktree를 유지합니다.
 검증 후 즉시 worktree를 제거하려면 `-CleanupWorktrees`를 지정하세요.
 
+각 task에는 수정 허용 범위와 오케스트레이터가 직접 재실행할 검증 명령을 지정합니다.
+
+```json
+{
+  "id": "TASK-001",
+  "name": "독립 작업",
+  "prompt": "docs/worker-a.md를 생성하세요.",
+  "tier": "fast",
+  "allowed_files": ["docs/worker-a.md"],
+  "test_commands": ["if (-not (Test-Path 'docs/worker-a.md')) { exit 1 }"],
+  "timeout_seconds": 300
+}
+```
+
+허용 범위를 벗어난 변경은 `POLICY_VIOLATION`, 검증 명령 실패는 `TEST_FAILED`, 제한 시간 초과는
+`TIMED_OUT`으로 기록됩니다. 실행 취소는 별도 PowerShell에서 다음처럼 요청합니다.
+
+```powershell
+stop-parallel-run -RunId <run-id> -Repository C:\path\to\project
+```
+
+다음 실행을 시작할 때 중단된 run과 고아 worktree를 자동 점검합니다. 변경이 없는 고아 worktree만 정리하고,
+수정 사항이 있는 worktree는 데이터 손실 방지를 위해 보존합니다.
+
 | 등급 | 모델 | 권장 용도 |
 |---|---|---|
 | `fast` | Gemini 3.8 Flash Low | 문구 수정, 간단한 확인 |
