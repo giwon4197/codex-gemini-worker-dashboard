@@ -58,6 +58,34 @@ export interface CodexDailyEntry {
   reasoningOutputTokens?: number;
 }
 
+// Codex Rate Limits & Account Usage Type Contract
+export interface CodexRateLimitWindow {
+  usedPercent?: number | null;
+  remainingPercent?: number | null;
+  windowMinutes?: number | null;
+  resetsAt?: string | number | null;
+}
+
+export interface CodexCreditsInfo {
+  balance?: number | string | null;
+  hasCredits?: boolean | null;
+  unlimited?: boolean | null;
+}
+
+export interface CodexRateLimits {
+  primary?: CodexRateLimitWindow | null;
+  secondary?: CodexRateLimitWindow | null;
+  credits?: CodexCreditsInfo | null;
+  planType?: string | null;
+}
+
+export interface CodexAccountUsageState {
+  status: 'idle' | 'loaded' | 'unavailable' | 'error';
+  rateLimits: CodexRateLimits | null;
+  errorMessage?: string | null;
+  lastSyncedAt?: string | null;
+}
+
 export interface CellData {
   date: string;
   dayOfWeek: number;
@@ -597,6 +625,126 @@ export const TIERS: Record<WorkerTier, TierInfo> = {
   },
 };
 
+// ========================================================
+// Codex Account Usage & Rate Limits Extraction Helpers
+// ========================================================
+
+function normalizeRateLimitWindow(raw: unknown): CodexRateLimitWindow | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const obj = raw as Record<string, unknown>;
+
+  const getNum = (...keys: string[]): number | null => {
+    for (const k of keys) {
+      const v = obj[k];
+      if (typeof v === 'number' && Number.isFinite(v)) return v;
+      if (typeof v === 'string' && v.trim() !== '') {
+        const n = Number(v);
+        if (Number.isFinite(n)) return n;
+      }
+    }
+    return null;
+  };
+
+  let used = getNum('usedPercent', 'used_percent', 'usedRatio', 'used_ratio');
+  let remaining = getNum('remainingPercent', 'remaining_percent', 'remainingRatio', 'remaining_ratio');
+
+  if (used !== null && remaining === null) {
+    remaining = Math.max(0, Math.min(100, 100 - used));
+  } else if (remaining !== null && used === null) {
+    used = Math.max(0, Math.min(100, 100 - remaining));
+  }
+
+  const windowMinutes = getNum('windowMinutes', 'window_minutes', 'windowMins', 'window');
+
+  let resetsAt: string | null = null;
+  const rawResets = obj.resetsAt ?? obj.resets_at ?? obj.resetAt ?? obj.reset_at;
+  if (typeof rawResets === 'string' && rawResets.trim() !== '') {
+    resetsAt = rawResets.trim();
+  } else if (typeof rawResets === 'number' && Number.isFinite(rawResets)) {
+    const ms = rawResets < 10000000000 ? rawResets * 1000 : rawResets;
+    resetsAt = new Date(ms).toISOString();
+  }
+
+  if (used === null && remaining === null && windowMinutes === null && resetsAt === null) {
+    return null;
+  }
+
+  return {
+    usedPercent: used,
+    remainingPercent: remaining,
+    windowMinutes,
+    resetsAt,
+  };
+}
+
+function normalizeCredits(raw: unknown): CodexCreditsInfo | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const obj = raw as Record<string, unknown>;
+
+  const rawBalance = obj.balance ?? obj.creditsBalance ?? obj.credits_balance;
+  let balance: number | string | null = null;
+  if (typeof rawBalance === 'number' && Number.isFinite(rawBalance)) {
+    balance = rawBalance;
+  } else if (typeof rawBalance === 'string' && rawBalance.trim() !== '') {
+    balance = rawBalance.trim();
+  }
+
+  const hasCredits = typeof obj.hasCredits === 'boolean'
+    ? obj.hasCredits
+    : typeof obj.has_credits === 'boolean'
+    ? obj.has_credits
+    : null;
+
+  const unlimited = typeof obj.unlimited === 'boolean'
+    ? obj.unlimited
+    : typeof obj.is_unlimited === 'boolean'
+    ? obj.is_unlimited
+    : null;
+
+  if (balance === null && hasCredits === null && unlimited === null) {
+    return null;
+  }
+
+  return { balance, hasCredits, unlimited };
+}
+
+function normalizePlanType(raw: unknown): string | null {
+  if (typeof raw === 'string' && raw.trim() !== '') return raw.trim();
+  return null;
+}
+
+function extractCodexAccountUsage(json: unknown): CodexRateLimits | null {
+  if (!json || typeof json !== 'object' || Array.isArray(json)) {
+    return null;
+  }
+  const obj = json as Record<string, unknown>;
+  const rawRateLimits = obj.rateLimits ?? obj.rate_limits;
+
+  if (rawRateLimits === null) {
+    return null;
+  }
+
+  const rlObj = (rawRateLimits && typeof rawRateLimits === 'object')
+    ? (rawRateLimits as Record<string, unknown>)
+    : null;
+
+  const primary = normalizeRateLimitWindow(rlObj?.primary ?? obj.primaryRateLimit ?? obj.primary_rate_limit);
+  const secondary = normalizeRateLimitWindow(rlObj?.secondary ?? obj.secondaryRateLimit ?? obj.secondary_rate_limit);
+  const credits = normalizeCredits(rlObj?.credits ?? obj.credits);
+  const planType = normalizePlanType(rlObj?.planType ?? rlObj?.plan_type ?? obj.planType ?? obj.plan_type);
+
+  if (!primary && !secondary && !credits && !planType && !rawRateLimits) {
+    return null;
+  }
+
+  return {
+    primary,
+    secondary,
+    credits,
+    planType,
+  };
+}
+
 export default function Home() {
   const [data, setData] = useState<DashboardData>(initialData);
   const [searchTerm, setSearchTerm] = useState('');
@@ -626,6 +774,14 @@ export default function Home() {
   });
   const latestCodexDailyRef = useRef<CodexDailyEntry[] | null>(null);
 
+  // Codex Rate Limits & Account Usage State
+  const [codexAccountUsage, setCodexAccountUsage] = useState<CodexAccountUsageState>({
+    status: 'idle',
+    rateLimits: null,
+    errorMessage: null,
+    lastSyncedAt: null,
+  });
+
   const formatSyncTime = (isoString: string | null) => {
     if (!isoString) return '';
     try {
@@ -651,6 +807,18 @@ export default function Home() {
     return Array.from(map.values()).sort((a, b) => a.date.localeCompare(b.date));
   };
 
+  const applyCodexUsageError = (errMsg: string) => {
+    setCodexSyncStatus(prev => ({
+      ...prev,
+      error: errMsg,
+    }));
+    setCodexAccountUsage(prev => ({
+      ...prev,
+      status: 'error',
+      errorMessage: errMsg,
+    }));
+  };
+
   const fetchCodexUsage = async () => {
     try {
       const res = await fetch(`/api/codex-usage?t=${Date.now()}`);
@@ -658,7 +826,7 @@ export default function Home() {
         throw new Error(`API 응답 오류 (${res.status})`);
       }
       const json = (await res.json()) as
-        | { codexDaily?: CodexDailyEntry[]; data?: CodexDailyEntry[]; lastSyncedAt?: string }
+        | { codexDaily?: CodexDailyEntry[]; data?: CodexDailyEntry[]; lastSyncedAt?: string; rateLimits?: unknown; rate_limits?: unknown; credits?: unknown; planType?: unknown }
         | CodexDailyEntry[];
 
       const entries: CodexDailyEntry[] = Array.isArray(json)
@@ -666,6 +834,15 @@ export default function Home() {
         : (json?.codexDaily || json?.data || []);
 
       const lastSyncedAt = (!Array.isArray(json) && json?.lastSyncedAt) ? json.lastSyncedAt : new Date().toISOString();
+
+      // Parse and update Codex account usage state
+      const accountLimits = extractCodexAccountUsage(json);
+      setCodexAccountUsage({
+        status: accountLimits ? 'loaded' : 'unavailable',
+        rateLimits: accountLimits,
+        errorMessage: null,
+        lastSyncedAt,
+      });
 
       if (entries.length > 0) {
         latestCodexDailyRef.current = entries;
@@ -688,10 +865,7 @@ export default function Home() {
       }
     } catch (err: unknown) {
       console.error('Failed to fetch /api/codex-usage:', err);
-      setCodexSyncStatus(prev => ({
-        ...prev,
-        error: err instanceof Error ? err.message : 'Codex 사용량 동기화 지연',
-      }));
+      applyCodexUsageError(err instanceof Error ? err.message : 'Codex 사용량 동기화 지연');
     }
   };
 
@@ -1351,6 +1525,13 @@ export default function Home() {
             ))}
           </section>
         </div>
+
+        {/* CODEX ACCOUNT RATE LIMITS & USAGE CARD */}
+        <CodexAccountUsageCard
+          usageState={codexAccountUsage}
+          onRefresh={() => { void fetchCodexUsage(); }}
+          isRefreshing={isRefreshing}
+        />
 
         {/* 1. TOP STATS: 3 CIRCULAR DONUT CHARTS (Codex active, Gemini active, Cumulative savings) */}
         <section className="grid gap-5 grid-cols-1 md:grid-cols-3" aria-label="3대 누적 통계 원형 그래프">
@@ -2076,6 +2257,447 @@ export default function Home() {
 
       </div>
     </main>
+  );
+}
+
+// ==========================================
+// Codex Account Usage & Rate Limits Card
+// ==========================================
+
+function formatWindowDescription(windowMinutes: number | null | undefined): string {
+  if (windowMinutes === null || windowMinutes === undefined || !Number.isFinite(windowMinutes) || windowMinutes <= 0) {
+    return '구간 확인 불가';
+  }
+  const m = Math.round(windowMinutes);
+  if (m === 60) return '1시간 (60분) 기준';
+  if (m === 180) return '3시간 (180분) 기준';
+  if (m === 300) return '5시간 (300분) 기준';
+  if (m === 1440) return '24시간 (1일) 기준';
+  if (m === 10080) return '7일 (1주일) 기준';
+
+  if (m < 60) {
+    return `${m}분 기준`;
+  }
+  if (m < 1440) {
+    const hours = Math.floor(m / 60);
+    const rem = m % 60;
+    return rem === 0 ? `${hours}시간 (${m}분) 기준` : `${hours}시간 ${rem}분 기준`;
+  }
+  const days = Math.floor(m / 1440);
+  const remHours = Math.floor((m % 1440) / 60);
+  return remHours === 0 ? `${days}일 (${m}분) 기준` : `${days}일 ${remHours}시간 기준`;
+}
+
+function formatResetTime(resetsAt: string | number | null | undefined): string {
+  if (!resetsAt) return '확인 불가';
+  const d = new Date(resetsAt);
+  if (isNaN(d.getTime())) {
+    return '확인 불가 (잘못된 날짜)';
+  }
+
+  try {
+    const formatter = new Intl.DateTimeFormat('ko-KR', {
+      timeZone: 'Asia/Seoul',
+      month: 'numeric',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    });
+    const dateFormatted = formatter.format(d);
+
+    const now = Date.now();
+    const diffMs = d.getTime() - now;
+    let relText = '';
+    if (diffMs > 0) {
+      const diffMins = Math.ceil(diffMs / 60000);
+      if (diffMins < 60) {
+        relText = ` (${diffMins}분 후 리셋)`;
+      } else {
+        const h = Math.floor(diffMins / 60);
+        const remMins = diffMins % 60;
+        relText = remMins > 0
+          ? ` (${h}시간 ${remMins}분 후 리셋)`
+          : ` (${h}시간 후 리셋)`;
+      }
+    } else {
+      relText = ' (리셋 시각 경과)';
+    }
+
+    return `${dateFormatted} KST${relText}`;
+  } catch {
+    return '확인 불가';
+  }
+}
+
+function RateLimitWindowCard({
+  title,
+  subLabel,
+  window,
+  isPrimary,
+}: {
+  title: string;
+  subLabel: string;
+  window: CodexRateLimitWindow | null | undefined;
+  isPrimary: boolean;
+}) {
+  const hasWindow = window != null;
+  const used = hasWindow && typeof window.usedPercent === 'number' && Number.isFinite(window.usedPercent)
+    ? window.usedPercent
+    : null;
+  const remaining = hasWindow && typeof window.remainingPercent === 'number' && Number.isFinite(window.remainingPercent)
+    ? window.remainingPercent
+    : (used !== null ? Math.max(0, Math.min(100, 100 - used)) : null);
+
+  const windowDesc = hasWindow ? formatWindowDescription(window.windowMinutes) : '구간 확인 불가';
+  const resetText = hasWindow ? formatResetTime(window.resetsAt) : '확인 불가';
+
+  // Determine status with label, tone and icon (never color alone)
+  let statusBadge: { label: string; tone: 'success' | 'warning' | 'danger' | 'slate'; icon: React.ComponentType<{ className?: string }> };
+  if (used === null) {
+    statusBadge = { label: '확인 불가', tone: 'slate', icon: Clock3 };
+  } else if (used >= 90) {
+    statusBadge = { label: '한도 임박 (위험)', tone: 'danger', icon: ShieldAlert };
+  } else if (used >= 75) {
+    statusBadge = { label: '사용량 주의', tone: 'warning', icon: AlertCircle };
+  } else {
+    statusBadge = { label: '정상 (여유)', tone: 'success', icon: CheckCircle2 };
+  }
+
+  const badgeClass = {
+    success: 'bg-emerald-500/15 text-emerald-300 border-emerald-400/40',
+    warning: 'bg-amber-500/15 text-amber-300 border-amber-400/40',
+    danger: 'bg-rose-500/15 text-rose-300 border-rose-400/40',
+    slate: 'bg-slate-800 text-slate-400 border-slate-700',
+  }[statusBadge.tone];
+
+  const StatusIcon = statusBadge.icon;
+  const safeUsed = used !== null ? Math.max(0, Math.min(100, used)) : 0;
+
+  const ariaValueText = used !== null && remaining !== null
+    ? `${title} 사용률 ${used.toFixed(1)}%, 남은 비율 ${remaining.toFixed(1)}%, 상태: ${statusBadge.label}`
+    : `${title} 사용량 정보 확인 불가`;
+
+  return (
+    <div className="flex flex-col justify-between rounded-xl border border-border/70 bg-card/60 p-4 transition-all hover:border-border">
+      <div>
+        {/* Header */}
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <span className={`flex h-6 w-6 items-center justify-center rounded-md font-mono text-xs font-bold ${
+              isPrimary ? 'bg-cyan-950 text-cyan-300 border border-cyan-500/30' : 'bg-violet-950 text-violet-300 border border-violet-500/30'
+            }`}>
+              {isPrimary ? '1' : '2'}
+            </span>
+            <div>
+              <h3 className="text-sm font-semibold text-slate-100">{title}</h3>
+              <p className="text-[11px] text-muted-foreground">{subLabel}</p>
+            </div>
+          </div>
+
+          <Badge variant="secondary" className={`flex items-center gap-1 text-[11px] font-medium border py-0.5 px-2 ${badgeClass}`}>
+            <StatusIcon className="h-3 w-3 shrink-0" />
+            <span>{statusBadge.label}</span>
+          </Badge>
+        </div>
+
+        {/* Window Description */}
+        <div className="mt-3 flex items-center justify-between text-xs text-slate-300">
+          <span className="text-muted-foreground">측정 구간:</span>
+          <span className="font-medium font-mono text-cyan-200">{windowDesc}</span>
+        </div>
+
+        {/* Progress Bar with Accessibility */}
+        <div className="mt-3">
+          <div className="mb-1 flex items-center justify-between text-[11px]">
+            <span className="text-muted-foreground">사용 진행도</span>
+            <span className="font-mono text-slate-300">
+              {used !== null ? `${safeUsed.toFixed(1)}%` : '확인 불가'}
+            </span>
+          </div>
+          <progress
+            value={used !== null ? safeUsed : 0}
+            max={100}
+            aria-valuetext={ariaValueText}
+            aria-label={`${title} 사용률 진행 상태`}
+            className={`h-2.5 w-full overflow-hidden rounded-full bg-slate-800/90 ring-1 ring-border/40 ${
+              statusBadge.tone === 'danger'
+                ? '[&::-webkit-progress-value]:bg-rose-500 [&::-moz-progress-bar]:bg-rose-500'
+                : statusBadge.tone === 'warning'
+                ? '[&::-webkit-progress-value]:bg-amber-500 [&::-moz-progress-bar]:bg-amber-500'
+                : statusBadge.tone === 'success'
+                ? '[&::-webkit-progress-value]:bg-cyan-500 [&::-moz-progress-bar]:bg-cyan-500'
+                : '[&::-webkit-progress-value]:bg-slate-700 [&::-moz-progress-bar]:bg-slate-700'
+            }`}
+          />
+        </div>
+
+        {/* 2-Column Numeric & Korean Text Breakdown */}
+        <div className="mt-4 grid grid-cols-2 gap-2 rounded-lg border border-border/40 bg-black/20 p-2.5 text-center">
+          <div className="border-r border-border/40 pr-2">
+            <span className="text-[11px] text-muted-foreground block">사용률 (소진)</span>
+            <div className="mt-1 flex items-baseline justify-center gap-1">
+              <span className={`font-mono text-lg font-bold ${
+                used === null ? 'text-slate-500 text-sm' : used >= 90 ? 'text-rose-300' : used >= 75 ? 'text-amber-300' : 'text-cyan-300'
+              }`}>
+                {used !== null ? `${used.toFixed(1)}%` : '확인 불가'}
+              </span>
+            </div>
+            <span className="text-[10px] text-slate-400 mt-0.5 block">
+              {used !== null ? '사용됨' : '데이터 없음'}
+            </span>
+          </div>
+
+          <div className="pl-2">
+            <span className="text-[11px] text-muted-foreground block">남은 비율 (잔여)</span>
+            <div className="mt-1 flex items-baseline justify-center gap-1">
+              <span className={`font-mono text-lg font-bold ${
+                remaining === null ? 'text-slate-500 text-sm' : remaining <= 10 ? 'text-rose-300' : remaining <= 25 ? 'text-amber-300' : 'text-emerald-300'
+              }`}>
+                {remaining !== null ? `${remaining.toFixed(1)}%` : '확인 불가'}
+              </span>
+            </div>
+            <span className="text-[10px] text-slate-400 mt-0.5 block">
+              {remaining !== null ? '사용 가능' : '데이터 없음'}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {/* ResetsAt Footer */}
+      <div className="mt-4 flex items-center justify-between gap-2 border-t border-border/50 pt-2.5 text-xs">
+        <div className="flex items-center gap-1.5 text-muted-foreground">
+          <Clock3 className="h-3.5 w-3.5 shrink-0 text-slate-400" />
+          <span>리셋 시각 (KST):</span>
+        </div>
+        <span
+          className={`font-mono text-[11px] truncate max-w-[200px] sm:max-w-[260px] ${
+            resetText.includes('확인 불가') ? 'text-slate-500 italic' : 'text-slate-200 font-medium'
+          }`}
+          title={resetText}
+        >
+          {resetText}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function CodexAccountUsageCard({
+  usageState,
+  onRefresh,
+  isRefreshing,
+}: {
+  usageState: CodexAccountUsageState;
+  onRefresh: () => void;
+  isRefreshing: boolean;
+}) {
+  const [isExpanded, setIsExpanded] = useState(true);
+
+  const { status, rateLimits, errorMessage, lastSyncedAt } = usageState;
+  const isUnavailable = status === 'unavailable' || (!rateLimits && status === 'loaded');
+  const isError = status === 'error';
+
+  const credits = rateLimits?.credits;
+  const planType = rateLimits?.planType;
+
+  const hasCreditsInfo = credits && (
+    (credits.balance !== null && credits.balance !== undefined) ||
+    credits.hasCredits !== null ||
+    credits.unlimited !== null
+  );
+
+  const hasPlanOrCredits = Boolean(planType || hasCreditsInfo);
+
+  const formatCardSyncTime = (isoString: string | null) => {
+    if (!isoString) return '';
+    try {
+      const d = new Date(isoString);
+      return d.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    } catch {
+      return '';
+    }
+  };
+
+  return (
+    <section
+      aria-label="Codex 계정 사용량 및 요금제 한도"
+      className="panel p-4 sm:p-5 transition-all"
+    >
+      {/* Top Card Bar */}
+      <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-border/60">
+        <div className="flex items-center gap-3">
+          <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-violet-950/60 border border-violet-500/30 text-violet-300">
+            <Cpu className="h-5 w-5" />
+          </span>
+          <div>
+            <div className="flex items-center gap-2">
+              <h2 className="text-base font-semibold text-slate-100">
+                Codex 계정 사용량 및 요금제 한도
+              </h2>
+              {planType && (
+                <Badge variant="secondary" className="bg-cyan-500/15 text-cyan-300 border-cyan-400/40 text-[10px] py-0 px-2 font-mono">
+                  {planType}
+                </Badge>
+              )}
+            </div>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              OpenAI / Codex API Rate Limits 실시간 사용률 및 갱신 주기
+            </p>
+          </div>
+        </div>
+
+        {/* Right side: status badges & controls */}
+        <div className="flex flex-wrap items-center gap-2">
+          {isError ? (
+            <div className="flex items-center gap-1.5 rounded-md border border-rose-500/40 bg-rose-950/40 px-2 py-1 text-[11px] font-medium text-rose-300">
+              <AlertCircle className="h-3 w-3 shrink-0" />
+              <span>동기화 실패 (확인 불가)</span>
+            </div>
+          ) : isUnavailable ? (
+            <div className="flex items-center gap-1.5 rounded-md border border-slate-700 bg-slate-800/60 px-2 py-1 text-[11px] font-medium text-slate-400">
+              <Info className="h-3 w-3 shrink-0" />
+              <span>한도 정보 확인 불가</span>
+            </div>
+          ) : (
+            <div className="flex items-center gap-1.5 rounded-md border border-emerald-500/30 bg-emerald-950/40 px-2 py-1 text-[11px] font-medium text-emerald-300">
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+              <span>실시간 한도 추적 중</span>
+              {lastSyncedAt && (
+                <span className="font-mono text-emerald-400">({formatCardSyncTime(lastSyncedAt)})</span>
+              )}
+            </div>
+          )}
+
+          <button
+            type="button"
+            onClick={onRefresh}
+            disabled={isRefreshing}
+            title="사용량 즉시 갱신"
+            aria-label="사용량 즉시 갱신"
+            className="flex h-7 w-7 items-center justify-center rounded-md border border-border bg-card/60 text-muted-foreground hover:text-slate-100 hover:bg-secondary transition-colors disabled:opacity-50"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${isRefreshing ? 'animate-spin text-cyan-400' : ''}`} />
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setIsExpanded(!isExpanded)}
+            aria-expanded={isExpanded}
+            aria-label={isExpanded ? "Codex 계정 사용량 카드 접기" : "Codex 계정 사용량 카드 펼치기"}
+            className="flex h-7 items-center gap-1 rounded-md border border-border bg-card/60 px-2 text-xs text-muted-foreground hover:text-slate-100 hover:bg-secondary transition-colors"
+          >
+            <span>{isExpanded ? '접기' : '상세보기'}</span>
+            {isExpanded ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+          </button>
+        </div>
+      </div>
+
+      {/* Collapsible Content */}
+      {isExpanded ? (
+        <div className="mt-4 space-y-4">
+          {/* Informational banner if unavailable or error */}
+          {isError ? (
+            <div className="rounded-lg border border-rose-500/30 bg-rose-950/20 p-3 text-xs text-rose-300 flex items-start gap-2.5">
+              <AlertCircle className="h-4 w-4 shrink-0 text-rose-400 mt-0.5" />
+              <div>
+                <strong className="font-semibold block">계정 사용량 동기화 오류</strong>
+                <p className="mt-0.5 text-rose-300/90 text-[11px] leading-relaxed">
+                  {errorMessage || 'API 응답을 불러오는 중 오류가 발생했습니다. (마지막 확인 불가 상태)'}
+                </p>
+              </div>
+            </div>
+          ) : isUnavailable ? (
+            <div className="rounded-lg border border-border/60 bg-slate-900/40 p-3 text-xs text-slate-300 flex items-start gap-2.5">
+              <Info className="h-4 w-4 shrink-0 text-cyan-400 mt-0.5" />
+              <div>
+                <strong className="font-semibold block text-slate-200">계정 한도(Rate Limits) 정보 미제공 안내</strong>
+                <p className="mt-0.5 text-slate-400 text-[11px] leading-relaxed">
+                  현재 API 응답에 rateLimits 필드가 포함되어 있지 않거나 &apos;확인 불가&apos; 상태입니다. 하단의 세션 누적 토큰 통계 및 워커 관제는 정상 동작합니다.
+                </p>
+              </div>
+            </div>
+          ) : null}
+
+          {/* 2 Rate Limit Window Cards (Primary and Secondary) */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <RateLimitWindowCard
+              title="1차 구간 (Primary)"
+              subLabel="단기 사용량 한도 (예: 3시간 주기)"
+              window={rateLimits?.primary}
+              isPrimary={true}
+            />
+            <RateLimitWindowCard
+              title="2차 구간 (Secondary)"
+              subLabel="장기 사용량 한도 (예: 24시간 주기)"
+              window={rateLimits?.secondary}
+              isPrimary={false}
+            />
+          </div>
+
+          {/* Optional Credits and Plan Details strip - only when provided */}
+          {hasPlanOrCredits && (
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/50 bg-black/25 px-3.5 py-2.5 text-xs">
+              <div className="flex flex-wrap items-center gap-4">
+                {planType && (
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-muted-foreground">요금제 플랜:</span>
+                    <strong className="font-mono text-cyan-300 font-semibold">{planType}</strong>
+                  </div>
+                )}
+                {credits && credits.balance !== null && credits.balance !== undefined && (
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-muted-foreground">크레딧 잔액:</span>
+                    <strong className="font-mono text-emerald-300 font-semibold">
+                      {typeof credits.balance === 'number' ? credits.balance.toLocaleString() : credits.balance}
+                    </strong>
+                  </div>
+                )}
+                {credits && credits.hasCredits !== null && (
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-muted-foreground">크레딧 상태:</span>
+                    <Badge variant="secondary" className={`text-[10px] py-0 px-1.5 border ${
+                      credits.hasCredits ? 'bg-emerald-500/15 text-emerald-300 border-emerald-400/40' : 'bg-rose-500/15 text-rose-300 border-rose-400/40'
+                    }`}>
+                      {credits.hasCredits ? '크레딧 보유' : '크레딧 소진'}
+                    </Badge>
+                  </div>
+                )}
+                {credits && credits.unlimited !== null && (
+                  <div className="flex items-center gap-1.5">
+                    <Badge variant="secondary" className="bg-purple-500/15 text-purple-300 border-purple-400/40 text-[10px] py-0 px-1.5">
+                      {credits.unlimited ? '무제한 크레딧 적용됨' : '제한형 크레딧 플랜'}
+                    </Badge>
+                  </div>
+                )}
+              </div>
+              <span className="text-[11px] text-muted-foreground hidden sm:inline-block">
+                Codex 계정 실시간 크레딧 정보
+              </span>
+            </div>
+          )}
+        </div>
+      ) : (
+        /* Collapsed Summary view */
+        <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+          <div className="flex items-center gap-3">
+            <span>
+              1차: <strong className="font-mono text-slate-200">
+                {rateLimits?.primary?.usedPercent != null ? `${rateLimits.primary.usedPercent.toFixed(1)}% 사용` : '확인 불가'}
+              </strong>
+            </span>
+            <span className="text-border">|</span>
+            <span>
+              2차: <strong className="font-mono text-slate-200">
+                {rateLimits?.secondary?.usedPercent != null ? `${rateLimits.secondary.usedPercent.toFixed(1)}% 사용` : '확인 불가'}
+              </strong>
+            </span>
+          </div>
+          <span className="text-[11px] text-slate-400">카드가 접혀 있습니다. &apos;상세보기&apos;를 눌러 펼치세요.</span>
+        </div>
+      )}
+    </section>
   );
 }
 
