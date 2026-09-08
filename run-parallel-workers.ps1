@@ -233,10 +233,12 @@ try {
     $statePath = Join-Path $runRoot "workers\$safeId.json"
     $state = if (Test-Path -LiteralPath $statePath) { Get-Content -Raw -LiteralPath $statePath | ConvertFrom-Json } else { [pscustomobject]@{ runId=$runId; taskId=$task.id; task=$task.name; status='failed'; error='워커 상태 파일이 생성되지 않음' } }
     $record = $jobRecords | Where-Object { $_.Task.id -eq $task.id } | Select-Object -First 1
+    $wasCancelled = (Test-Path -LiteralPath $cancelPath) -and (-not $record -or $record.Cancelled)
+    $wasTimedOut = $record -and $record.TimedOut
     $changed = @(Get-ChangedFiles $wt.path $baseCommit)
     $violations = @($changed | Where-Object { -not (Test-AllowedPath $_ @($task.allowed_files)) })
-    $tests = if (-not $record.Cancelled -and -not $record.TimedOut -and $state.status -eq 'completed' -and $violations.Count -eq 0) { @(Invoke-Verification $wt.path @($task.test_commands)) } else { @() }
-    $decision = if ($record.Cancelled) { 'CANCELLED' } elseif ($record.TimedOut) { 'TIMED_OUT' } elseif ($state.status -ne 'completed') { 'WORKER_FAILED' } elseif ($violations.Count -gt 0) { 'POLICY_VIOLATION' } elseif (@($tests | Where-Object status -eq 'FAIL').Count -gt 0) { 'TEST_FAILED' } else { 'PASS' }
+    $tests = if (-not $wasCancelled -and -not $wasTimedOut -and $state.status -eq 'completed' -and $violations.Count -eq 0) { @(Invoke-Verification $wt.path @($task.test_commands)) } else { @() }
+    $decision = if ($wasCancelled) { 'CANCELLED' } elseif ($wasTimedOut) { 'TIMED_OUT' } elseif ($state.status -ne 'completed') { 'WORKER_FAILED' } elseif ($violations.Count -gt 0) { 'POLICY_VIOLATION' } elseif (@($tests | Where-Object status -eq 'FAIL').Count -gt 0) { 'TEST_FAILED' } else { 'PASS' }
     $finalStatus = switch ($decision) { 'PASS' { 'completed' }; 'POLICY_VIOLATION' { 'policy_violation' }; 'TEST_FAILED' { 'test_failed' }; 'TIMED_OUT' { 'timed_out' }; 'CANCELLED' { 'cancelled' }; default { 'failed' } }
     Set-ObjectProperty $state 'workerReportedStatus' $state.status; Set-ObjectProperty $state 'status' $finalStatus
     Set-ObjectProperty $state 'baseCommit' $baseCommit; Set-ObjectProperty $state 'branch' $wt.branch; Set-ObjectProperty $state 'worktree' $wt.path
