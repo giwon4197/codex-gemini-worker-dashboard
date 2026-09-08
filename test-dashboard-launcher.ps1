@@ -205,7 +205,9 @@ try {
     Assert-Test 'Invoke-Expression 미사용' ($launcherContent -notmatch 'Invoke-Expression')
     Assert-Test '실제 서버 시작 명령에 포트 전달' ($launcherContent -match '\$devArguments\s*=.*''--port''.*\$Port')
     Assert-Test 'taskkill 종료 코드 확인' ($launcherContent -match '\$taskkillSucceeded\s*=\s*\(\$LASTEXITCODE\s+-eq\s+0\)')
-    Assert-Test '종료 후 프로세스 상태 재확인' ($launcherContent -match 'WaitForExit\(3000\)' -and $launcherContent -match 'if \(-not \$Process\.HasExited\) \{ throw')
+    Assert-Test '자손 프로세스 PID 수집' ($launcherContent -match 'Get-CimInstance Win32_Process' -and $launcherContent -match 'ParentProcessId')
+    Assert-Test '자식부터 fallback 종료' ($launcherContent -match '\$treeIds \| Select-Object -Reverse')
+    Assert-Test '종료 후 전체 PID와 포트 재확인' ($launcherContent -match '\$aliveIds\.Count -gt 0' -and $launcherContent -match 'Get-NetTCPConnection -LocalPort \$Port')
 
     # 11. Finding dashboard from repo root and install root
     Write-Host ''

@@ -100,6 +100,24 @@ function Stop-ServerProcess($Process) {
         return
     }
     if ($Process.HasExited) { return }
+    $treeIds = [Collections.Generic.List[int]]::new()
+    try {
+        $allProcesses = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+        $pendingParents = @([int]$Process.Id)
+        while ($pendingParents.Count -gt 0) {
+            $parentId = [int]$pendingParents[0]
+            $pendingParents = @($pendingParents | Select-Object -Skip 1)
+            $children = @($allProcesses | Where-Object { [int]$_.ParentProcessId -eq $parentId })
+            foreach ($child in $children) {
+                $childId = [int]$child.ProcessId
+                if (-not $treeIds.Contains($childId)) {
+                    [void]$treeIds.Add($childId)
+                    $pendingParents += $childId
+                }
+            }
+        }
+    } catch {}
+    [void]$treeIds.Add([int]$Process.Id)
     $taskkillSucceeded = $false
     try {
         & taskkill.exe /PID $Process.Id /T /F 2>$null | Out-Null
@@ -107,14 +125,19 @@ function Stop-ServerProcess($Process) {
         [void]$Process.WaitForExit(3000)
         $Process.Refresh()
     } catch {}
-    if (-not $taskkillSucceeded -or -not $Process.HasExited) {
-        try {
-            Stop-Process -Id $Process.Id -Force -ErrorAction Stop
-            [void]$Process.WaitForExit(3000)
-            $Process.Refresh()
-        } catch {}
+    $aliveIds = @($treeIds | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+    if (-not $taskkillSucceeded -or $aliveIds.Count -gt 0) {
+        foreach ($processId in @($treeIds | Select-Object -Reverse)) {
+            Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
+        }
+        [void]$Process.WaitForExit(3000)
+        $Process.Refresh()
     }
-    if (-not $Process.HasExited) { throw "대시보드 서버 프로세스(PID $($Process.Id))를 종료하지 못했습니다." }
+    $aliveIds = @($treeIds | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+    if ($aliveIds.Count -gt 0) { throw "대시보드 서버 프로세스 트리를 종료하지 못했습니다. 남은 PID: $($aliveIds -join ', ')" }
+    Start-Sleep -Milliseconds 300
+    $remainingListener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+    if ($remainingListener) { throw "대시보드 서버 종료 후에도 포트 $Port 리스너가 남아 있습니다." }
     Record-Action 'PROCESS_TREE_STOPPED'
 }
 
