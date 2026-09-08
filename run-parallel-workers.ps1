@@ -193,7 +193,6 @@ try {
       $manifest.status = 'cancelling'; $manifest.updatedAt = (Get-Date).ToString('o'); Write-AtomicJson $manifestPath $manifest
       foreach ($record in $jobRecords | Where-Object { $_.Job.State -in @('NotStarted', 'Running') }) {
         Stop-WorkerProcesses (Join-Path $runRoot "workers\$($record.SafeId).json")
-        Stop-Job -Job $record.Job -ErrorAction SilentlyContinue
         $record.Cancelled = $true
       }
       while ($pending.Count -gt 0) { $null = $pending.Dequeue() }
@@ -217,7 +216,6 @@ try {
       $limit = if ($record.Task.timeout_seconds) { [int]$record.Task.timeout_seconds } else { $WorkerTimeoutSeconds }
       if (((Get-Date) - $record.StartedAt).TotalSeconds -gt $limit) {
         Stop-WorkerProcesses (Join-Path $runRoot "workers\$($record.SafeId).json")
-        Stop-Job -Job $record.Job -ErrorAction SilentlyContinue
         $record.TimedOut = $true
       }
     }
