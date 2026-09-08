@@ -25,7 +25,14 @@ import {
   Flame,
   Calendar,
   Sparkles,
-  TrendingDown
+  TrendingDown,
+  ShieldAlert,
+  FileCode2,
+  Ban,
+  Hourglass,
+  PauseCircle,
+  AlertOctagon,
+  PlayCircle
 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
@@ -119,12 +126,59 @@ export interface LiveWorkerLog {
   type: string;
 }
 
+export type LiveWorkerStatus =
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'policy_violation'
+  | 'test_failed'
+  | 'timed_out'
+  | 'cancelled'
+  | 'interrupted'
+  | 'escalated';
+
+export interface LiveWorkerPolicy {
+  allowedFiles?: string[];
+  violations?: string[];
+  status?: 'PASS' | 'FAIL';
+}
+
+export interface LiveWorkerVerificationCommand {
+  command: string;
+  exitCode: number;
+  durationSeconds?: number;
+  output?: string;
+  status: 'PASS' | 'FAIL';
+}
+
+export interface LiveWorkerVerification {
+  decision?: string;
+  commands?: LiveWorkerVerificationCommand[];
+  verifiedAt?: string;
+}
+
+export interface LiveWorkerEscalation {
+  requiresCodex?: boolean;
+  category?: string;
+  reason?: string;
+}
+
+export interface LiveWorkerRetryRecord {
+  attempt: number;
+  decision: string;
+  fingerprint?: string;
+  failureLog?: string;
+  verifiedAt?: string;
+}
+
 export interface LiveWorkerData {
   runId: string;
   taskId?: string;
+  attempt?: number;
+  retryLimit?: number;
   task: string;
   model: string;
-  status: 'running' | 'completed' | 'failed' | 'policy_violation' | 'test_failed' | 'timed_out' | 'cancelled' | 'interrupted' | 'escalated';
+  status: LiveWorkerStatus;
   startedAt: string;
   updatedAt: string;
   elapsedSeconds: number;
@@ -138,6 +192,293 @@ export interface LiveWorkerData {
   };
   finalResponse?: string | null;
   error?: string | null;
+  policy?: LiveWorkerPolicy;
+  verification?: LiveWorkerVerification;
+  escalation?: LiveWorkerEscalation;
+  changedFiles?: string[];
+  commitHashes?: string[];
+  retryHistory?: LiveWorkerRetryRecord[];
+}
+
+export interface StatusConfig {
+  label: string;
+  badgeLabel: string;
+  shortLabel: string;
+  koreanDesc: string;
+  badgeClass: string;
+  borderClass: string;
+  bgGradient: string;
+  ringClass: string;
+  textClass: string;
+  icon: React.ComponentType<{ className?: string }>;
+  tone: 'info' | 'success' | 'danger' | 'warning' | 'purple' | 'slate';
+}
+
+export const WORKER_STATUS_CONFIG: Record<LiveWorkerStatus, StatusConfig> = {
+  running: {
+    label: '실행 중',
+    badgeLabel: '실행 중 (진행)',
+    shortLabel: '실행',
+    koreanDesc: '백그라운드에서 실시간 코드 수정 및 모델 추론이 진행 중입니다.',
+    badgeClass: 'bg-cyan-500/15 text-cyan-300 border-cyan-400/50',
+    borderClass: 'border-cyan-500/50',
+    bgGradient: 'from-cyan-950/25 via-card/95 to-background',
+    ringClass: 'ring-1 ring-cyan-400/30 shadow-cyan-950/40',
+    textClass: 'text-cyan-400',
+    icon: PlayCircle,
+    tone: 'info',
+  },
+  completed: {
+    label: '성공 완료',
+    badgeLabel: '완료 (검증 통과)',
+    shortLabel: '완료',
+    koreanDesc: '모든 코드 변경이 결정론적 검증 및 정책 기준을 통과하여 정상 커밋되었습니다.',
+    badgeClass: 'bg-emerald-500/15 text-emerald-300 border-emerald-400/40',
+    borderClass: 'border-emerald-500/40',
+    bgGradient: 'from-emerald-950/20 via-card/90 to-background',
+    ringClass: 'ring-1 ring-emerald-400/20 shadow-emerald-950/30',
+    textClass: 'text-emerald-400',
+    icon: CheckCircle2,
+    tone: 'success',
+  },
+  policy_violation: {
+    label: '정책 위반',
+    badgeLabel: '정책 위반 (수정 범위 초과)',
+    shortLabel: '정책위반',
+    koreanDesc: '작업에 할당된 허용 파일(allowed_files) 외부의 파일 변경이 감지되어 오케스트레이터에 의해 차단되었습니다.',
+    badgeClass: 'bg-amber-500/20 text-amber-300 border-amber-400/50 font-bold',
+    borderClass: 'border-amber-500/60',
+    bgGradient: 'from-amber-950/30 via-card/95 to-background',
+    ringClass: 'ring-1 ring-amber-400/40 shadow-amber-950/40',
+    textClass: 'text-amber-400',
+    icon: ShieldAlert,
+    tone: 'warning',
+  },
+  test_failed: {
+    label: '검증 실패',
+    badgeLabel: '검증 실패 (빌드/테스트 오류)',
+    shortLabel: '검증실패',
+    koreanDesc: '작업 후 실행된 결정론적 검증 명령(test_commands) 또는 빌드/린트 검사를 통과하지 못했습니다.',
+    badgeClass: 'bg-rose-500/20 text-rose-300 border-rose-400/50 font-bold',
+    borderClass: 'border-rose-500/60',
+    bgGradient: 'from-rose-950/30 via-card/95 to-background',
+    ringClass: 'ring-1 ring-rose-400/40 shadow-rose-950/40',
+    textClass: 'text-rose-400',
+    icon: FileCode2,
+    tone: 'danger',
+  },
+  failed: {
+    label: '실행 실패',
+    badgeLabel: '실행 실패 (워커 오류)',
+    shortLabel: '실패',
+    koreanDesc: '워커 프로세스 또는 스크립트 실행 중 처리되지 않은 예외 및 런타임 오류가 발생했습니다.',
+    badgeClass: 'bg-red-500/20 text-red-300 border-red-400/40',
+    borderClass: 'border-red-500/50',
+    bgGradient: 'from-red-950/25 via-card/90 to-background',
+    ringClass: 'ring-1 ring-red-400/30 shadow-red-950/30',
+    textClass: 'text-red-400',
+    icon: XCircle,
+    tone: 'danger',
+  },
+  timed_out: {
+    label: '시간 초과',
+    badgeLabel: '시간 초과 (타임아웃)',
+    shortLabel: '타임아웃',
+    koreanDesc: '작업에 할당된 최대 실행 제한 시간(timeout)을 초과하여 프로세스가 안전하게 강제 종료되었습니다.',
+    badgeClass: 'bg-orange-500/20 text-orange-300 border-orange-400/40 font-semibold',
+    borderClass: 'border-orange-500/50',
+    bgGradient: 'from-orange-950/25 via-card/90 to-background',
+    ringClass: 'ring-1 ring-orange-400/30 shadow-orange-950/30',
+    textClass: 'text-orange-400',
+    icon: Hourglass,
+    tone: 'warning',
+  },
+  cancelled: {
+    label: '취소됨',
+    badgeLabel: '취소됨 (사용자/시스템 취소)',
+    shortLabel: '취소',
+    koreanDesc: '사용자의 요청 또는 파이프라인 정지 신호에 의해 작업 실행이 안전하게 취소되었습니다.',
+    badgeClass: 'bg-slate-500/20 text-slate-300 border-slate-400/40',
+    borderClass: 'border-slate-600/50',
+    bgGradient: 'from-slate-900/40 via-card/90 to-background',
+    ringClass: 'ring-1 ring-slate-400/20 shadow-slate-950/30',
+    textClass: 'text-slate-400',
+    icon: Ban,
+    tone: 'slate',
+  },
+  interrupted: {
+    label: '중단됨',
+    badgeLabel: '중단됨 (오케스트레이터 종료)',
+    shortLabel: '중단',
+    koreanDesc: '부모 오케스트레이터 프로세스가 예기치 않게 중단된 후 정리 및 복구 루틴에 의해 종료되었습니다.',
+    badgeClass: 'bg-slate-600/25 text-slate-300 border-slate-500/40',
+    borderClass: 'border-slate-600/50',
+    bgGradient: 'from-slate-900/40 via-card/90 to-background',
+    ringClass: 'ring-1 ring-slate-400/20',
+    textClass: 'text-slate-400',
+    icon: PauseCircle,
+    tone: 'slate',
+  },
+  escalated: {
+    label: '에스컬레이션',
+    badgeLabel: '에스컬레이션 (인간 검토 필요)',
+    shortLabel: '에스컬레이션',
+    koreanDesc: '자동 재시도 한도 초과 또는 복구 불가능한 문제로 인해 Codex 또는 사용자의 수동 검토가 필요합니다.',
+    badgeClass: 'bg-purple-500/20 text-purple-300 border-purple-400/50 font-bold',
+    borderClass: 'border-purple-500/60',
+    bgGradient: 'from-purple-950/30 via-card/95 to-background',
+    ringClass: 'ring-1 ring-purple-400/40 shadow-purple-950/40',
+    textClass: 'text-purple-400',
+    icon: AlertOctagon,
+    tone: 'purple',
+  },
+};
+
+export function getWorkerStatusConfig(status?: string): StatusConfig {
+  if (status && status in WORKER_STATUS_CONFIG) {
+    return WORKER_STATUS_CONFIG[status as LiveWorkerStatus];
+  }
+  return WORKER_STATUS_CONFIG.running;
+}
+
+export function getWorkerStageContext(worker: LiveWorkerData): {
+  phaseTitle: string;
+  phaseDetail: string;
+  badgeStyle: string;
+} {
+  const status = worker.status;
+  if (status === 'completed') {
+    return {
+      phaseTitle: '완료 단계',
+      phaseDetail: '모든 파일 변경 커밋 및 결정론적 검증 테스트 성공',
+      badgeStyle: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30',
+    };
+  }
+  if (status === 'policy_violation') {
+    return {
+      phaseTitle: '정책 차단 단계',
+      phaseDetail: '허용 범위 외 파일 변경 감지 (allowed_files 정책 위반)',
+      badgeStyle: 'bg-amber-500/15 text-amber-300 border-amber-500/30',
+    };
+  }
+  if (status === 'test_failed') {
+    return {
+      phaseTitle: '검증 실패 단계',
+      phaseDetail: 'test_commands 결정론적 검사 미통과',
+      badgeStyle: 'bg-rose-500/15 text-rose-300 border-rose-500/30',
+    };
+  }
+  if (status === 'timed_out') {
+    return {
+      phaseTitle: '시간 초과 단계',
+      phaseDetail: '최대 허용 실행 시간 초과로 강제 종료',
+      badgeStyle: 'bg-orange-500/15 text-orange-300 border-orange-500/30',
+    };
+  }
+  if (status === 'cancelled') {
+    return {
+      phaseTitle: '취소 단계',
+      phaseDetail: '사용자 또는 오케스트레이터 취소 명령 처리됨',
+      badgeStyle: 'bg-slate-500/15 text-slate-300 border-slate-500/30',
+    };
+  }
+  if (status === 'escalated') {
+    return {
+      phaseTitle: '에스컬레이션 단계',
+      phaseDetail: '자동 복구 불가 (Codex/인간 검토 대기)',
+      badgeStyle: 'bg-purple-500/15 text-purple-300 border-purple-500/30',
+    };
+  }
+  if (status === 'interrupted') {
+    return {
+      phaseTitle: '중단 복구 단계',
+      phaseDetail: '오케스트레이터 중단 후 상태 안전 복구됨',
+      badgeStyle: 'bg-slate-500/15 text-slate-300 border-slate-500/30',
+    };
+  }
+  if (status === 'failed') {
+    return {
+      phaseTitle: '오류 정지 단계',
+      phaseDetail: worker.error || '워커 프로세스 오류 발생',
+      badgeStyle: 'bg-red-500/15 text-red-300 border-red-500/30',
+    };
+  }
+
+  // running: extract latest step from recentLogs
+  const logs = Array.isArray(worker.recentLogs) ? worker.recentLogs : [];
+  for (let i = logs.length - 1; i >= 0; i--) {
+    const item = logs[i];
+    const msg = typeof item === 'string' ? item : item?.message;
+    if (!msg) continue;
+
+    const match = msg.match(/단계:\s*([^\s(]+)\s*(?:\(([^)]+)\))?/);
+    if (match) {
+      const step = match[1];
+      const state = (match[2] || '').toUpperCase();
+      if (step === 'tool') {
+        return {
+          phaseTitle: '도구 실행 단계',
+          phaseDetail: state === 'ACTIVE' ? '도구 실행 중 (파일 수정 또는 명령 실행)' : '도구 실행 완료 (후속 작업 진행)',
+          badgeStyle: 'bg-amber-500/15 text-amber-300 border-amber-500/30',
+        };
+      }
+      if (step === 'agent_response') {
+        return {
+          phaseTitle: '모델 추론 단계',
+          phaseDetail: state === 'ACTIVE' ? 'Gemini 3.8 모델 응답 스트리밍 생성 중' : '응답 수신 완료 (도구 분석 중)',
+          badgeStyle: 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30',
+        };
+      }
+      return {
+        phaseTitle: `${step} 처리 단계`,
+        phaseDetail: state ? `상태: ${state}` : msg,
+        badgeStyle: 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30',
+      };
+    }
+
+    if (msg.includes('검증') || msg.includes('테스트')) {
+      return {
+        phaseTitle: '검증 테스트 단계',
+        phaseDetail: msg,
+        badgeStyle: 'bg-violet-500/15 text-violet-300 border-violet-500/30',
+      };
+    }
+  }
+
+  return {
+    phaseTitle: '초기화 및 준비 단계',
+    phaseDetail: '워크트리 준비 및 Antigravity CLI 초기화 중',
+    badgeStyle: 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30',
+  };
+}
+
+export function getModelTierInfo(modelStr?: string) {
+  const m = (modelStr || '').toLowerCase();
+  if (m.includes('flash-low') || m === 'fast') {
+    return { name: '빠름 (Fast)', tier: 'fast', badgeClass: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' };
+  }
+  if (m.includes('flash-medium') || m === 'normal') {
+    return { name: '보통 (Normal)', tier: 'normal', badgeClass: 'bg-blue-500/15 text-blue-300 border-blue-500/30' };
+  }
+  if (m.includes('flash-high') || m === 'advanced') {
+    return { name: '고급 (Advanced)', tier: 'advanced', badgeClass: 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30' };
+  }
+  if (m.includes('pro-high') || m.includes('pro') || m === 'reasoning') {
+    return { name: '강한추론 (Reasoning)', tier: 'reasoning', badgeClass: 'bg-purple-500/15 text-purple-300 border-purple-500/30' };
+  }
+  return { name: modelStr || '표준', tier: 'normal', badgeClass: 'bg-slate-500/15 text-slate-300 border-slate-500/30' };
+}
+
+export function formatDurationSeconds(seconds: number): string {
+  if (isNaN(seconds) || seconds < 0) return '0초';
+  const sec = Math.round(seconds);
+  if (sec < 60) return `${sec}초`;
+  const m = Math.floor(sec / 60);
+  const rem = sec % 60;
+  if (m < 60) return `${m}분 ${rem}초 (${sec}초)`;
+  const h = Math.floor(m / 60);
+  const remM = m % 60;
+  return `${h}시간 ${remM}분 ${rem}초`;
 }
 
 const initialJobs: Job[] = [
@@ -445,8 +786,17 @@ export default function Home() {
 
   // Initial load & Polling setup
   useEffect(() => {
-    fetchDashboardData(false);
-    void fetchCodexUsage();
+    let ignore = false;
+    const timer = setTimeout(() => {
+      if (!ignore) {
+        fetchDashboardData(false);
+        void fetchCodexUsage();
+      }
+    }, 0);
+    return () => {
+      ignore = true;
+      clearTimeout(timer);
+    };
   }, []);
 
   useEffect(() => {
@@ -461,8 +811,12 @@ export default function Home() {
     };
   }, [autoRefresh]);
 
-  // Live Worker 1-second polling
+  // Live Worker 1-second polling & Run info
   const [liveWorkers, setLiveWorkers] = useState<LiveWorkerData[]>([]);
+  const [liveRunInfo, setLiveRunInfo] = useState<{
+    runId: string | null;
+    updatedAt: string | null;
+  }>({ runId: null, updatedAt: null });
 
   useEffect(() => {
     let mounted = true;
@@ -472,9 +826,17 @@ export default function Home() {
         if (multiRes.ok) {
           const multiText = await multiRes.text();
           if (multiText.trim()) {
-            const multi = JSON.parse(multiText) as { workers?: LiveWorkerData[] };
-            if (mounted && Array.isArray(multi.workers) && multi.workers.length > 0) {
+            const multi = JSON.parse(multiText) as {
+              runId?: string;
+              updatedAt?: string;
+              workers?: LiveWorkerData[];
+            };
+            if (mounted && Array.isArray(multi.workers)) {
               setLiveWorkers(multi.workers);
+              setLiveRunInfo({
+                runId: multi.runId || null,
+                updatedAt: multi.updatedAt || null,
+              });
               return;
             }
           }
@@ -486,6 +848,10 @@ export default function Home() {
         const json = JSON.parse(text) as LiveWorkerData;
         if (mounted && json && json.runId) {
           setLiveWorkers([json]);
+          setLiveRunInfo({
+            runId: json.runId,
+            updatedAt: json.updatedAt || null,
+          });
         }
       } catch {
         // Ignore read/JSON-parse collisions during atomic file replacement
@@ -964,6 +1330,28 @@ export default function Home() {
           </div>
         </header>
 
+        {/* 0. OVERALL EXECUTION SUMMARY & REAL-TIME LIVE WORKER MONITOR */}
+        <div className="space-y-4">
+          <OverallExecutionSummary
+            runInfo={liveRunInfo}
+            workers={liveWorkers}
+            autoRefresh={autoRefresh}
+            onCopy={handleCopy}
+            copiedId={copiedJobId}
+          />
+
+          <section className="space-y-4" aria-label="실시간 병렬 워커 목록">
+            {(liveWorkers.length > 0 ? liveWorkers : [null]).map((worker, index) => (
+              <LiveWorkerPanel
+                key={worker?.taskId || worker?.runId || `idle-${index}`}
+                live={worker}
+                onCopy={handleCopy}
+                copiedJobId={copiedJobId}
+              />
+            ))}
+          </section>
+        </div>
+
         {/* 1. TOP STATS: 3 CIRCULAR DONUT CHARTS (Codex active, Gemini active, Cumulative savings) */}
         <section className="grid gap-5 grid-cols-1 md:grid-cols-3" aria-label="3대 누적 통계 원형 그래프">
           {/* Donut 1: Codex 누적 실질 사용량 */}
@@ -1298,18 +1686,6 @@ export default function Home() {
             note={`완료 ${data.summary.completed}건 / 실패 ${data.summary.failed}건`} 
             accent="green" 
           />
-        </section>
-
-        {/* 3.5. REAL-TIME LIVE WORKER STREAM PANEL */}
-        <section className="space-y-4" aria-label="실시간 병렬 워커 목록">
-          {(liveWorkers.length > 0 ? liveWorkers : [null]).map((worker, index) => (
-            <LiveWorkerPanel
-              key={worker?.taskId || worker?.runId || `idle-${index}`}
-              live={worker}
-              onCopy={handleCopy}
-              copiedJobId={copiedJobId}
-            />
-          ))}
         </section>
 
         {/* 4. MAIN PANEL LAYOUT */}
@@ -1852,6 +2228,226 @@ function JobUsageBar({ label, value, total, colorClass }: { label: string; value
   );
 }
 
+function OverallExecutionSummary({
+  runInfo,
+  workers,
+  autoRefresh,
+  onCopy,
+  copiedId,
+}: {
+  runInfo: { runId: string | null; updatedAt: string | null };
+  workers: LiveWorkerData[];
+  autoRefresh: boolean;
+  onCopy: (id: string, text: string) => void;
+  copiedId: string | null;
+}) {
+  const activeRunId = runInfo.runId || (workers[0]?.runId ?? null);
+  const countTotal = workers.length;
+  const countRunning = workers.filter(w => w.status === 'running').length;
+  const countCompleted = workers.filter(w => w.status === 'completed').length;
+  const countPolicyViolation = workers.filter(w => w.status === 'policy_violation').length;
+  const countTestFailed = workers.filter(w => w.status === 'test_failed').length;
+  const countTimedOut = workers.filter(w => w.status === 'timed_out').length;
+  const countEscalated = workers.filter(w => w.status === 'escalated').length;
+  const countOtherFailed = workers.filter(w => w.status === 'failed' || w.status === 'interrupted' || w.status === 'cancelled').length;
+
+  let overallTitle = '워커 대기 상태 (IDLE)';
+  let overallBadge = '대기 중';
+  let overallDesc = '현재 실행 중인 백그라운드 병렬 작업이 없습니다. 1초 간격으로 자동 폴링 대기 중입니다.';
+  let overallTone = 'text-slate-400';
+  let overallBorder = 'border-border/70';
+  let overallBg = 'bg-card/60';
+  let overallIcon: React.ReactNode = <Clock3 className="h-5 w-5 text-slate-400" />;
+
+  if (countTotal > 0) {
+    if (countPolicyViolation > 0) {
+      overallTitle = '정책 위반 감지 (Policy Violation)';
+      overallBadge = `정책 위반 ${countPolicyViolation}건`;
+      overallDesc = '허용 파일(allowed_files) 범위를 벗어난 파일 변경이 감지되어 오케스트레이터가 작업을 차단했습니다.';
+      overallTone = 'text-amber-300';
+      overallBorder = 'border-amber-500/50';
+      overallBg = 'bg-gradient-to-r from-amber-950/30 via-card/90 to-background';
+      overallIcon = <ShieldAlert className="h-5 w-5 text-amber-400" />;
+    } else if (countTestFailed > 0) {
+      overallTitle = '결정론적 검증 실패 (Verification Failed)';
+      overallBadge = `검증 실패 ${countTestFailed}건`;
+      overallDesc = 'test_commands 빌드/테스트 또는 린트 명령 검증을 통과하지 못했습니다.';
+      overallTone = 'text-rose-300';
+      overallBorder = 'border-rose-500/50';
+      overallBg = 'bg-gradient-to-r from-rose-950/30 via-card/90 to-background';
+      overallIcon = <FileCode2 className="h-5 w-5 text-rose-400" />;
+    } else if (countEscalated > 0) {
+      overallTitle = '에스컬레이션 필요 (Escalated)';
+      overallBadge = `에스컬레이션 ${countEscalated}건`;
+      overallDesc = '자동 재시도 한도를 초과하여 인간 검토 또는 Codex 개입이 필요합니다.';
+      overallTone = 'text-purple-300';
+      overallBorder = 'border-purple-500/50';
+      overallBg = 'bg-gradient-to-r from-purple-950/30 via-card/90 to-background';
+      overallIcon = <AlertOctagon className="h-5 w-5 text-purple-400" />;
+    } else if (countRunning > 0) {
+      overallTitle = `병렬 워커 실행 중 (${countRunning}/${countTotal} 진행)`;
+      overallBadge = `실행 중 ${countRunning}건`;
+      overallDesc = '오케스트레이터가 격리된 브랜치에서 병렬 Gemini 작업을 실시간 스트리밍으로 실행하고 있습니다.';
+      overallTone = 'text-cyan-300';
+      overallBorder = 'border-cyan-500/50';
+      overallBg = 'bg-gradient-to-r from-cyan-950/30 via-card/90 to-background';
+      overallIcon = <PlayCircle className="h-5 w-5 text-cyan-400" />;
+    } else if (countCompleted === countTotal) {
+      overallTitle = `모든 워커 작업 완료 (${countCompleted}건 정상 통과)`;
+      overallBadge = '모두 완료';
+      overallDesc = '모든 병렬 워커가 코드 수정과 검증을 성공적으로 마치고 커밋되었습니다.';
+      overallTone = 'text-emerald-300';
+      overallBorder = 'border-emerald-500/50';
+      overallBg = 'bg-gradient-to-r from-emerald-950/25 via-card/90 to-background';
+      overallIcon = <CheckCircle2 className="h-5 w-5 text-emerald-400" />;
+    } else {
+      overallTitle = '워커 작업 종료 / 일부 실패';
+      overallBadge = `실패/기타 ${countOtherFailed + countTimedOut}건`;
+      overallDesc = '일부 워커 작업이 시간 초과, 오류 또는 취소로 종료되었습니다.';
+      overallTone = 'text-red-300';
+      overallBorder = 'border-red-500/50';
+      overallBg = 'bg-gradient-to-r from-red-950/25 via-card/90 to-background';
+      overallIcon = <AlertCircle className="h-5 w-5 text-red-400" />;
+    }
+  }
+
+  return (
+    <section 
+      className={`rounded-2xl border ${overallBorder} ${overallBg} p-4 sm:p-5 shadow-lg backdrop-blur-sm transition-all`}
+      aria-label="전체 실행 상태 및 요약"
+    >
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+        {/* Left: Overall Run Identity & Title */}
+        <div className="flex items-start gap-3 min-w-0">
+          <div className="p-2.5 rounded-xl bg-black/40 border border-border/60 shrink-0 mt-0.5">
+            {overallIcon}
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+                오케스트레이션 실행 관제
+              </span>
+              {activeRunId && (
+                <div className="flex items-center gap-1 bg-black/50 border border-border/80 px-2 py-0.5 rounded text-[11px] font-mono text-cyan-300">
+                  <span className="text-slate-400">실행 ID:</span>
+                  <span className="truncate max-w-[140px] sm:max-w-[200px]">{activeRunId}</span>
+                  <button
+                    type="button"
+                    onClick={() => onCopy(`run-${activeRunId}`, activeRunId)}
+                    className="ml-1 text-slate-400 hover:text-white p-0.5 rounded focus-visible:ring-1 focus-visible:ring-cyan-400"
+                    title="실행 ID 복사"
+                    aria-label="실행 ID 복사"
+                  >
+                    {copiedId === `run-${activeRunId}` ? (
+                      <Check className="h-3 w-3 text-emerald-400" />
+                    ) : (
+                      <Copy className="h-3 w-3" />
+                    )}
+                  </button>
+                </div>
+              )}
+              <Badge variant="secondary" className={`text-[11px] font-semibold px-2 py-0.5 border ${overallBorder} ${overallTone} bg-black/40`}>
+                {overallBadge}
+              </Badge>
+              {autoRefresh ? (
+                <span className="text-[10px] text-emerald-400 bg-emerald-950/40 border border-emerald-500/20 px-1.5 py-0.5 rounded font-mono hidden sm:inline">
+                  폴링 1초
+                </span>
+              ) : (
+                <span className="text-[10px] text-muted-foreground bg-black/40 px-1.5 py-0.5 rounded font-mono hidden sm:inline">
+                  일시정지됨
+                </span>
+              )}
+            </div>
+
+            <h2 className={`text-base sm:text-lg font-bold tracking-tight mt-1 ${overallTone} truncate`}>
+              {overallTitle}
+            </h2>
+            <p className="text-xs text-slate-300 mt-0.5 leading-relaxed break-words">
+              {overallDesc}
+            </p>
+          </div>
+        </div>
+
+        {/* Right: Quick KPI counters */}
+        <div className="flex flex-wrap items-center gap-2 sm:gap-2.5 shrink-0 pt-2 lg:pt-0 border-t border-border/40 lg:border-t-0">
+          <div className="flex flex-col items-center bg-black/40 border border-border/60 rounded-xl px-3 py-1.5 min-w-[70px]">
+            <span className="text-[10px] text-slate-400 font-medium">전체 워커</span>
+            <span className="text-sm font-bold font-mono text-slate-100">{countTotal}개</span>
+          </div>
+
+          <div className={`flex flex-col items-center rounded-xl px-3 py-1.5 min-w-[70px] border ${
+            countRunning > 0 ? 'bg-cyan-950/50 border-cyan-500/40 text-cyan-300' : 'bg-black/40 border-border/60 text-slate-400'
+          }`}>
+            <span className="text-[10px] font-medium flex items-center gap-1">
+              <PlayCircle className="h-2.5 w-2.5" /> 실행 중
+            </span>
+            <span className="text-sm font-bold font-mono">{countRunning}</span>
+          </div>
+
+          <div className={`flex flex-col items-center rounded-xl px-3 py-1.5 min-w-[70px] border ${
+            countCompleted > 0 ? 'bg-emerald-950/50 border-emerald-500/40 text-emerald-300' : 'bg-black/40 border-border/60 text-slate-400'
+          }`}>
+            <span className="text-[10px] font-medium flex items-center gap-1">
+              <CheckCircle2 className="h-2.5 w-2.5" /> 완료
+            </span>
+            <span className="text-sm font-bold font-mono">{countCompleted}</span>
+          </div>
+
+          {(countPolicyViolation > 0 || countTestFailed > 0) && (
+            <div className="flex flex-col items-center rounded-xl px-3 py-1.5 min-w-[70px] bg-rose-950/50 border border-rose-500/40 text-rose-300">
+              <span className="text-[10px] font-medium flex items-center gap-1">
+                <AlertCircle className="h-2.5 w-2.5" /> 실패/위반
+              </span>
+              <span className="text-sm font-bold font-mono">{countPolicyViolation + countTestFailed}</span>
+            </div>
+          )}
+
+          {countEscalated > 0 && (
+            <div className="flex flex-col items-center rounded-xl px-3 py-1.5 min-w-[70px] bg-purple-950/50 border border-purple-500/40 text-purple-300">
+              <span className="text-[10px] font-medium flex items-center gap-1">
+                <AlertOctagon className="h-2.5 w-2.5" /> 에스컬레이션
+              </span>
+              <span className="text-sm font-bold font-mono">{countEscalated}</span>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Quick Task Pills (if multiple workers) */}
+      {countTotal > 0 && (
+        <div className="mt-3.5 pt-3 border-t border-border/40 flex flex-wrap items-center gap-2">
+          <span className="text-[11px] text-slate-400 font-medium shrink-0">할당된 워커 목록:</span>
+          {workers.map((w, idx) => {
+            const safeStatus = getWorkerStatusConfig(w.status);
+            const StatusIcon = safeStatus.icon;
+            return (
+              <div 
+                key={w.taskId || w.runId || idx}
+                className="flex items-center gap-1.5 bg-black/50 border border-border/70 rounded-lg px-2.5 py-1 text-xs text-slate-200 min-w-0"
+              >
+                <span className="font-mono font-bold text-cyan-300 shrink-0">
+                  {w.taskId || `WORKER-${idx + 1}`}
+                </span>
+                <span className="truncate max-w-[140px] sm:max-w-[200px]" title={w.task}>
+                  {w.task}
+                </span>
+                <Badge variant="outline" className={`text-[10px] px-1.5 py-0 border ${safeStatus.badgeClass} shrink-0 flex items-center gap-1`}>
+                  <StatusIcon className="h-2.5 w-2.5" />
+                  <span>{safeStatus.shortLabel}</span>
+                </Badge>
+                <span className="text-[10px] text-slate-400 font-mono hidden sm:inline shrink-0">
+                  {formatDurationSeconds(w.elapsedSeconds)}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function LiveWorkerPanel({
   live,
   onCopy,
@@ -1866,28 +2462,33 @@ function LiveWorkerPanel({
   if (!live || !live.runId) {
     return (
       <section 
-        className="mt-6 rounded-2xl border border-border/60 bg-card/40 p-4 text-xs backdrop-blur-sm shadow-sm"
+        className="rounded-2xl border border-border/60 bg-card/40 p-4 text-xs backdrop-blur-sm shadow-sm"
         aria-label="실시간 워커 상태"
       >
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-muted-foreground">
           <div className="flex items-center gap-2.5">
-            <span className="relative flex h-2.5 w-2.5">
-              <span className="h-2.5 w-2.5 rounded-full bg-slate-500/50" />
-            </span>
+            <span className="h-2.5 w-2.5 rounded-full bg-slate-500/50" />
             <span className="font-semibold text-slate-300">실시간 워커 모니터</span>
             <span className="text-slate-600 hidden sm:inline">|</span>
             <span className="text-slate-400 text-[11px]">현재 실행 중인 백그라운드 스트리밍 작업이 없습니다. (1초 주기 대기 중)</span>
           </div>
           <Badge variant="outline" className="text-[10px] text-slate-400 border-border/60 self-start sm:self-auto">
-            IDLE
+            대기 중 (IDLE)
           </Badge>
         </div>
       </section>
     );
   }
 
+  const statusConfig = getWorkerStatusConfig(live.status);
+  const StatusIcon = statusConfig.icon;
+  const stage = getWorkerStageContext(live);
+  const tierInfo = getModelTierInfo(live.model);
   const isRunning = live.status === 'running';
-  const isCompleted = live.status === 'completed';
+  const isPolicyViolation = live.status === 'policy_violation';
+  const isTestFailed = live.status === 'test_failed';
+  const isTimedOut = live.status === 'timed_out';
+  const isEscalated = live.status === 'escalated';
   const isFailed = live.status === 'failed';
 
   const logs = Array.isArray(live.recentLogs) ? live.recentLogs : [];
@@ -1896,122 +2497,297 @@ function LiveWorkerPanel({
 
   return (
     <section 
-      className={`mt-6 rounded-2xl border transition-all duration-300 overflow-hidden shadow-lg ${
-        isRunning 
-          ? 'border-cyan-500/50 bg-gradient-to-b from-cyan-950/25 via-card/90 to-background shadow-cyan-950/30 ring-1 ring-cyan-400/30' 
-          : isCompleted
-          ? 'border-emerald-500/40 bg-gradient-to-b from-emerald-950/20 via-card/85 to-background shadow-emerald-950/20'
-          : 'border-rose-500/40 bg-gradient-to-b from-rose-950/20 via-card/85 to-background shadow-rose-950/20'
-      }`}
-      role="region"
-      aria-label="실시간 워커 스트리밍 모니터링 패널"
+      className={`rounded-2xl border transition-all duration-200 overflow-hidden shadow-lg ${statusConfig.borderClass} bg-gradient-to-b ${statusConfig.bgGradient} ${statusConfig.ringClass}`}
+      aria-label={`워커 ${live.taskId || live.runId} 실시간 모니터`}
       aria-live="polite"
     >
-      {/* Header bar */}
-      <div className="flex flex-wrap items-center justify-between gap-3 p-4 border-b border-border/50">
-        <div className="flex items-center gap-3">
-          {isRunning ? (
-            <span className="relative flex h-3 w-3">
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-75" />
-              <span className="relative inline-flex rounded-full h-3 w-3 bg-cyan-400" />
-            </span>
-          ) : isCompleted ? (
-            <span className="inline-flex rounded-full h-3 w-3 bg-emerald-400" />
-          ) : (
-            <span className="inline-flex rounded-full h-3 w-3 bg-rose-400" />
-          )}
+      {/* 1. HEADER BAR: Worker Identity, Status Badge, Controls */}
+      <div className="p-4 sm:p-5 border-b border-border/50 bg-black/20">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          {/* Left: Task ID, Task Name, Status & Attempt */}
+          <div className="flex items-start gap-3 min-w-0">
+            <div className={`p-2 rounded-xl border shrink-0 mt-0.5 ${statusConfig.borderClass} bg-black/40`}>
+              <StatusIcon className={`h-4 w-4 sm:h-5 sm:w-5 ${statusConfig.textClass}`} />
+            </div>
 
-          <div>
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="font-semibold text-sm text-slate-100 flex items-center gap-1.5">
-                <Terminal className="h-4 w-4 text-cyan-400" />
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2">
+                {live.taskId && (
+                  <span className="font-mono text-xs font-bold px-2 py-0.5 rounded bg-cyan-950/80 text-cyan-300 border border-cyan-500/40">
+                    {live.taskId}
+                  </span>
+                )}
+                {live.attempt && live.attempt > 1 && (
+                  <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-amber-950/70 text-amber-300 border border-amber-500/30">
+                    재시도 {live.attempt}{live.retryLimit ? `/${live.retryLimit + 1}` : ''}회차
+                  </span>
+                )}
+                <Badge 
+                  variant="secondary" 
+                  className={`text-xs font-bold px-2.5 py-0.5 border flex items-center gap-1.5 ${statusConfig.badgeClass}`}
+                >
+                  <StatusIcon className="h-3 w-3" />
+                  <span>{statusConfig.badgeLabel}</span>
+                </Badge>
+              </div>
+
+              <h3 className="font-bold text-sm sm:text-base text-slate-100 mt-1 break-words">
                 {live.task || '무제 작업'}
-              </span>
-              <Badge 
-                variant="secondary" 
-                className={`text-[10px] font-medium uppercase px-2 py-0.5 ${
-                  isRunning 
-                    ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-400/40 animate-pulse' 
-                    : isCompleted
-                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-400/30'
-                    : 'bg-rose-500/20 text-rose-300 border border-rose-400/30'
-                }`}
-              >
-                {isRunning ? '● 실시간 스트리밍 중 (LIVE)' : isCompleted ? '✓ 최근 실행 완료' : '✕ 실행 실패'}
-              </Badge>
-              {isCompleted && (
-                <span className="text-[11px] text-muted-foreground hidden sm:inline">
-                  (※ 하단 작업 흐름 표 및 누적 통계에 확정 반영됨)
-                </span>
+              </h3>
+            </div>
+          </div>
+
+          {/* Right: Expand/Collapse & Copy Button */}
+          <div className="flex items-center gap-2 self-end sm:self-auto shrink-0">
+            <button
+              type="button"
+              onClick={() => onCopy(live.taskId || live.runId, JSON.stringify(live, null, 2))}
+              className="flex items-center gap-1 text-xs text-slate-300 hover:text-white px-2.5 py-1.5 rounded-lg border border-border/60 bg-secondary/30 hover:bg-secondary/60 transition-colors focus-visible:ring-2 focus-visible:ring-cyan-400 focus-visible:outline-none min-h-[36px]"
+              title="워커 전체 데이터 JSON 복사"
+              aria-label="워커 전체 데이터 JSON 복사"
+            >
+              {copiedJobId === (live.taskId || live.runId) ? (
+                <>
+                  <Check className="h-3.5 w-3.5 text-emerald-400" />
+                  <span className="text-emerald-400">복사됨</span>
+                </>
+              ) : (
+                <>
+                  <Copy className="h-3.5 w-3.5" />
+                  <span>JSON 복사</span>
+                </>
               )}
-            </div>
-            <div className="flex items-center gap-2 sm:gap-3 text-xs text-muted-foreground mt-1 font-mono flex-wrap">
-              <span>모델: <strong className="text-cyan-300">{live.model || '기본 모델'}</strong></span>
-              <span>•</span>
-              <span>경과: <strong className="text-amber-300">{live.elapsedSeconds}초</strong></span>
-              <span>•</span>
-              <span>시작: {live.startedAt ? new Date(live.startedAt).toLocaleTimeString('ko-KR') : '-'}</span>
-              <span>•</span>
-              <span>갱신: {live.updatedAt ? new Date(live.updatedAt).toLocaleTimeString('ko-KR') : '-'}</span>
-            </div>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setIsExpanded(!isExpanded)}
+              className="flex items-center gap-1 text-xs text-slate-200 hover:text-white px-3 py-1.5 rounded-lg border border-border/70 bg-secondary/50 hover:bg-secondary transition-colors focus-visible:ring-2 focus-visible:ring-cyan-400 focus-visible:outline-none min-h-[36px]"
+              aria-expanded={isExpanded}
+              aria-label={isExpanded ? '상세 정보 접기' : '상세 정보 펼치기'}
+            >
+              {isExpanded ? (
+                <>
+                  <ChevronUp className="h-4 w-4 text-cyan-400" />
+                  <span className="font-medium">접기</span>
+                </>
+              ) : (
+                <>
+                  <ChevronDown className="h-4 w-4 text-cyan-400" />
+                  <span className="font-medium">상세 보기 ({logs.length}건 로그)</span>
+                </>
+              )}
+            </button>
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={() => setIsExpanded(!isExpanded)}
-            className="flex items-center gap-1 text-xs text-slate-400 hover:text-slate-200 px-2.5 py-1.5 rounded-lg border border-border/60 bg-secondary/30 hover:bg-secondary/60 transition-colors focus-visible:ring-2 focus-visible:ring-cyan-400 focus-visible:outline-none"
-            aria-expanded={isExpanded}
-            aria-label={isExpanded ? '라이브 패널 접기' : '라이브 패널 펼치기'}
-          >
-            {isExpanded ? (
-              <>
-                <ChevronUp className="h-3.5 w-3.5" />
-                <span>접기</span>
-              </>
-            ) : (
-              <>
-                <ChevronDown className="h-3.5 w-3.5" />
-                <span>상세 보기 ({logs.length}건 로그)</span>
-              </>
-            )}
-          </button>
+        {/* 2. CONTEXT & SPECS STRIP: Priority Layout */}
+        <div className="mt-3.5 pt-3 border-t border-border/40 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5 text-xs">
+          {/* Priority A: Current Phase / Execution Context */}
+          <div className="bg-black/40 border border-border/50 rounded-xl p-2.5 flex flex-col justify-between">
+            <span className="text-[10px] font-semibold uppercase text-slate-400 flex items-center gap-1">
+              <Layers className="h-3 w-3 text-cyan-400" /> 현재 진행 단계
+            </span>
+            <div className="mt-1">
+              <Badge variant="outline" className={`text-[11px] font-bold px-2 py-0.5 border ${stage.badgeStyle}`}>
+                {stage.phaseTitle}
+              </Badge>
+              <p className="text-[11px] text-slate-300 mt-1 leading-snug break-words">
+                {stage.phaseDetail}
+              </p>
+            </div>
+          </div>
+
+          {/* Priority B: Model & Tier */}
+          <div className="bg-black/40 border border-border/50 rounded-xl p-2.5 flex flex-col justify-between">
+            <span className="text-[10px] font-semibold uppercase text-slate-400 flex items-center gap-1">
+              <Bot className="h-3 w-3 text-cyan-400" /> 모델 / 티어
+            </span>
+            <div className="mt-1">
+              <Badge variant="outline" className={`text-[11px] font-mono font-semibold px-2 py-0.5 border ${tierInfo.badgeClass}`}>
+                {tierInfo.name}
+              </Badge>
+              <p className="font-mono text-xs font-semibold text-slate-200 mt-1 truncate" title={live.model}>
+                {live.model || '기본 모델'}
+              </p>
+            </div>
+          </div>
+
+          {/* Priority C: Elapsed Duration */}
+          <div className="bg-black/40 border border-border/50 rounded-xl p-2.5 flex flex-col justify-between">
+            <span className="text-[10px] font-semibold uppercase text-slate-400 flex items-center gap-1">
+              <Clock3 className="h-3 w-3 text-amber-400" /> 경과 시간
+            </span>
+            <div className="mt-1">
+              <span className="text-base font-bold font-mono text-amber-300">
+                {formatDurationSeconds(live.elapsedSeconds)}
+              </span>
+              <p className="text-[10px] text-slate-400 font-mono mt-0.5">
+                초단위: {Math.round(live.elapsedSeconds)}초
+              </p>
+            </div>
+          </div>
+
+          {/* Priority D: Timestamps */}
+          <div className="bg-black/40 border border-border/50 rounded-xl p-2.5 flex flex-col justify-between">
+            <span className="text-[10px] font-semibold uppercase text-slate-400 flex items-center gap-1">
+              <Activity className="h-3 w-3 text-violet-400" /> 시작 / 갱신 시각
+            </span>
+            <div className="mt-1 space-y-0.5 font-mono text-[11px] text-slate-300">
+              <div className="truncate">
+                <span className="text-slate-400">시작:</span> {live.startedAt ? new Date(live.startedAt).toLocaleTimeString('ko-KR') : '-'}
+              </div>
+              <div className="truncate">
+                <span className="text-slate-400">갱신:</span> {live.updatedAt ? new Date(live.updatedAt).toLocaleTimeString('ko-KR') : '-'}
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 
-      {/* Expanded body */}
+      {/* 3. POLICY / VERIFICATION / OUTCOME ALERTS (Clear Visual Differentiation) */}
+      {isPolicyViolation && (
+        <div className="mx-4 sm:mx-5 mt-4 p-3.5 rounded-xl border border-amber-500/60 bg-amber-950/40 text-xs shadow-md" role="alert">
+          <div className="flex items-start gap-2.5">
+            <ShieldAlert className="h-5 w-5 text-amber-400 shrink-0 mt-0.5" />
+            <div className="min-w-0 flex-1 space-y-1">
+              <h4 className="font-bold text-amber-300 text-sm flex items-center gap-1.5">
+                <span>정책 위반 차단 (Policy Violation)</span>
+                <Badge variant="outline" className="text-[10px] border-amber-500/40 text-amber-300">
+                  수정 범위 초과
+                </Badge>
+              </h4>
+              <p className="text-slate-200 leading-relaxed">
+                오케스트레이터의 파일 안전 격리 정책에 의해 작업이 즉시 차단되었습니다. 작업에 할당된 <strong>allowed_files</strong> 범위를 벗어난 파일이 수정되었거나 권한 없는 파일 접근이 발생했습니다.
+              </p>
+              {live.policy?.violations && live.policy.violations.length > 0 && (
+                <div className="mt-2 p-2 rounded bg-black/50 border border-amber-500/30 font-mono text-[11px]">
+                  <span className="text-amber-400 font-semibold block mb-1">위반 감지된 파일 목록:</span>
+                  <ul className="list-disc list-inside space-y-0.5 text-slate-300">
+                    {live.policy.violations.map((f, i) => (
+                      <li key={i} className="break-all">{f}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {live.policy?.allowedFiles && live.policy.allowedFiles.length > 0 && (
+                <div className="text-[11px] text-slate-400 font-mono">
+                  <span>허용된 파일: {live.policy.allowedFiles.join(', ')}</span>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isTestFailed && (
+        <div className="mx-4 sm:mx-5 mt-4 p-3.5 rounded-xl border border-rose-500/60 bg-rose-950/40 text-xs shadow-md" role="alert">
+          <div className="flex items-start gap-2.5">
+            <FileCode2 className="h-5 w-5 text-rose-400 shrink-0 mt-0.5" />
+            <div className="min-w-0 flex-1 space-y-1">
+              <h4 className="font-bold text-rose-300 text-sm flex items-center gap-1.5">
+                <span>결정론적 검증 실패 (Verification Test Failed)</span>
+                <Badge variant="outline" className="text-[10px] border-rose-500/40 text-rose-300">
+                  검증 명령 미통과
+                </Badge>
+              </h4>
+              <p className="text-slate-200 leading-relaxed">
+                작업 코드 수정 후 실행된 결정론적 검증 명령(test_commands, 빌드, 린트 등)이 0이 아닌 종료 코드를 반환했습니다.
+              </p>
+              {live.verification?.commands && live.verification.commands.length > 0 && (
+                <div className="mt-2 space-y-2 font-mono text-[11px]">
+                  {live.verification.commands.map((cmd, i) => (
+                    <div key={i} className="p-2 rounded bg-black/50 border border-rose-500/30">
+                      <div className="flex flex-wrap items-center justify-between gap-1 text-slate-300">
+                        <span className="font-bold text-rose-300 break-all">명령: {cmd.command}</span>
+                        <span className="px-1.5 py-0.5 rounded bg-rose-950/80 text-rose-300 border border-rose-500/40 text-[10px]">
+                          종료 코드: {cmd.exitCode}
+                        </span>
+                      </div>
+                      {cmd.output && (
+                        <pre className="mt-1.5 text-slate-400 text-[10px] max-h-24 overflow-y-auto whitespace-pre-wrap break-all p-1.5 bg-black/40 rounded border border-border/40">
+                          {cmd.output}
+                        </pre>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isEscalated && (
+        <div className="mx-4 sm:mx-5 mt-4 p-3.5 rounded-xl border border-purple-500/60 bg-purple-950/40 text-xs shadow-md" role="alert">
+          <div className="flex items-start gap-2.5">
+            <AlertOctagon className="h-5 w-5 text-purple-400 shrink-0 mt-0.5" />
+            <div className="min-w-0 flex-1 space-y-1">
+              <h4 className="font-bold text-purple-300 text-sm flex items-center gap-1.5">
+                <span>인간 또는 Codex 검토 필요 (Escalated)</span>
+                <Badge variant="outline" className="text-[10px] border-purple-500/40 text-purple-300">
+                  수동 개입 대기
+                </Badge>
+              </h4>
+              <p className="text-slate-200 leading-relaxed">
+                자동 재시도 한도를 초과하였거나 설계 오류가 감지되어 워커의 자동 처리가 안전하게 중단되었습니다.
+              </p>
+              {live.escalation?.reason && (
+                <p className="text-purple-300 font-mono text-[11px] p-2 bg-black/50 rounded border border-purple-500/30">
+                  사유: {live.escalation.reason}
+                </p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isTimedOut && (
+        <div className="mx-4 sm:mx-5 mt-4 p-3.5 rounded-xl border border-orange-500/60 bg-orange-950/40 text-xs shadow-md" role="alert">
+          <div className="flex items-start gap-2.5">
+            <Hourglass className="h-5 w-5 text-orange-400 shrink-0 mt-0.5" />
+            <div className="min-w-0 flex-1 space-y-1">
+              <h4 className="font-bold text-orange-300 text-sm">실행 제한 시간 초과 (Timed Out)</h4>
+              <p className="text-slate-200 leading-relaxed">
+                작업에 할당된 최대 실행 시간을 초과하여 프로세스가 안전하게 강제 종료되었습니다. 작업 단위를 작게 분할하거나 timeout_seconds를 늘려 재실행하세요.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 4. EXPANDABLE BODY: Tokens, Terminal Logs, Output Preview */}
       {isExpanded && (
-        <div className="p-4 space-y-4 animate-fade-in">
+        <div className="p-4 sm:p-5 space-y-4 animate-fade-in">
           {/* Live partial token usage bar */}
           <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5 text-xs">
-            <div className="bg-black/35 rounded-xl p-2.5 border border-border/40">
-              <div className="text-[10px] text-muted-foreground">현재 총 토큰</div>
-              <div className="text-base font-bold font-mono text-cyan-200 mt-0.5">
+            <div className="bg-black/40 rounded-xl p-3 border border-border/50">
+              <div className="text-[10px] text-slate-400 font-semibold uppercase">현재 총 토큰</div>
+              <div className="text-base sm:text-lg font-bold font-mono text-cyan-200 mt-0.5 truncate">
                 {partialTotal.toLocaleString()}
               </div>
             </div>
-            <div className="bg-black/35 rounded-xl p-2.5 border border-border/40">
-              <div className="text-[10px] text-muted-foreground">프롬프트 (입력)</div>
-              <div className="text-sm font-semibold font-mono text-slate-200 mt-0.5">
+            <div className="bg-black/40 rounded-xl p-3 border border-border/50">
+              <div className="text-[10px] text-slate-400 font-semibold uppercase">프롬프트 (입력)</div>
+              <div className="text-sm sm:text-base font-semibold font-mono text-slate-200 mt-0.5 truncate">
                 {partial.prompt.toLocaleString()}
               </div>
             </div>
-            <div className="bg-black/35 rounded-xl p-2.5 border border-border/40">
-              <div className="text-[10px] text-muted-foreground">후보 (출력)</div>
-              <div className="text-sm font-semibold font-mono text-violet-300 mt-0.5">
+            <div className="bg-black/40 rounded-xl p-3 border border-border/50">
+              <div className="text-[10px] text-slate-400 font-semibold uppercase">후보 (출력)</div>
+              <div className="text-sm sm:text-base font-semibold font-mono text-violet-300 mt-0.5 truncate">
                 {partial.candidates.toLocaleString()}
               </div>
             </div>
-            <div className="bg-black/35 rounded-xl p-2.5 border border-border/40">
-              <div className="text-[10px] text-muted-foreground">사고 (Thoughts)</div>
-              <div className="text-sm font-semibold font-mono text-amber-300 mt-0.5">
+            <div className="bg-black/40 rounded-xl p-3 border border-border/50">
+              <div className="text-[10px] text-slate-400 font-semibold uppercase">사고 (Thoughts)</div>
+              <div className="text-sm sm:text-base font-semibold font-mono text-amber-300 mt-0.5 truncate">
                 {partial.thoughts.toLocaleString()}
               </div>
             </div>
-            <div className="bg-black/35 rounded-xl p-2.5 border border-border/40 col-span-2 sm:col-span-1">
-              <div className="text-[10px] text-muted-foreground">캐시 (Cached)</div>
-              <div className="text-sm font-semibold font-mono text-emerald-300 mt-0.5">
+            <div className="bg-black/40 rounded-xl p-3 border border-border/50 col-span-2 sm:col-span-1">
+              <div className="text-[10px] text-slate-400 font-semibold uppercase">캐시 (Cached)</div>
+              <div className="text-sm sm:text-base font-semibold font-mono text-emerald-300 mt-0.5 truncate">
                 {partial.cached.toLocaleString()}
               </div>
             </div>
@@ -2020,20 +2796,20 @@ function LiveWorkerPanel({
           {/* Terminal Logs & Output */}
           <div className="grid gap-4 lg:grid-cols-[1.2fr_0.8fr]">
             {/* Live streaming logs */}
-            <div className="rounded-xl border border-border/70 bg-[#05080c] overflow-hidden flex flex-col h-[260px]">
-              <div className="bg-black/60 border-b border-border/40 px-3.5 py-2 flex items-center justify-between text-xs">
-                <span className="font-semibold text-slate-300 flex items-center gap-1.5">
+            <div className="rounded-xl border border-border/70 bg-[#05080c] overflow-hidden flex flex-col h-[280px]">
+              <div className="bg-black/70 border-b border-border/50 px-3.5 py-2.5 flex items-center justify-between text-xs">
+                <span className="font-semibold text-slate-200 flex items-center gap-1.5">
                   <Terminal className="h-3.5 w-3.5 text-cyan-400" />
                   실시간 스트리밍 로그 (Live NDJSON Events)
                 </span>
-                <span className="text-[10px] font-mono text-muted-foreground">
+                <span className="text-[10px] font-mono text-slate-400">
                   최근 {logs.length}건
                 </span>
               </div>
 
               <div className="p-3 overflow-y-auto flex-1 font-mono text-[11px] space-y-1.5 select-text">
                 {logs.length === 0 ? (
-                  <div className="text-muted-foreground text-center py-10 italic">
+                  <div className="text-muted-foreground text-center py-12 italic">
                     대기 중... 이벤트 수신 시 실시간 표시됩니다.
                   </div>
                 ) : (
@@ -2072,17 +2848,18 @@ function LiveWorkerPanel({
             </div>
 
             {/* Response Preview or Error Box */}
-            <div className="rounded-xl border border-border/70 bg-[#070a0e] overflow-hidden flex flex-col h-[260px]">
-              <div className="bg-black/60 border-b border-border/40 px-3.5 py-2 flex items-center justify-between text-xs">
-                <span className="font-semibold text-slate-300 flex items-center gap-1.5">
+            <div className="rounded-xl border border-border/70 bg-[#070a0e] overflow-hidden flex flex-col h-[280px]">
+              <div className="bg-black/70 border-b border-border/50 px-3.5 py-2.5 flex items-center justify-between text-xs">
+                <span className="font-semibold text-slate-200 flex items-center gap-1.5">
                   <Activity className="h-3.5 w-3.5 text-cyan-400" />
-                  {isFailed ? '오류 메시지 (Error)' : '응답 결과 미리보기 (Preview)'}
+                  {isFailed || isPolicyViolation || isTestFailed ? '오류 / 결과 상세 (Details)' : '응답 결과 미리보기 (Preview)'}
                 </span>
-                {live.finalResponse && (
+                {(live.finalResponse || live.error) && (
                   <button
                     type="button"
-                    onClick={() => onCopy(live.runId, live.finalResponse || '')}
-                    className="text-[11px] text-slate-400 hover:text-cyan-300 flex items-center gap-1 bg-black/40 px-2 py-0.5 rounded border border-border/60 transition-colors focus-visible:ring-2 focus-visible:ring-cyan-400 focus-visible:outline-none"
+                    onClick={() => onCopy(live.runId, live.finalResponse || live.error || '')}
+                    className="text-[11px] text-slate-300 hover:text-cyan-300 flex items-center gap-1 bg-black/50 px-2 py-0.5 rounded border border-border/60 transition-colors focus-visible:ring-2 focus-visible:ring-cyan-400 focus-visible:outline-none"
+                    aria-label="결과 전문 복사"
                   >
                     {copiedJobId === live.runId ? (
                       <>
@@ -2101,17 +2878,17 @@ function LiveWorkerPanel({
 
               <div className="p-3 overflow-y-auto flex-1 font-mono text-[11px] select-text">
                 {live.error ? (
-                  <pre className="text-rose-400 whitespace-pre-wrap leading-relaxed">
+                  <pre className="text-rose-300 whitespace-pre-wrap break-all leading-relaxed">
                     {live.error}
                   </pre>
                 ) : live.finalResponse ? (
-                  <pre className="text-slate-200 whitespace-pre-wrap leading-relaxed">
+                  <pre className="text-slate-200 whitespace-pre-wrap break-all leading-relaxed">
                     {live.finalResponse}
                   </pre>
                 ) : isRunning ? (
                   <div className="h-full flex flex-col items-center justify-center text-muted-foreground gap-2">
                     <RefreshCw className="h-5 w-5 animate-spin text-cyan-400" />
-                    <span className="text-xs">Antigravity 스트리밍 생성 중...</span>
+                    <span className="text-xs text-slate-300 font-semibold">Gemini 백그라운드 스트리밍 처리 중...</span>
                     <span className="text-[10px] text-slate-500">완료 시 결과 전문이 표시됩니다.</span>
                   </div>
                 ) : (
