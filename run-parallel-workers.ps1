@@ -179,6 +179,11 @@ function Update-DashboardUsage {
       if (-not $existing.model -and $mdl) { $existing.model = $mdl }
       if (-not $existing.finalResponse -and $resp) { $existing.finalResponse = $resp }
       if (-not $existing.error -and $err) { $existing.error = $err }
+      if (-not $existing.taskName -and $tName) { $existing.taskName = $tName }
+      if ((-not $existing.elapsedSeconds -or [double]$existing.elapsedSeconds -le 0) -and $elapsedSec) {
+        $existing.elapsedSeconds = $elapsedSec
+      }
+      if ((-not $existing.updatedAt) -and $updAt) { $existing.updatedAt = $updAt }
       if (-not $existing.hasConfirmedUsage -and $hasConfirmedUsage) {
         $existing.hasConfirmedUsage = $true
         $existing.prompt = $prompt

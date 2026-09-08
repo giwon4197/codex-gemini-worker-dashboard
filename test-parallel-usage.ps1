@@ -421,6 +421,8 @@ try {
     Assert-Test 'jobs 내역 1건만 등록' ($dRetry.jobs.Count -eq 1) "실제 값: $($dRetry.jobs.Count)"
     Assert-Test 'jobs 최종 상태 완료' ($dRetry.jobs[0].status -eq '완료')
     Assert-Test 'jobs 총 토큰 합산 표기 (1,300)' ($dRetry.jobs[0].tokens -eq '1,300')
+    Assert-Test '이벤트보다 풍부한 상태에서 작업명 보존' ($dRetry.jobs[0].name -eq '재시도 테스트') "실제 값: $($dRetry.jobs[0].name)"
+    Assert-Test '두 시도의 실제 경과시간 합산 표기' ($dRetry.jobs[0].duration -eq '9.5초') "실제 값: $($dRetry.jobs[0].duration)"
 
     # Re-sync idempotency test
     & pwsh.exe -NoProfile -File $parallelScript -SyncStateRoot $runRetryRoot -DashboardPath $dashRetry
