@@ -143,6 +143,20 @@ exit $LASTEXITCODE
 '@.Replace('__INSTALL_ROOT__', $escapedRoot)
     Set-Content -LiteralPath (Join-Path $launcherDir 'stop-parallel-run.ps1') -Value $stopParallelLauncher -Encoding utf8
 
+    $codexRouterLauncher = @'
+[CmdletBinding()]
+param(
+  [Parameter(Mandatory=$true,Position=0)][string]$Request,
+  [string]$Repository='',
+  [switch]$PlanOnly
+)
+$root = '__INSTALL_ROOT__'
+$repo = if ([string]::IsNullOrWhiteSpace($Repository)) { (Get-Location).Path } else { (Resolve-Path -LiteralPath $Repository).Path }
+& (Join-Path $root 'codex-router.ps1') -Request $Request -Repository $repo -PlanOnly:$PlanOnly
+exit $LASTEXITCODE
+'@.Replace('__INSTALL_ROOT__', $escapedRoot)
+    Set-Content -LiteralPath (Join-Path $launcherDir 'codex-route.ps1') -Value $codexRouterLauncher -Encoding utf8
+
     $dashboardLauncher = @'
 [CmdletBinding()]
 param()
@@ -178,10 +192,15 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0parallel-gemini-wo
 @echo off
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0stop-parallel-run.ps1" %*
 '@
+    $codexRouterCmd = @'
+@echo off
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0codex-route.ps1" %*
+'@
     Set-Content -LiteralPath (Join-Path $launcherDir 'gemini-worker.cmd') -Value $workerCmd -Encoding ascii
     Set-Content -LiteralPath (Join-Path $launcherDir 'worker-dashboard.cmd') -Value $dashboardCmd -Encoding ascii
     Set-Content -LiteralPath (Join-Path $launcherDir 'parallel-gemini-workers.cmd') -Value $parallelCmd -Encoding ascii
     Set-Content -LiteralPath (Join-Path $launcherDir 'stop-parallel-run.cmd') -Value $stopParallelCmd -Encoding ascii
+    Set-Content -LiteralPath (Join-Path $launcherDir 'codex-route.cmd') -Value $codexRouterCmd -Encoding ascii
     Add-UserPath $launcherDir
 
     Write-Host "설치 완료: $InstallRoot" -ForegroundColor Green

@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["level", "parallelizable", "max_workers", "summary", "integration_test_commands", "tasks"],
+  "properties": {
+    "level": { "type": "integer", "minimum": 0, "maximum": 3 },
+    "parallelizable": { "type": "boolean" },
+    "max_workers": { "type": "integer", "minimum": 1, "maximum": 2 },
+    "summary": { "type": "string", "minLength": 1 },
+    "integration_test_commands": { "type": "array", "items": { "type": "string", "minLength": 1 }, "maxItems": 8 },
+    "tasks": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "name", "objective", "prompt", "depends_on", "allowed_files", "test_commands", "tier", "timeout_seconds", "retry_limit"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^TASK-[0-9]{3}$" },
+          "name": { "type": "string", "minLength": 1 },
+          "objective": { "type": "string", "minLength": 1 },
+          "prompt": { "type": "string", "minLength": 1 },
+          "depends_on": { "type": "array", "items": { "type": "string", "pattern": "^TASK-[0-9]{3}$" }, "uniqueItems": true },
+          "allowed_files": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1, "uniqueItems": true },
+          "test_commands": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1, "maxItems": 8 },
+          "tier": { "type": "string", "enum": ["fast", "normal", "advanced", "reasoning"] },
+          "timeout_seconds": { "type": "integer", "minimum": 30, "maximum": 3600 },
+          "retry_limit": { "type": "integer", "minimum": 0, "maximum": 3 }
+        }
+      }
+    }
+  }
+}

@@ -106,6 +106,28 @@ git merge --ff-only integration/<run-id>
 
 기본 등급은 `normal`입니다. Codex는 작업 난이도에 따라 더 가볍거나 강한 등급을 선택할 수 있습니다.
 
+## Codex 자동 라우터
+
+자연어 요청 하나로 Codex가 저장소를 읽기 전용으로 분석하고 구조화된 작업 계획을 만든 뒤 Gemini 병렬 실행,
+검증, 임시 통합 브랜치, Codex diff review까지 수행합니다.
+
+```powershell
+codex-route -Request "독립 유틸 함수와 문서를 추가하고 테스트해줘" -Repository .
+```
+
+실행 전 계획만 확인하려면:
+
+```powershell
+codex-route -Request "요청 내용" -Repository . -PlanOnly
+```
+
+Codex 계획 호출은 `read-only`, `ephemeral`, JSON Schema 강제 모드로 실행됩니다. 라우터는 절대 경로,
+`.git/**`, `.agent/**`, 저장소 전체 wildcard, 중복 ownership을 거부합니다. 현재 실행 계획은 같은 base에서
+독립적으로 수행 가능한 task만 허용하며 dependency chain은 하나의 task로 합쳐 계획합니다.
+
+성공 시 최종 상태는 `awaiting_human_approval`입니다. 라우터와 Codex review는 main을 수정하지 않으며,
+`.agent/runs/<run-id>/codex-review.md`를 확인한 사용자가 명시적으로 승인해야 병합할 수 있습니다.
+
 ## 대시보드 기능
 
 - Gemini 작업 로그와 토큰을 NDJSON으로 실시간 수집
