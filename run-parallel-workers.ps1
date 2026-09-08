@@ -201,7 +201,16 @@ Repair-OrphanedRuns $agentRoot $repoRoot
 if (& git -C $repoRoot status --porcelain) { throw '병렬 실행 전 저장소 변경 사항을 commit하거나 stash해야 합니다.' }
 
 $tasksPath = (Resolve-Path -LiteralPath $TasksFile).Path
-$tasks = @(Get-Content -Raw -LiteralPath $tasksPath | ConvertFrom-Json)
+$taskConfig = Get-Content -Raw -LiteralPath $tasksPath | ConvertFrom-Json
+if ($taskConfig -is [array]) {
+  $tasks = @($taskConfig)
+  $integrationTestCommands = @()
+} elseif ($taskConfig.PSObject.Properties.Name -contains 'tasks') {
+  $tasks = @($taskConfig.tasks)
+  $integrationTestCommands = @($taskConfig.integration_test_commands)
+} else {
+  throw '작업 파일은 task 배열 또는 tasks 속성을 가진 객체여야 합니다.'
+}
 if ($tasks.Count -eq 0) { throw '작업 파일에 task가 없습니다.' }
 $ids = @($tasks | ForEach-Object { $_.id })
 if (($ids | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count -gt 0 -or ($ids | Select-Object -Unique).Count -ne $ids.Count) { throw '각 task에는 고유한 id가 필요합니다.' }
@@ -345,6 +354,21 @@ $compressed
       }
     }
 
+    $commitHashes = @()
+    if ($decision -eq 'PASS' -and $changed.Count -gt 0) {
+      & git -C $wt.path add -- @changed
+      if ($LASTEXITCODE -ne 0) {
+        $decision = 'COMMIT_FAILED'
+      } else {
+        & git -C $wt.path diff --cached --quiet
+        if ($LASTEXITCODE -ne 0) {
+          & git -C $wt.path -c user.name='Gemini Worker' -c user.email='gemini-worker@local' commit -m "agent($($task.id)): $($task.name)"
+          if ($LASTEXITCODE -ne 0) { $decision = 'COMMIT_FAILED' }
+        }
+        if ($decision -eq 'PASS') { $commitHashes = @(& git -C $wt.path rev-list --reverse "$baseCommit..HEAD") }
+      }
+    }
+
     $finalStatus = switch ($decision) {
       'PASS' { 'completed' }; 'POLICY_VIOLATION' { 'policy_violation' }; 'TEST_FAILED' { 'test_failed' }
       'TIMED_OUT' { 'timed_out' }; 'CANCELLED' { 'cancelled' }; 'WORKER_FAILED' { 'failed' }
@@ -354,6 +378,7 @@ $compressed
     Set-ObjectProperty $state 'baseCommit' $baseCommit; Set-ObjectProperty $state 'branch' $wt.branch; Set-ObjectProperty $state 'worktree' $wt.path
     Set-ObjectProperty $state 'attempt' $attempt; Set-ObjectProperty $state 'retryLimit' $retryLimit; Set-ObjectProperty $state 'retryHistory' $history
     Set-ObjectProperty $state 'changedFiles' $changed
+    Set-ObjectProperty $state 'commitHashes' $commitHashes
     Set-ObjectProperty $state 'policy' ([pscustomobject]@{ allowedFiles=@($task.allowed_files); violations=$violations; status=if($violations.Count){'FAIL'}else{'PASS'} })
     Set-ObjectProperty $state 'verification' ([pscustomobject]@{ decision=$decision; commands=$tests; verifiedAt=(Get-Date).ToString('o') })
     Set-ObjectProperty $state 'escalation' $(if ($decision -eq 'PASS') { $null } else { [pscustomobject]@{ requiresCodex=$true; category=$decision; reason="자동 처리 중단: $decision" } })
@@ -362,11 +387,62 @@ $compressed
     if ($decision -ne 'PASS') { $failed++ }
   }
 
+  $integration = $null
+  if ($failed -eq 0 -and -not (Test-Path -LiteralPath $cancelPath)) {
+    $integrationBranch = "integration/$runId"
+    $integrationPath = Join-Path $agentRoot "integration\$runId"
+    New-Item -ItemType Directory -Path (Split-Path -Parent $integrationPath) -Force | Out-Null
+    & git -C $repoRoot worktree add -b $integrationBranch $integrationPath $baseCommit
+    if ($LASTEXITCODE -ne 0) {
+      $integration = [pscustomobject]@{ branch=$integrationBranch; worktree=$integrationPath; decision='INTEGRATION_SETUP_FAILED'; approvalRequired=$true }
+      $failed++
+    } else {
+      $cherryPicks = @()
+      $integrationDecision = 'AWAITING_CODEX_REVIEW'
+      foreach ($task in $tasks) {
+        $safeId = ([string]$task.id) -replace '[^A-Za-z0-9._-]', '-'
+        $result = Get-Content -Raw (Join-Path $runRoot "results\$safeId-result.json") | ConvertFrom-Json
+        foreach ($commitHash in @($result.commitHashes)) {
+          & git -C $integrationPath cherry-pick $commitHash
+          $pickStatus = if ($LASTEXITCODE -eq 0) { 'PASS' } else { 'CONFLICT' }
+          $cherryPicks += [pscustomobject]@{ taskId=$task.id; commit=$commitHash; status=$pickStatus }
+          if ($pickStatus -eq 'CONFLICT') {
+            & git -C $integrationPath cherry-pick --abort 2>$null
+            $integrationDecision = 'INTEGRATION_CONFLICT'
+            break
+          }
+        }
+        if ($integrationDecision -eq 'INTEGRATION_CONFLICT') { break }
+      }
+      $integrationTests = if ($integrationDecision -eq 'AWAITING_CODEX_REVIEW') { @(Invoke-Verification $integrationPath $integrationTestCommands) } else { @() }
+      if (@($integrationTests | Where-Object status -eq 'FAIL').Count -gt 0) { $integrationDecision = 'INTEGRATION_TEST_FAILED' }
+      $diffFiles = @(& git -C $integrationPath diff --name-only "$baseCommit...HEAD" | Where-Object { $_ })
+      $diffStat = @(& git -C $integrationPath diff --stat "$baseCommit...HEAD") -join "`n"
+      $integrationCommits = @(& git -C $integrationPath rev-list --reverse "$baseCommit..HEAD")
+      $integration = [pscustomobject]@{
+        branch=$integrationBranch; worktree=$integrationPath; baseCommit=$baseCommit; headCommit=(& git -C $integrationPath rev-parse HEAD).Trim()
+        decision=$integrationDecision; approvalRequired=$true; mainModified=$false; cherryPicks=$cherryPicks
+        tests=$integrationTests; changedFiles=$diffFiles; diffStat=$diffStat; commits=$integrationCommits
+        reviewArtifact=(Join-Path $runRoot 'integration-review.md')
+      }
+      Write-AtomicJson (Join-Path $runRoot 'integration.json') $integration
+      $reviewLines = @(
+        "# Integration Review: $runId", '', "- Decision: $integrationDecision", "- Base: $baseCommit",
+        "- Branch: $integrationBranch", "- Head: $($integration.headCommit)", '- Main modified: false', '- Approval required: true', '',
+        '## Changed files', ''
+      ) + @($diffFiles | ForEach-Object { "- $_" }) + @('', '## Diff stat', '', '```text', $diffStat, '```', '', '## Integration tests', '') +
+        @($integrationTests | ForEach-Object { "- [$($_.status)] ``$($_.command)`` (exit $($_.exitCode))" })
+      [IO.File]::WriteAllText($integration.reviewArtifact, ($reviewLines -join "`n"), [Text.Encoding]::UTF8)
+      if ($integrationDecision -ne 'AWAITING_CODEX_REVIEW') { $failed++ }
+    }
+    Set-ObjectProperty $manifest 'integration' $integration
+  }
+
   Sync-LiveWorkers $runRoot
-  $manifest.status = if (Test-Path -LiteralPath $cancelPath) { 'cancelled' } elseif ($failed -eq 0) { 'completed' } else { 'failed' }
+  $manifest.status = if (Test-Path -LiteralPath $cancelPath) { 'cancelled' } elseif ($failed -gt 0) { 'failed' } elseif ($integration -and $integration.decision -eq 'AWAITING_CODEX_REVIEW') { 'awaiting_review' } else { 'completed' }
   $manifest.updatedAt = (Get-Date).ToString('o'); Write-AtomicJson $manifestPath $manifest
   Write-Output "Run: $runId"; Write-Output "State: $runRoot"; Write-Output "Status: $($manifest.status)"
-  if ($manifest.status -ne 'completed') { exit 1 }
+  if ($manifest.status -notin @('completed', 'awaiting_review')) { exit 1 }
 } finally {
   foreach ($record in $jobRecords) {
     if (-not $record.Process.HasExited) { try { $record.Process.Kill($true) } catch {} }

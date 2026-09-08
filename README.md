@@ -55,14 +55,19 @@ parallel-gemini-workers -TasksFile .\parallel-tasks.json -MaxWorkers 2
 
 ```json
 {
-  "id": "TASK-001",
-  "name": "독립 작업",
-  "prompt": "docs/worker-a.md를 생성하세요.",
-  "tier": "fast",
-  "allowed_files": ["docs/worker-a.md"],
-  "test_commands": ["if (-not (Test-Path 'docs/worker-a.md')) { exit 1 }"],
-  "timeout_seconds": 300,
-  "retry_limit": 3
+  "integration_test_commands": ["npm test", "npm run build"],
+  "tasks": [
+    {
+      "id": "TASK-001",
+      "name": "독립 작업",
+      "prompt": "docs/worker-a.md를 생성하세요.",
+      "tier": "fast",
+      "allowed_files": ["docs/worker-a.md"],
+      "test_commands": ["if (-not (Test-Path 'docs/worker-a.md')) { exit 1 }"],
+      "timeout_seconds": 300,
+      "retry_limit": 3
+    }
+  ]
 }
 ```
 
@@ -80,6 +85,17 @@ stop-parallel-run -RunId <run-id> -Repository C:\path\to\project
 최대 3회까지 수정과 재검증을 반복합니다. `INTERFACE_ERROR`, `DESIGN_ERROR`, `PERMISSION_ERROR`,
 `ENVIRONMENT_ERROR`, `POLICY_VIOLATION`은 재시도하지 않고 즉시 Codex 검토 대상으로 기록합니다.
 동일한 실패 지문이 반복되면 `REPEATED_FAILURE`, 한도를 모두 사용하면 `RETRY_EXHAUSTED`로 escalation합니다.
+
+모든 Worker가 PASS하면 검증된 변경을 Worker branch에 커밋하고 `integration/<run-id>` 브랜치를 생성합니다.
+각 Worker commit을 작업 목록 순서대로 cherry-pick한 후 `integration_test_commands`를 실행하고,
+`.agent/runs/<run-id>/integration-review.md`에 base 대비 변경 파일과 diff 통계를 기록합니다.
+성공 상태는 `awaiting_review`이며 main branch는 수정하지 않습니다. 리뷰가 끝난 후 사용자가 직접 승인해야 합니다.
+
+```powershell
+git diff main...integration/<run-id>
+git switch main
+git merge --ff-only integration/<run-id>
+```
 
 | 등급 | 모델 | 권장 용도 |
 |---|---|---|
