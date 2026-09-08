@@ -648,10 +648,13 @@ function normalizeRateLimitWindow(raw: unknown): CodexRateLimitWindow | null {
   let used = getNum('usedPercent', 'used_percent', 'usedRatio', 'used_ratio');
   let remaining = getNum('remainingPercent', 'remaining_percent', 'remainingRatio', 'remaining_ratio');
 
+  if (used !== null) used = Math.max(0, Math.min(100, used));
+  if (remaining !== null) remaining = Math.max(0, Math.min(100, remaining));
+
   if (used !== null && remaining === null) {
-    remaining = Math.max(0, Math.min(100, 100 - used));
+    remaining = 100 - used;
   } else if (remaining !== null && used === null) {
-    used = Math.max(0, Math.min(100, 100 - remaining));
+    used = 100 - remaining;
   }
 
   const windowMinutes = getNum('windowMinutes', 'window_minutes', 'windowMins', 'window');
