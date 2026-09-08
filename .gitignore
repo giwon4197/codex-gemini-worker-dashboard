@@ -1,0 +1,26 @@
+node_modules/
+dist/
+.vinext/
+.vite/
+*.log
+*.tmp
+*.tsbuildinfo
+
+# Local runtime state and telemetry
+worker-settings.json
+live-worker.json
+gemini-dashboard/public/data/dashboard.json
+gemini-dashboard/public/data/live-worker.json
+
+# Local credentials and agent sessions
+.env
+.env.*
+!.env.example
+auth.json
+sessions/
+.codex/
+
+# Local test artifacts
+gemini_worker_test.txt
+test_workspace_*/
+

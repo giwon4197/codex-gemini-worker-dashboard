@@ -1,0 +1,19 @@
+{
+  "runId": null,
+  "task": null,
+  "model": null,
+  "status": "idle",
+  "startedAt": null,
+  "updatedAt": null,
+  "elapsedSeconds": 0,
+  "recentLogs": [],
+  "partialUsage": {
+    "prompt": 0,
+    "candidates": 0,
+    "cached": 0,
+    "thoughts": 0,
+    "total": 0
+  },
+  "finalResponse": null,
+  "error": null
+}

@@ -1,0 +1,18 @@
+{
+  "updatedAt": null,
+  "summary": {
+    "tokens": 0,
+    "requests": 0,
+    "completed": 0,
+    "failed": 0,
+    "averageLatencyMs": 0
+  },
+  "tokens": {
+    "prompt": 0,
+    "candidates": 0,
+    "cached": 0,
+    "thoughts": 0
+  },
+  "codexDaily": [],
+  "jobs": []
+}
