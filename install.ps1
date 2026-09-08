@@ -120,6 +120,8 @@ $root = '__INSTALL_ROOT__'
 $dashboard = Join-Path $root 'gemini-dashboard'
 $url = 'http://localhost:3000/'
 try { if ((Invoke-WebRequest -UseBasicParsing $url -TimeoutSec 2).StatusCode -eq 200) { Write-Host $url; exit 0 } } catch {}
+$listener = Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue
+if ($listener) { throw '포트 3000을 다른 프로세스가 사용 중입니다. 해당 프로그램을 종료한 뒤 다시 실행하세요.' }
 $npmCommand = Get-Command npm.cmd -ErrorAction SilentlyContinue
 $npm = if ($npmCommand) { $npmCommand.Source } else { 'C:\Program Files\nodejs\npm.cmd' }
 if (-not (Test-Path -LiteralPath $npm)) { throw 'npm.cmd를 찾을 수 없습니다. Node.js LTS 설치를 확인하세요.' }
