@@ -154,7 +154,7 @@ function extractFallbackSessionId(filePath: string): string {
 /**
  * Parses a rate limit window (primary or secondary).
  * Explicitly returns nullable numbers for used_percent, remaining_percent, window_minutes, resets_at.
- * Normalizes remaining_percent as clamped (100 - used_percent) within [0, 100].
+ * Normalizes both used_percent and remaining_percent within [0, 100].
  */
 function parseRateLimitWindow(raw: unknown): CodexRateLimitWindow | null {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
@@ -166,10 +166,9 @@ function parseRateLimitWindow(raw: unknown): CodexRateLimitWindow | null {
   let remaining_percent: number | null = null;
 
   if (typeof obj.used_percent === 'number' && Number.isFinite(obj.used_percent)) {
-    used_percent = obj.used_percent;
-    const rawRemaining = 100 - obj.used_percent;
-    const clampedRemaining = Math.max(0, Math.min(100, rawRemaining));
-    remaining_percent = Math.round(clampedRemaining * 1e6) / 1e6;
+    const clampedUsed = Math.max(0, Math.min(100, obj.used_percent));
+    used_percent = Math.round(clampedUsed * 1e6) / 1e6;
+    remaining_percent = Math.round((100 - used_percent) * 1e6) / 1e6;
   }
 
   let window_minutes: number | null = null;
@@ -620,6 +619,7 @@ export function getCodexDailyUsage(): CodexUsageResponse {
     codexDaily.sort((a, b) => a.date.localeCompare(b.date));
 
     const rateLimits = bestRateLimitCandidate ? bestRateLimitCandidate.snapshot : null;
+    const sessionCount = [...sessionsByDate.values()].reduce((count, sessions) => count + sessions.size, 0);
 
     return {
       ok: true,
@@ -627,7 +627,7 @@ export function getCodexDailyUsage(): CodexUsageResponse {
       codexDaily,
       data: codexDaily,
       lastSyncedAt: new Date().toISOString(),
-      sessionCount: sessionsByDate.size,
+      sessionCount,
       rate_limits: rateLimits,
       rateLimits,
     };

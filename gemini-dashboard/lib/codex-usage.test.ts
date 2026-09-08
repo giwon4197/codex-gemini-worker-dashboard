@@ -119,9 +119,9 @@ void describe('Codex Usage and Rate Limits', () => {
 
     const result = getCodexDailyUsage();
     assert.ok(result.rate_limits !== null);
-    assert.strictEqual(result.rate_limits.primary?.used_percent, 120.0);
+    assert.strictEqual(result.rate_limits.primary?.used_percent, 100.0);
     assert.strictEqual(result.rate_limits.primary?.remaining_percent, 0);
-    assert.strictEqual(result.rate_limits.secondary?.used_percent, -5.0);
+    assert.strictEqual(result.rate_limits.secondary?.used_percent, 0.0);
     assert.strictEqual(result.rate_limits.secondary?.remaining_percent, 100);
   });
 
@@ -637,7 +637,7 @@ void describe('Codex Usage and Rate Limits', () => {
     const result = getCodexDailyUsage();
     assert.strictEqual(result.ok, true);
     assert.strictEqual(result.status, 'active');
-    assert.strictEqual(result.sessionCount, 1); // 1 date in map
+    assert.strictEqual(result.sessionCount, 2); // 2 distinct sessions on the same date
     assert.strictEqual(result.codexDaily.length, 1);
 
     const day = result.codexDaily[0];
