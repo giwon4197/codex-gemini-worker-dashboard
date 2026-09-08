@@ -113,6 +113,8 @@ git merge --ff-only integration/<run-id>
 자연어 요청 하나로 Codex가 저장소를 읽기 전용으로 분석하고 구조화된 작업 계획을 만든 뒤 Gemini 병렬 실행,
 검증, 임시 통합 브랜치, Codex diff review까지 수행합니다.
 
+Codex 대화에서 실행할 때는 라우터를 백그라운드로 시작하고 진행 로그는 웹 대시보드에서 직접 확인하는 방식을 권장합니다. 워커는 NDJSON 상태를 대시보드에 직접 기록하므로 Codex가 중간 진행을 반복 조회할 필요가 없습니다. Codex는 `awaiting_review` 이후 최종 diff 검토를 요청받거나, 대시보드에 `requiresCodex` 같은 종료 에스컬레이션이 표시될 때만 다시 개입합니다.
+
 ```powershell
 codex-route -Request "독립 유틸 함수와 문서를 추가하고 테스트해줘" -Repository .
 ```
