@@ -4,7 +4,10 @@ param(
   [ValidateSet('plan', 'auto_edit')][string]$ApprovalMode = 'auto_edit',
   [string]$Model = '',
   [string]$Workspace = $PSScriptRoot,
-  [string]$Timeout = '24h'
+  [string]$Timeout = '24h',
+  [string]$OrchestrationRunId = '',
+  [string]$TaskId = '',
+  [string]$StateRoot = ''
 )
 
 $antigravity = Join-Path $env:LOCALAPPDATA 'agy\bin\agy.exe'
@@ -124,9 +127,22 @@ if (-not ([System.Management.Automation.PSTypeName]'AgyProcessRunner').Type) {
 "@
 }
 
+$isParallelWorker = -not [string]::IsNullOrWhiteSpace($StateRoot)
+$workerKey = if ($TaskId) { $TaskId } else { [System.Guid]::NewGuid().ToString('N') }
 $dashboardPath = Join-Path $PSScriptRoot 'gemini-dashboard\public\data\dashboard.json'
-$liveWorkerPath = Join-Path $PSScriptRoot 'gemini-dashboard\public\data\live-worker.json'
-$liveWorkerRootPath = Join-Path $PSScriptRoot 'live-worker.json'
+$liveWorkerPath = if ($isParallelWorker) {
+  $workersDir = Join-Path $StateRoot 'workers'
+  New-Item -ItemType Directory -Path $workersDir -Force | Out-Null
+  Join-Path $workersDir "$workerKey.json"
+} else {
+  Join-Path $PSScriptRoot 'gemini-dashboard\public\data\live-worker.json'
+}
+$liveWorkerRootPath = if ($isParallelWorker) { $null } else { Join-Path $PSScriptRoot 'live-worker.json' }
+$eventPath = if ($isParallelWorker) {
+  $eventsDir = Join-Path $StateRoot 'events'
+  New-Item -ItemType Directory -Path $eventsDir -Force | Out-Null
+  Join-Path $eventsDir "$workerKey.ndjson"
+} else { $null }
 
 function Write-AtomicJson {
   param(
@@ -164,7 +180,7 @@ function Redact-Secrets {
   return $redacted
 }
 
-$runId = [System.Guid]::NewGuid().ToString('d')
+$workerRunId = [System.Guid]::NewGuid().ToString('d')
 $started = Get-Date
 $startedIso = $started.ToString('o')
 $currentStatus = 'running'
@@ -202,6 +218,16 @@ function Add-WorkerLog {
     type      = $Type
   }
   $recentLogs.Add($entry)
+  if ($eventPath) {
+    $eventRecord = [pscustomobject]@{
+      timestamp = (Get-Date).ToString('o')
+      runId = if ($OrchestrationRunId) { $OrchestrationRunId } else { $workerRunId }
+      taskId = $workerKey
+      type = $Type
+      message = $clean
+    }
+    Add-Content -LiteralPath $eventPath -Value ($eventRecord | ConvertTo-Json -Compress) -Encoding utf8
+  }
   while ($recentLogs.Count -gt $maxLogEntries) {
     $recentLogs.RemoveAt(0)
   }
@@ -222,7 +248,8 @@ function Sync-LiveWorker {
   }
 
   $liveObj = [pscustomobject]@{
-    runId          = $runId
+    runId          = if ($OrchestrationRunId) { $OrchestrationRunId } else { $workerRunId }
+    taskId         = $workerKey
     task           = $Task
     model          = if ($modelNames.Count -gt 0) { ($modelNames | Select-Object -Unique) -join ', ' } else { $targetModel }
     status         = $Status
@@ -243,6 +270,7 @@ function Sync-LiveWorker {
 
   Write-AtomicJson -Path $liveWorkerPath -Data $liveObj
   try {
+    if (-not $liveWorkerRootPath) { return }
     Write-AtomicJson -Path $liveWorkerRootPath -Data $liveObj
   } catch {}
 }
@@ -419,6 +447,17 @@ Add-WorkerLog -Message "작업 종료: 상태=$finalStatus, 소요시간=${elaps
 
 # 1. Update live-worker.json with final state
 Sync-LiveWorker -Status $finalStatus -FinalResp $parsedResponse -Err $errorMessage
+
+# Parallel workers own only their state/event files. The orchestrator is the
+# single writer for shared dashboard data, preventing lost read-modify-write updates.
+if ($isParallelWorker) {
+  if ($parsedResponse) {
+    $parsedResponse
+  } elseif ($errorMessage) {
+    Write-Error $errorMessage
+  }
+  exit $exitCode
+}
 
 # 2. EXACTLY ONCE update to dashboard.json
 $data = $null

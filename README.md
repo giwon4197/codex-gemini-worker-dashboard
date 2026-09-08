@@ -38,6 +38,19 @@ gemini-worker -Task "구조 개선" -Prompt "전체 구조를 분석하고 리�
 
 등급을 생략하면 웹 대시보드에서 선택한 기본값을 사용합니다.
 
+## 두 작업 병렬 실행
+
+`parallel-tasks.example.json`을 복사해 작업 목록을 작성한 뒤 대상 Git 저장소에서 실행합니다.
+
+```powershell
+Copy-Item parallel-tasks.example.json parallel-tasks.json
+parallel-gemini-workers -TasksFile .\parallel-tasks.json -MaxWorkers 2
+```
+
+실행마다 `.agent/runs/<run-id>`에 manifest, task, worker 상태, NDJSON 이벤트가 분리 저장되고 각 작업은
+`agent/<run-id>/<task-id>` 브랜치와 독립 worktree를 사용합니다. 기본적으로 검토를 위해 worktree를 유지합니다.
+검증 후 즉시 worktree를 제거하려면 `-CleanupWorktrees`를 지정하세요.
+
 | 등급 | 모델 | 권장 용도 |
 |---|---|---|
 | `fast` | Gemini 3.8 Flash Low | 문구 수정, 간단한 확인 |

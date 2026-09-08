@@ -23,4 +23,7 @@ sessions/
 # Local test artifacts
 gemini_worker_test.txt
 test_workspace_*/
+.agent/runs/
+.agent/worktrees/
+gemini-dashboard/public/data/live-workers.json
 

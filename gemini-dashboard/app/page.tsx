@@ -121,6 +121,7 @@ export interface LiveWorkerLog {
 
 export interface LiveWorkerData {
   runId: string;
+  taskId?: string;
   task: string;
   model: string;
   status: 'running' | 'completed' | 'failed';
@@ -461,19 +462,30 @@ export default function Home() {
   }, [autoRefresh]);
 
   // Live Worker 1-second polling
-  const [liveWorker, setLiveWorker] = useState<LiveWorkerData | null>(null);
+  const [liveWorkers, setLiveWorkers] = useState<LiveWorkerData[]>([]);
 
   useEffect(() => {
     let mounted = true;
     const fetchLiveWorker = async () => {
       try {
+        const multiRes = await fetch(`/data/live-workers.json?t=${Date.now()}`);
+        if (multiRes.ok) {
+          const multiText = await multiRes.text();
+          if (multiText.trim()) {
+            const multi = JSON.parse(multiText) as { workers?: LiveWorkerData[] };
+            if (mounted && Array.isArray(multi.workers) && multi.workers.length > 0) {
+              setLiveWorkers(multi.workers);
+              return;
+            }
+          }
+        }
         const res = await fetch(`/data/live-worker.json?t=${Date.now()}`);
         if (!res.ok) return;
         const text = await res.text();
         if (!text || text.trim() === '') return;
         const json = JSON.parse(text) as LiveWorkerData;
         if (mounted && json && json.runId) {
-          setLiveWorker(json);
+          setLiveWorkers([json]);
         }
       } catch {
         // Ignore read/JSON-parse collisions during atomic file replacement
@@ -1289,7 +1301,16 @@ export default function Home() {
         </section>
 
         {/* 3.5. REAL-TIME LIVE WORKER STREAM PANEL */}
-        <LiveWorkerPanel live={liveWorker} onCopy={handleCopy} copiedJobId={copiedJobId} />
+        <section className="space-y-4" aria-label="실시간 병렬 워커 목록">
+          {(liveWorkers.length > 0 ? liveWorkers : [null]).map((worker, index) => (
+            <LiveWorkerPanel
+              key={worker?.taskId || worker?.runId || `idle-${index}`}
+              live={worker}
+              onCopy={handleCopy}
+              copiedJobId={copiedJobId}
+            />
+          ))}
+        </section>
 
         {/* 4. MAIN PANEL LAYOUT */}
         <section className="mt-6 grid gap-6 xl:grid-cols-[1.55fr_0.85fr]">
