@@ -12,6 +12,8 @@ irm https://raw.githubusercontent.com/giwon4197/codex-gemini-worker-dashboard/ma
 worker-dashboard
 ```
 
+또는 저장소 루트나 설치 폴더에서 `dashboard-launcher.cmd`를 더블클릭하여 대시보드를 바로 실행할 수 있습니다. 이미 대시보드가 실행 중이면 새 서버를 중복 실행하지 않고 기본 브라우저로 접속합니다.
+
 다른 프로젝트 폴더에서 Gemini 작업을 실행하려면:
 
 ```powershell

@@ -18,7 +18,9 @@ irm https://raw.githubusercontent.com/giwon4197/codex-gemini-worker-dashboard/ma
 worker-dashboard
 ```
 
-대시보드 주소는 `http://localhost:3000`입니다.
+또는 저장소 루트나 설치 폴더(`%LOCALAPPDATA%\codex-gemini-worker-dashboard`)의 `dashboard-launcher.cmd`를 더블클릭하여 바로 실행할 수 있습니다. 개발 저장소에서 처음 실행할 때는 `dashboard-launcher.cmd -InstallDependencies` 또는 `gemini-dashboard` 폴더에서 `npm ci`로 의존성을 준비할 수 있습니다.
+
+대시보드 주소는 `http://localhost:3000`입니다. 이미 실행 중인 경우 중복 실행 없이 기본 브라우저로 해당 URL을 엽니다.
 
 ## 다른 프로젝트에서 사용
 
@@ -166,9 +168,10 @@ Antigravity는 선택한 작업 폴더의 파일을 읽고 수정할 수 있습�
 ## 문제 해결
 
 - 명령이 인식되지 않으면 PowerShell을 완전히 닫았다가 다시 여세요.
-- 대시보드가 열리지 않으면 `worker-dashboard`를 다시 실행하고 안내된 로그를 확인하세요.
+- 대시보드가 열리지 않으면 `worker-dashboard` 또는 `dashboard-launcher.cmd`를 실행하고 안내된 로그 위치(`gemini-dashboard\.dev-server.stderr.log`)를 확인하세요.
 - Gemini 로그인 오류가 발생하면 `agy`를 실행해 Google 계정 인증을 완료하세요.
-- 포트 3000을 다른 프로그램이 사용하면 해당 프로그램을 종료한 뒤 다시 실행하세요.
+- 포트 3000을 다른 프로그램이 사용 중인 경우 원인 프로세스를 확인하고 해당 프로그램을 종료한 뒤 다시 실행하세요.
+- 개발 저장소에서 의존성 누락 오류가 표시되면 `dashboard-launcher.cmd -InstallDependencies`를 실행하거나 `gemini-dashboard` 폴더에서 `npm ci`를 실행하세요.
 
 ## License
 

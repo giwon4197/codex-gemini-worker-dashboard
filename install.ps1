@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$InstallRoot = (Join-Path $env:LOCALAPPDATA 'codex-gemini-worker-dashboard'),
+    [string]$SourcePath = '',
     [switch]$NoStart
 )
 
@@ -72,14 +73,21 @@ $extractPath = Join-Path $tempRoot 'source'
 New-Item -ItemType Directory -Path $tempRoot, $extractPath -Force | Out-Null
 
 try {
-    Write-Host '공개 저장소에서 최신 버전을 내려받습니다...' -ForegroundColor Cyan
-    Invoke-WebRequest -UseBasicParsing $repoZip -OutFile $zipPath
-    Expand-Archive -LiteralPath $zipPath -DestinationPath $extractPath -Force
-    $sourceRoot = Get-ChildItem -LiteralPath $extractPath -Directory | Select-Object -First 1
-    if (-not $sourceRoot) { throw '다운로드한 저장소의 압축 구조를 확인할 수 없습니다.' }
+    if ($SourcePath -and (Test-Path -LiteralPath $SourcePath)) {
+        $sourceResolved = (Resolve-Path -LiteralPath $SourcePath).Path
+        Write-Host "지정된 소스 경로에서 복사합니다: $sourceResolved" -ForegroundColor Cyan
+        New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
+        Copy-Item -Path (Join-Path $sourceResolved '*') -Destination $InstallRoot -Recurse -Force
+    } else {
+        Write-Host '공개 저장소에서 최신 버전을 내려받습니다...' -ForegroundColor Cyan
+        Invoke-WebRequest -UseBasicParsing $repoZip -OutFile $zipPath
+        Expand-Archive -LiteralPath $zipPath -DestinationPath $extractPath -Force
+        $sourceRoot = Get-ChildItem -LiteralPath $extractPath -Directory | Select-Object -First 1
+        if (-not $sourceRoot) { throw '다운로드한 저장소의 압축 구조를 확인할 수 없습니다.' }
 
-    New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
-    Copy-Item -Path (Join-Path $sourceRoot.FullName '*') -Destination $InstallRoot -Recurse -Force
+        New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
+        Copy-Item -Path (Join-Path $sourceRoot.FullName '*') -Destination $InstallRoot -Recurse -Force
+    }
 
     $dataDir = Join-Path $InstallRoot 'gemini-dashboard\public\data'
     New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
@@ -170,32 +178,29 @@ exit $LASTEXITCODE
 '@.Replace('__INSTALL_ROOT__', $escapedRoot)
     Set-Content -LiteralPath (Join-Path $launcherDir 'review-integration.ps1') -Value $reviewIntegrationLauncher -Encoding utf8
 
-    $dashboardLauncher = @'
+    # Copy dashboard-launcher.cmd to launcher directory
+    $installedLauncher = Join-Path $InstallRoot 'dashboard-launcher.cmd'
+    if (Test-Path -LiteralPath $installedLauncher) {
+        Copy-Item -LiteralPath $installedLauncher -Destination (Join-Path $launcherDir 'dashboard-launcher.cmd') -Force
+    }
+
+    $dashboardLauncherPs = @'
 [CmdletBinding()]
-param()
-$root = '__INSTALL_ROOT__'
-$dashboard = Join-Path $root 'gemini-dashboard'
-$url = 'http://localhost:3000/'
-try { if ((Invoke-WebRequest -UseBasicParsing $url -TimeoutSec 2).StatusCode -eq 200) { Write-Host $url; exit 0 } } catch {}
-$listener = Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue
-if ($listener) { throw '포트 3000을 다른 프로세스가 사용 중입니다. 해당 프로그램을 종료한 뒤 다시 실행하세요.' }
-$npmCommand = Get-Command npm.cmd -ErrorAction SilentlyContinue
-$npm = if ($npmCommand) { $npmCommand.Source } else { 'C:\Program Files\nodejs\npm.cmd' }
-if (-not (Test-Path -LiteralPath $npm)) { throw 'npm.cmd를 찾을 수 없습니다. Node.js LTS 설치를 확인하세요.' }
-$outLog = Join-Path $dashboard '.dev-server.stdout.log'
-$errLog = Join-Path $dashboard '.dev-server.stderr.log'
-Start-Process -FilePath $npm -ArgumentList 'run dev' -WorkingDirectory $dashboard -WindowStyle Hidden -RedirectStandardOutput $outLog -RedirectStandardError $errLog | Out-Null
-for ($i=0;$i -lt 40;$i++) { Start-Sleep -Milliseconds 500; try { if ((Invoke-WebRequest -UseBasicParsing $url -TimeoutSec 2).StatusCode -eq 200) { Write-Host $url; exit 0 } } catch {} }
-throw "대시보드 시작을 확인하지 못했습니다. 로그: $errLog"
-'@.Replace('__INSTALL_ROOT__', $escapedRoot)
-    Set-Content -LiteralPath (Join-Path $launcherDir 'worker-dashboard.ps1') -Value $dashboardLauncher -Encoding utf8
+param(
+  [Parameter(ValueFromRemainingArguments=$true)]
+  [string[]]$RemainingArgs
+)
+& (Join-Path $PSScriptRoot 'dashboard-launcher.cmd') @RemainingArgs
+exit $LASTEXITCODE
+'@
+    Set-Content -LiteralPath (Join-Path $launcherDir 'worker-dashboard.ps1') -Value $dashboardLauncherPs -Encoding utf8
     $workerCmd = @'
 @echo off
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0gemini-worker.ps1" %*
 '@
     $dashboardCmd = @'
 @echo off
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0worker-dashboard.ps1" %*
+"%~dp0dashboard-launcher.cmd" %*
 '@
     $parallelCmd = @'
 @echo off
@@ -220,9 +225,12 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0review-integration
     Set-Content -LiteralPath (Join-Path $launcherDir 'codex-route.cmd') -Value $codexRouterCmd -Encoding ascii
     Set-Content -LiteralPath (Join-Path $launcherDir 'review-integration.cmd') -Value $reviewIntegrationCmd -Encoding ascii
     Add-UserPath $launcherDir
+    [Environment]::SetEnvironmentVariable('CODEX_GEMINI_INSTALL_ROOT', $InstallRoot, 'User')
+    $env:CODEX_GEMINI_INSTALL_ROOT = $InstallRoot
 
     Write-Host "설치 완료: $InstallRoot" -ForegroundColor Green
     Write-Host '새 터미널에서는 gemini-worker와 worker-dashboard 명령을 사용할 수 있습니다.' -ForegroundColor Green
+    Write-Host '설치 폴더 또는 어디서든 dashboard-launcher.cmd를 더블클릭하여 대시보드를 실행할 수 있습니다.' -ForegroundColor Green
     if (-not $NoStart) { & (Join-Path $launcherDir 'worker-dashboard.ps1') }
 }
 finally {
