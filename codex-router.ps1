@@ -80,26 +80,5 @@ $runRoot = Join-Path $repoRoot ".agent\runs\$runId"
 $manifest = Get-Content -Raw -LiteralPath (Join-Path $runRoot 'run.json') | ConvertFrom-Json
 if ($manifest.status -ne 'awaiting_review') { exit $(if ($runExit) { $runExit } else { 1 }) }
 
-$integrationPath = [string]$manifest.integration.worktree
-$reviewPath = Join-Path $runRoot 'codex-review.md'
-$reviewPrompt = 'Review only the integration branch diff against the base. Focus on correctness, regressions, security, test gaps, and contract violations. Do not edit files or merge branches. Give concise findings with file paths and severity; say explicitly when there are no blocking findings.'
-Push-Location $integrationPath
-try {
-  & codex.exe exec review --base main --ephemeral --output-last-message $reviewPath $reviewPrompt
-  $reviewExit = $LASTEXITCODE
-} finally { Pop-Location }
-
-$manifest = Get-Content -Raw -LiteralPath (Join-Path $runRoot 'run.json') | ConvertFrom-Json
-$manifest.status = if ($reviewExit -eq 0) { 'awaiting_human_approval' } else { 'codex_review_failed' }
-$manifest | Add-Member -NotePropertyName codexReview -NotePropertyValue ([pscustomobject]@{
-  status = if ($reviewExit -eq 0) { 'completed' } else { 'failed' }
-  artifact = $reviewPath
-  reviewedAt = (Get-Date).ToString('o')
-  mainModified = $false
-}) -Force
-$temp = "$($runRoot)\run.json.$([guid]::NewGuid().ToString('N')).tmp"
-[IO.File]::WriteAllText($temp, ($manifest | ConvertTo-Json -Depth 16), [Text.Encoding]::UTF8)
-[IO.File]::Move($temp, (Join-Path $runRoot 'run.json'), $true)
-Write-Output "Codex review: $reviewPath"
-Write-Output "Final status: $($manifest.status)"
-exit $(if ($reviewExit -eq 0) { 0 } else { 1 })
+& (Join-Path $root 'review-integration.ps1') -RunId $runId -Repository $repoRoot
+exit $LASTEXITCODE
