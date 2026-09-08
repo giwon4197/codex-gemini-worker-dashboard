@@ -281,6 +281,7 @@ Sync-LiveWorker -Status 'running'
 
 $agentMode = if ($ApprovalMode -eq 'plan') { 'plan' } else { 'accept-edits' }
 $cliArgs = @(
+  '--new-project',
   '--model', $targetModel,
   '--mode', $agentMode,
   '--dangerously-skip-permissions',

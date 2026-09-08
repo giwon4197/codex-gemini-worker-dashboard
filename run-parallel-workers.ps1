@@ -71,6 +71,7 @@ $manifest = [pscustomobject]@{
   baseCommit = $baseCommit
   maxWorkers = $MaxWorkers
   tasks = @($tasks | ForEach-Object { $_.id })
+  worktrees = @()
 }
 $manifestPath = Join-Path $runRoot 'run.json'
 Write-AtomicJson $manifestPath $manifest
