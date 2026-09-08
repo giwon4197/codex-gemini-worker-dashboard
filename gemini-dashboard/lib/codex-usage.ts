@@ -13,6 +13,26 @@ export interface CodexDailyEntry {
   reasoningOutputTokens?: number;
 }
 
+export interface CodexRateLimitWindow {
+  used_percent: number | null;
+  remaining_percent: number | null;
+  window_minutes: number | null;
+  resets_at: number | string | null;
+}
+
+export interface CodexRateLimitCredits {
+  balance: string | number | null;
+  has_credits: boolean | null;
+  unlimited: boolean | null;
+}
+
+export interface CodexRateLimitsSnapshot {
+  primary: CodexRateLimitWindow | null;
+  secondary: CodexRateLimitWindow | null;
+  credits: CodexRateLimitCredits | null;
+  plan_type: string | null;
+}
+
 export interface CodexUsageResponse {
   ok: boolean;
   status: 'active' | 'empty' | 'not_found' | 'error';
@@ -21,6 +41,8 @@ export interface CodexUsageResponse {
   lastSyncedAt: string;
   sessionCount: number;
   message?: string;
+  rate_limits: CodexRateLimitsSnapshot | null;
+  rateLimits: CodexRateLimitsSnapshot | null;
 }
 
 interface ParsedUsageRecord {
@@ -35,22 +57,44 @@ interface ParsedUsageRecord {
   fileMtimeMs: number;
 }
 
+interface RateLimitCandidate {
+  snapshot: CodexRateLimitsSnapshot;
+  effectiveTimeMs: number;
+  hasValidTimestamp: boolean;
+  timestampStr?: string;
+  fileMtimeMs: number;
+  filePath: string;
+  ordinal: number;
+  lineIndex: number;
+}
+
+interface FileReadResult {
+  usageRecord: ParsedUsageRecord | null;
+  rateLimitsCandidate: RateLimitCandidate | null;
+}
+
 interface CacheEntry {
   mtimeMs: number;
   size: number;
-  record: ParsedUsageRecord | null;
+  result: FileReadResult;
 }
 
 // In-memory cache based on file mtime and size to avoid re-reading large JSONL files
 const fileUsageCache = new Map<string, CacheEntry>();
 
 /**
+ * Clears the in-memory usage cache (useful for tests and forced reload).
+ */
+export function clearCodexUsageCache(): void {
+  fileUsageCache.clear();
+}
+
+/**
  * Returns the resolved path to the Codex sessions directory.
  */
 export function getCodexSessionsDirectory(): string {
-  const envDir = process.env.CODEX_SESSIONS_DIR;
-  if (envDir && fs.existsSync(envDir)) {
-    return envDir;
+  if (process.env.CODEX_SESSIONS_DIR) {
+    return process.env.CODEX_SESSIONS_DIR;
   }
   const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
   return path.join(codexHome, 'sessions');
@@ -108,11 +152,181 @@ function extractFallbackSessionId(filePath: string): string {
 }
 
 /**
- * Reads the latest token_usage_record from the tail of a JSONL file.
- * Uses stepped chunk scanning (64KB -> 256KB -> 1MB -> 2MB) and in-memory mtime/size caching.
- * NEVER loads the full 10MB+ file or accesses authentication/conversation fields.
+ * Parses a rate limit window (primary or secondary).
+ * Explicitly returns nullable numbers for used_percent, remaining_percent, window_minutes, resets_at.
+ * Normalizes remaining_percent as clamped (100 - used_percent) within [0, 100].
  */
-function readLatestUsageFromFile(filePath: string): ParsedUsageRecord | null {
+function parseRateLimitWindow(raw: unknown): CodexRateLimitWindow | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return null;
+  }
+  const obj = raw as Record<string, unknown>;
+
+  let used_percent: number | null = null;
+  let remaining_percent: number | null = null;
+
+  if (typeof obj.used_percent === 'number' && Number.isFinite(obj.used_percent)) {
+    used_percent = obj.used_percent;
+    const rawRemaining = 100 - obj.used_percent;
+    const clampedRemaining = Math.max(0, Math.min(100, rawRemaining));
+    remaining_percent = Math.round(clampedRemaining * 1e6) / 1e6;
+  }
+
+  let window_minutes: number | null = null;
+  if (typeof obj.window_minutes === 'number' && Number.isFinite(obj.window_minutes)) {
+    window_minutes = obj.window_minutes;
+  }
+
+  let resets_at: number | string | null = null;
+  if (typeof obj.resets_at === 'number' && Number.isFinite(obj.resets_at)) {
+    resets_at = obj.resets_at;
+  } else if (typeof obj.resets_at === 'string' && obj.resets_at.trim().length > 0) {
+    resets_at = obj.resets_at.trim();
+  }
+
+  return {
+    used_percent,
+    remaining_percent,
+    window_minutes,
+    resets_at,
+  };
+}
+
+/**
+ * Parses credits information if provided, normalizing missing/mistyped fields to null.
+ */
+function parseCredits(raw: unknown): CodexRateLimitCredits | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return null;
+  }
+  const obj = raw as Record<string, unknown>;
+
+  let balance: string | number | null = null;
+  if (typeof obj.balance === 'string' && obj.balance.trim().length > 0) {
+    balance = obj.balance.trim();
+  } else if (typeof obj.balance === 'number' && Number.isFinite(obj.balance)) {
+    balance = obj.balance;
+  }
+
+  const has_credits = typeof obj.has_credits === 'boolean' ? obj.has_credits : null;
+  const unlimited = typeof obj.unlimited === 'boolean' ? obj.unlimited : null;
+
+  return {
+    balance,
+    has_credits,
+    unlimited,
+  };
+}
+
+/**
+ * Parses plan_type string, normalizing missing/mistyped values to null.
+ */
+function parsePlanType(raw: unknown): string | null {
+  if (typeof raw === 'string' && raw.trim().length > 0) {
+    return raw.trim();
+  }
+  return null;
+}
+
+/**
+ * Parses rate_limits payload from a token_usage_record event into a candidate snapshot.
+ * Candidate is considered valid if at least one recognizable section/field is present.
+ */
+function parseRateLimitsSnapshot(
+  rawRateLimits: unknown,
+  timestampStr: string | undefined,
+  fileMtimeMs: number,
+  filePath: string,
+  ordinal: number,
+  lineIndex: number
+): RateLimitCandidate | null {
+  if (!rawRateLimits || typeof rawRateLimits !== 'object' || Array.isArray(rawRateLimits)) {
+    return null;
+  }
+  const raw = rawRateLimits as Record<string, unknown>;
+
+  const primary = parseRateLimitWindow(raw.primary);
+  const secondary = parseRateLimitWindow(raw.secondary);
+  const credits = parseCredits(raw.credits);
+  const plan_type = parsePlanType(raw.plan_type);
+
+  // Must contain at least one valid section
+  if (!primary && !secondary && !credits && !plan_type) {
+    return null;
+  }
+
+  let effectiveTimeMs = fileMtimeMs;
+  let hasValidTimestamp = false;
+  if (typeof timestampStr === 'string' && timestampStr.trim().length > 0) {
+    const parsedTime = Date.parse(timestampStr);
+    if (!Number.isNaN(parsedTime) && Number.isFinite(parsedTime)) {
+      effectiveTimeMs = parsedTime;
+      hasValidTimestamp = true;
+    }
+  }
+
+  return {
+    snapshot: {
+      primary,
+      secondary,
+      credits,
+      plan_type,
+    },
+    effectiveTimeMs,
+    hasValidTimestamp,
+    timestampStr,
+    fileMtimeMs,
+    filePath,
+    ordinal,
+    lineIndex,
+  };
+}
+
+/**
+ * Determines whether candidate is newer than current snapshot.
+ * Prioritizes valid event timestamp; falls back to file mtime when timestamp is absent/invalid.
+ * Same-time choices are strictly deterministic.
+ */
+function isCandidateNewer(candidate: RateLimitCandidate, current: RateLimitCandidate): boolean {
+  // 1. Compare effective time (event timestamp if valid, else file mtime)
+  if (candidate.effectiveTimeMs > current.effectiveTimeMs) {
+    return true;
+  }
+  if (candidate.effectiveTimeMs < current.effectiveTimeMs) {
+    return false;
+  }
+
+  // 2. Same effective time: prefer candidate with valid event timestamp over mtime fallback
+  if (candidate.hasValidTimestamp && !current.hasValidTimestamp) {
+    return true;
+  }
+  if (!candidate.hasValidTimestamp && current.hasValidTimestamp) {
+    return false;
+  }
+
+  // 3. Compare ordinal
+  if (candidate.ordinal > current.ordinal) {
+    return true;
+  }
+  if (candidate.ordinal < current.ordinal) {
+    return false;
+  }
+
+  // 4. Same file tie-breaker: later line in file wins
+  if (candidate.filePath === current.filePath) {
+    return candidate.lineIndex > current.lineIndex;
+  }
+
+  // 5. Cross-file deterministic tie-breaker
+  return candidate.filePath.localeCompare(current.filePath) > 0;
+}
+
+/**
+ * Reads the latest token_usage_record from the tail of a JSONL file.
+ * Checks ONLY token_usage_record candidates and extracts thread_token_usage and rate_limits.
+ * Never loads full file into memory and never logs/preserves sensitive conversation/auth fields.
+ */
+function readLatestFromFile(filePath: string): FileReadResult | null {
   let stat: fs.Stats;
   try {
     stat = fs.statSync(filePath);
@@ -127,18 +341,18 @@ function readLatestUsageFromFile(filePath: string): ParsedUsageRecord | null {
   // Check cache
   const cached = fileUsageCache.get(filePath);
   if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
-    return cached.record;
+    return cached.result;
   }
 
   let fd: number | null = null;
   try {
     fd = fs.openSync(filePath, 'r');
   } catch {
-    // If file is locked or being written, skip gracefully
     return null;
   }
 
   let foundRecord: ParsedUsageRecord | null = null;
+  let foundRateLimits: RateLimitCandidate | null = null;
 
   try {
     const chunkSizes = [64 * 1024, 256 * 1024, 1024 * 1024, 2 * 1024 * 1024];
@@ -151,59 +365,90 @@ function readLatestUsageFromFile(filePath: string): ParsedUsageRecord | null {
       const text = buffer.toString('utf-8');
       const lines = text.split('\n');
 
-      // If we didn't start at position 0, lines[0] is likely a partially read line
       const startIndex = position === 0 ? 0 : 1;
 
       for (let i = lines.length - 1; i >= startIndex; i--) {
         const line = lines[i].trim();
+        // Candidate filter: inspect only lines containing 'token_usage_record'
         if (!line || !line.includes('token_usage_record')) {
           continue;
         }
 
         try {
           const parsed = JSON.parse(line) as {
-            type?: string;
-            timestamp?: string;
-            ordinal?: number;
+            type?: unknown;
+            timestamp?: unknown;
+            ordinal?: unknown;
             payload?: {
-              session_id?: string;
-              thread_id?: string;
+              session_id?: unknown;
+              thread_id?: unknown;
               thread_token_usage?: {
-                total_tokens?: number;
-                cached_input_tokens?: number;
-                input_tokens?: number;
-                output_tokens?: number;
-                reasoning_output_tokens?: number;
+                total_tokens?: unknown;
+                cached_input_tokens?: unknown;
+                input_tokens?: unknown;
+                output_tokens?: unknown;
+                reasoning_output_tokens?: unknown;
               };
+              rate_limits?: unknown;
             };
           };
 
-          if (parsed.type === 'token_usage_record' && parsed.payload?.thread_token_usage) {
+          if (parsed.type !== 'token_usage_record' || !parsed.payload || typeof parsed.payload !== 'object') {
+            continue;
+          }
+
+          const ordinal = typeof parsed.ordinal === 'number' && Number.isFinite(parsed.ordinal) ? parsed.ordinal : 0;
+          const timestampStr = typeof parsed.timestamp === 'string' ? parsed.timestamp : undefined;
+
+          // 1. Thread token usage for daily aggregation
+          if (!foundRecord && parsed.payload.thread_token_usage && typeof parsed.payload.thread_token_usage === 'object') {
             const usage = parsed.payload.thread_token_usage;
             const sessionId =
-              parsed.payload.session_id ||
-              parsed.payload.thread_id ||
+              (typeof parsed.payload.session_id === 'string' && parsed.payload.session_id) ||
+              (typeof parsed.payload.thread_id === 'string' && parsed.payload.thread_id) ||
               extractFallbackSessionId(filePath);
+
+            const totalTokens = typeof usage.total_tokens === 'number' && Number.isFinite(usage.total_tokens) ? Math.max(0, usage.total_tokens) : 0;
+            const cachedInputTokens = typeof usage.cached_input_tokens === 'number' && Number.isFinite(usage.cached_input_tokens) ? Math.max(0, usage.cached_input_tokens) : 0;
+            const inputTokens = typeof usage.input_tokens === 'number' && Number.isFinite(usage.input_tokens) ? Math.max(0, usage.input_tokens) : 0;
+            const outputTokens = typeof usage.output_tokens === 'number' && Number.isFinite(usage.output_tokens) ? Math.max(0, usage.output_tokens) : 0;
+            const reasoningOutputTokens = typeof usage.reasoning_output_tokens === 'number' && Number.isFinite(usage.reasoning_output_tokens) ? Math.max(0, usage.reasoning_output_tokens) : 0;
 
             foundRecord = {
               sessionId,
-              timestamp: parsed.timestamp || new Date(stat.mtimeMs).toISOString(),
-              ordinal: parsed.ordinal ?? 0,
-              totalTokens: Math.max(0, usage.total_tokens || 0),
-              cachedInputTokens: Math.max(0, usage.cached_input_tokens || 0),
-              inputTokens: Math.max(0, usage.input_tokens || 0),
-              outputTokens: Math.max(0, usage.output_tokens || 0),
-              reasoningOutputTokens: Math.max(0, usage.reasoning_output_tokens || 0),
+              timestamp: timestampStr || new Date(stat.mtimeMs).toISOString(),
+              ordinal,
+              totalTokens,
+              cachedInputTokens,
+              inputTokens,
+              outputTokens,
+              reasoningOutputTokens,
               fileMtimeMs: stat.mtimeMs,
             };
-            break;
+          }
+
+          // 2. Rate limits snapshot
+          if (parsed.payload.rate_limits && typeof parsed.payload.rate_limits === 'object' && !Array.isArray(parsed.payload.rate_limits)) {
+            const candidate = parseRateLimitsSnapshot(
+              parsed.payload.rate_limits,
+              timestampStr,
+              stat.mtimeMs,
+              filePath,
+              ordinal,
+              i
+            );
+            if (candidate) {
+              if (!foundRateLimits || isCandidateNewer(candidate, foundRateLimits)) {
+                foundRateLimits = candidate;
+              }
+            }
           }
         } catch {
-          // Skip corrupt or actively written JSON lines
+          // Skip corrupt or actively written JSON lines without exposing contents
         }
       }
 
-      if (foundRecord || position === 0) {
+      if ((foundRecord && foundRateLimits) || position === 0) {
         break;
       }
     }
@@ -217,22 +462,26 @@ function readLatestUsageFromFile(filePath: string): ParsedUsageRecord | null {
     }
   }
 
-  // Update memory cache
+  const result: FileReadResult = {
+    usageRecord: foundRecord,
+    rateLimitsCandidate: foundRateLimits,
+  };
+
   fileUsageCache.set(filePath, {
     mtimeMs: stat.mtimeMs,
     size: stat.size,
-    record: foundRecord,
+    result,
   });
 
-  return foundRecord;
+  return result;
 }
 
 /**
- * Gathers and computes Codex daily usage from ~/.codex/sessions.
+ * Gathers and computes Codex daily usage and latest rate limits from ~/.codex/sessions.
  * Strictly guarantees:
- * 1. Exactly 1 latest cumulative thread_token_usage record per session (never double counts same session).
+ * 1. Exactly 1 latest cumulative thread_token_usage record per session.
  * 2. Sums across multiple distinct sessions on each date.
- * 3. activeTokens = Math.max(0, totalTokens - cachedInputTokens).
+ * 3. Exactly 1 latest valid payload.rate_limits snapshot chosen deterministically.
  */
 export function getCodexDailyUsage(): CodexUsageResponse {
   try {
@@ -247,6 +496,8 @@ export function getCodexDailyUsage(): CodexUsageResponse {
         data: [],
         lastSyncedAt: new Date().toISOString(),
         sessionCount: 0,
+        rate_limits: null,
+        rateLimits: null,
       };
     }
 
@@ -260,21 +511,39 @@ export function getCodexDailyUsage(): CodexUsageResponse {
         data: [],
         lastSyncedAt: new Date().toISOString(),
         sessionCount: 0,
+        rate_limits: null,
+        rateLimits: null,
       };
     }
 
+    // Sort files deterministically
+    const sortedFiles = [...files].sort((a, b) => a.localeCompare(b));
+
     // Map: date -> Map<sessionId, ParsedUsageRecord>
     const sessionsByDate = new Map<string, Map<string, ParsedUsageRecord>>();
-    let totalUniqueSessions = 0;
+    let bestRateLimitCandidate: RateLimitCandidate | null = null;
 
-    for (const filePath of files) {
-      const date = extractDateFromPath(filePath);
-      if (!date) {
+    for (const filePath of sortedFiles) {
+      const fileResult = readLatestFromFile(filePath);
+      if (!fileResult) {
         continue;
       }
 
-      const record = readLatestUsageFromFile(filePath);
+      // Check for latest rate limits candidate
+      if (fileResult.rateLimitsCandidate) {
+        if (!bestRateLimitCandidate || isCandidateNewer(fileResult.rateLimitsCandidate, bestRateLimitCandidate)) {
+          bestRateLimitCandidate = fileResult.rateLimitsCandidate;
+        }
+      }
+
+      // Check for daily token usage record
+      const record = fileResult.usageRecord;
       if (!record) {
+        continue;
+      }
+
+      const date = extractDateFromPath(filePath) || (record.timestamp ? record.timestamp.slice(0, 10) : null);
+      if (!date || !date.match(/^\d{4}-\d{2}-\d{2}$/)) {
         continue;
       }
 
@@ -310,7 +579,6 @@ export function getCodexDailyUsage(): CodexUsageResponse {
       let dateReasoningOutputTokens = 0;
 
       for (const usage of sessionsMap.values()) {
-        totalUniqueSessions++;
         dateTotalTokens += usage.totalTokens;
         dateCachedInputTokens += usage.cachedInputTokens;
         dateInputTokens += usage.inputTokens;
@@ -335,6 +603,8 @@ export function getCodexDailyUsage(): CodexUsageResponse {
     // Sort by date ascending
     codexDaily.sort((a, b) => a.date.localeCompare(b.date));
 
+    const rateLimits = bestRateLimitCandidate ? bestRateLimitCandidate.snapshot : null;
+
     return {
       ok: true,
       status: codexDaily.length > 0 ? 'active' : 'empty',
@@ -342,9 +612,11 @@ export function getCodexDailyUsage(): CodexUsageResponse {
       data: codexDaily,
       lastSyncedAt: new Date().toISOString(),
       sessionCount: sessionsByDate.size,
+      rate_limits: rateLimits,
+      rateLimits,
     };
   } catch (err: unknown) {
-    const errorMsg = err instanceof Error ? err.message : String(err);
+    const errorMsg = err instanceof Error ? err.message : 'Unknown error';
     return {
       ok: false,
       status: 'error',
@@ -353,6 +625,8 @@ export function getCodexDailyUsage(): CodexUsageResponse {
       data: [],
       lastSyncedAt: new Date().toISOString(),
       sessionCount: 0,
+      rate_limits: null,
+      rateLimits: null,
     };
   }
 }
