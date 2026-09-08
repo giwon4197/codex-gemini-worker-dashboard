@@ -15,12 +15,22 @@ function Require-Windows {
 
 function Ensure-Node {
     if ((Get-Command node.exe -ErrorAction SilentlyContinue) -and (Get-Command npm.cmd -ErrorAction SilentlyContinue)) { return }
+    $standardNodeDir = 'C:\Program Files\nodejs'
+    if ((Test-Path -LiteralPath (Join-Path $standardNodeDir 'node.exe')) -and
+        (Test-Path -LiteralPath (Join-Path $standardNodeDir 'npm.cmd'))) {
+        $env:Path = "$standardNodeDir;$env:Path"
+        return
+    }
     $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
     if (-not $winget) { throw 'Node.js가 필요합니다. https://nodejs.org 에서 LTS 버전을 설치한 뒤 다시 실행하세요.' }
     Write-Host 'Node.js LTS를 설치합니다...' -ForegroundColor Cyan
     & $winget.Source install --id OpenJS.NodeJS.LTS --exact --accept-package-agreements --accept-source-agreements
-    if ($LASTEXITCODE -ne 0) { throw 'Node.js 설치에 실패했습니다.' }
-    $env:Path = "C:\Program Files\nodejs;$env:Path"
+    if ((Test-Path -LiteralPath (Join-Path $standardNodeDir 'node.exe')) -and
+        (Test-Path -LiteralPath (Join-Path $standardNodeDir 'npm.cmd'))) {
+        $env:Path = "$standardNodeDir;$env:Path"
+        return
+    }
+    throw 'Node.js 설치에 실패했습니다.'
 }
 
 function Ensure-Antigravity {
