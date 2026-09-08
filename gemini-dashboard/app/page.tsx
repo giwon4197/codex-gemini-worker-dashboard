@@ -1144,6 +1144,62 @@ export default function Home() {
     };
   }, [data.codexDaily, data.summary, data.tokens]);
 
+  // Codex Primary Rate Limit Data (for 4th Donut Card)
+  const primaryLimitData = useMemo(() => {
+    if (codexAccountUsage.status !== 'loaded' || !codexAccountUsage.rateLimits?.primary) {
+      return {
+        isAvailable: false,
+        remainingPercent: 0,
+        usedPercent: 0,
+        resetText: '확인 불가',
+      };
+    }
+
+    const normalized = normalizeRateLimitWindow(codexAccountUsage.rateLimits.primary);
+    if (!normalized) {
+      return {
+        isAvailable: false,
+        remainingPercent: 0,
+        usedPercent: 0,
+        resetText: '확인 불가',
+      };
+    }
+
+    const rawUsed = typeof normalized.usedPercent === 'number' && Number.isFinite(normalized.usedPercent)
+      ? normalized.usedPercent
+      : null;
+    const rawRemaining = typeof normalized.remainingPercent === 'number' && Number.isFinite(normalized.remainingPercent)
+      ? normalized.remainingPercent
+      : null;
+
+    let remaining: number | null = null;
+    let used: number | null = null;
+
+    if (rawRemaining !== null) {
+      remaining = Math.max(0, Math.min(100, rawRemaining));
+      used = rawUsed !== null ? Math.max(0, Math.min(100, rawUsed)) : Math.max(0, Math.min(100, 100 - remaining));
+    } else if (rawUsed !== null) {
+      used = Math.max(0, Math.min(100, rawUsed));
+      remaining = Math.max(0, Math.min(100, 100 - used));
+    }
+
+    if (remaining === null || used === null) {
+      return {
+        isAvailable: false,
+        remainingPercent: 0,
+        usedPercent: 0,
+        resetText: '확인 불가',
+      };
+    }
+
+    return {
+      isAvailable: true,
+      remainingPercent: remaining,
+      usedPercent: used,
+      resetText: formatResetTime(normalized.resetsAt),
+    };
+  }, [codexAccountUsage]);
+
   // Filter & Search Jobs
   const filteredJobs = useMemo(() => {
     return data.jobs.filter(job => {
@@ -1536,8 +1592,8 @@ export default function Home() {
           isRefreshing={isRefreshing}
         />
 
-        {/* 1. TOP STATS: 3 CIRCULAR DONUT CHARTS (Codex active, Gemini active, Cumulative savings) */}
-        <section className="grid gap-5 grid-cols-1 md:grid-cols-3" aria-label="3대 누적 통계 원형 그래프">
+        {/* 1. TOP STATS: 4 CIRCULAR DONUT CHARTS (Codex active, Gemini active, Cumulative savings, Codex primary account limit) */}
+        <section className="grid gap-5 grid-cols-1 sm:grid-cols-2 xl:grid-cols-4" aria-label="4대 핵심 통계 원형 그래프">
           {/* Donut 1: Codex 누적 실질 사용량 */}
           <DonutStatCard
             title="Codex 누적 실질 사용량"
@@ -1617,6 +1673,42 @@ export default function Home() {
             tokenCountValue={`${cumulativeStats.estimatedCodexSavedTokens.toLocaleString()} 토큰`}
             basisText={`전체 실질 작업 중 추정 절감분의 비중이며 비용 절감률이 아닙니다. 1:1 토큰 환산 추정 · 실측 비용 절감액 아님 · 신뢰도: 낮음 (Gemini 실질 ${cumulativeStats.geminiActiveTokens.toLocaleString()} / 전체 실질 ${(cumulativeStats.codexActiveTokens + cumulativeStats.estimatedCodexSavedTokens).toLocaleString()})`}
             ariaLabel={`추정 Codex 절감량: ${cumulativeStats.estimatedCodexSavedTokens.toLocaleString()} 토큰, 전체 실질 작업 중 추정 비중 ${cumulativeStats.estimatedCodexSavingsRatio.toFixed(1)}% (1:1 토큰 환산 추정, 실측 비용 절감액 아님, 신뢰도: 낮음)`}
+          />
+
+          {/* Donut 4: Codex 계정 1차 한도 */}
+          <DonutStatCard
+            title="Codex 계정 1차 한도"
+            subtitle="API 1차 쿼터 잔여율 (토큰 점유율과 무관)"
+            icon={<Clock3 className="h-5 w-5" />}
+            accent="amber"
+            percent={primaryLimitData.isAvailable ? primaryLimitData.remainingPercent : null}
+            centerValue={primaryLimitData.isAvailable ? `${primaryLimitData.remainingPercent.toFixed(1)}%` : '확인 불가'}
+            centerTokenValue={primaryLimitData.isAvailable ? `사용률 ${primaryLimitData.usedPercent.toFixed(1)}%` : '한도 정보 없음'}
+            centerLabel="계정 잔여 한도"
+            badge={
+              primaryLimitData.isAvailable ? (
+                <Badge variant="secondary" className="text-amber-300 border border-amber-400/20 bg-black/20">
+                  계정 쿼터 {primaryLimitData.remainingPercent.toFixed(1)}% 잔여
+                </Badge>
+              ) : (
+                <Badge variant="secondary" className="text-slate-400 border border-slate-700 bg-slate-800/60 text-[10px] py-0.5 px-2 font-normal">
+                  확인 불가
+                </Badge>
+              )
+            }
+            tokenCountLabel="1차 쿼터 사용률"
+            tokenCountValue={primaryLimitData.isAvailable ? `${primaryLimitData.usedPercent.toFixed(1)}% 사용` : '확인 불가'}
+            basisText={
+              primaryLimitData.isAvailable
+                ? `사용률 ${primaryLimitData.usedPercent.toFixed(1)}% · 리셋 시각: ${primaryLimitData.resetText} (토큰 점유율과 무관한 계정 API 할당량)`
+                : '리셋 시각: 확인 불가 · 계정 한도(rateLimits) 정보를 불러올 수 없거나 제공되지 않는 상태입니다. (토큰 점유율과 무관)'
+            }
+            ariaLabel={
+              primaryLimitData.isAvailable
+                ? `Codex 계정 1차 한도 (계정 쿼터): 잔여 ${primaryLimitData.remainingPercent.toFixed(1)}%, 사용률 ${primaryLimitData.usedPercent.toFixed(1)}%, 리셋 시각: ${primaryLimitData.resetText} (토큰 점유율과 무관한 계정 한도)`
+                : 'Codex 계정 1차 한도: 확인 불가 (토큰 점유율과 무관한 계정 한도)'
+            }
+            isUnavailable={!primaryLimitData.isAvailable}
           />
         </section>
 
@@ -2704,17 +2796,18 @@ function CodexAccountUsageCard({
   );
 }
 
-type DonutAccent = 'violet' | 'cyan' | 'emerald';
+type DonutAccent = 'violet' | 'cyan' | 'emerald' | 'amber';
 
 function DonutStatCard({
   title, subtitle, icon, accent, percent, centerValue, centerTokenValue,
-  centerLabel, badge, tokenCountLabel, tokenCountValue, basisText, ariaLabel
+  centerLabel, badge, tokenCountLabel, tokenCountValue, basisText, ariaLabel,
+  isUnavailable = false,
 }: {
   title: string;
   subtitle: string;
   icon: React.ReactNode;
   accent: DonutAccent;
-  percent: number;
+  percent: number | null;
   centerValue: string;
   centerTokenValue: string;
   centerLabel: string;
@@ -2723,19 +2816,23 @@ function DonutStatCard({
   tokenCountValue: string;
   basisText: string;
   ariaLabel: string;
+  isUnavailable?: boolean;
 }) {
-  const safePercent = Math.max(0, Math.min(100, Number.isFinite(percent) ? percent : 0));
+  const unavailable = isUnavailable || percent === null || !Number.isFinite(percent);
+  const safePercent = Math.max(0, Math.min(100, Number.isFinite(percent) ? (percent as number) : 0));
   const radius = 50;
   const circumference = 2 * Math.PI * radius;
   const stroke = {
     violet: 'stroke-violet-400',
     cyan: 'stroke-cyan-400',
-    emerald: 'stroke-emerald-400'
+    emerald: 'stroke-emerald-400',
+    amber: 'stroke-amber-400',
   }[accent];
   const text = {
     violet: 'text-violet-300',
     cyan: 'text-cyan-300',
-    emerald: 'text-emerald-300'
+    emerald: 'text-emerald-300',
+    amber: 'text-amber-300',
   }[accent];
 
   return (
@@ -2749,7 +2846,16 @@ function DonutStatCard({
           </div>
         </div>
         {typeof badge === 'string' ? (
-          <Badge variant="secondary" className={`${text} border border-current/20 bg-black/20`}>{badge}</Badge>
+          <Badge
+            variant="secondary"
+            className={
+              unavailable
+                ? 'text-slate-400 border border-slate-700 bg-slate-800/60 text-[10px] py-0.5 px-2 font-normal'
+                : `${text} border border-current/20 bg-black/20`
+            }
+          >
+            {badge}
+          </Badge>
         ) : (
           badge
         )}
@@ -2759,10 +2865,32 @@ function DonutStatCard({
         <figure className="relative h-40 w-40" aria-label={`${centerLabel} ${centerValue}`}>
           <svg className="h-full w-full -rotate-90" viewBox="0 0 120 120" aria-hidden="true">
             <circle cx="60" cy="60" r={radius} fill="none" className="stroke-slate-800" strokeWidth="10" />
-            <circle cx="60" cy="60" r={radius} fill="none" className={`${stroke} transition-all duration-700`} strokeWidth="10" strokeLinecap="round" strokeDasharray={circumference} strokeDashoffset={circumference * (1 - safePercent / 100)} />
+            {unavailable ? (
+              <circle
+                cx="60"
+                cy="60"
+                r={radius}
+                fill="none"
+                className="stroke-slate-700/50"
+                strokeWidth="10"
+                strokeDasharray="4 4"
+              />
+            ) : (
+              <circle
+                cx="60"
+                cy="60"
+                r={radius}
+                fill="none"
+                className={`${stroke} transition-all duration-700`}
+                strokeWidth="10"
+                strokeLinecap="round"
+                strokeDasharray={circumference}
+                strokeDashoffset={circumference * (1 - safePercent / 100)}
+              />
+            )}
           </svg>
           <div className="absolute inset-0 flex flex-col items-center justify-center text-center px-2">
-            <span className={`font-bold font-mono ${text} ${centerValue.length > 9 ? 'text-lg' : centerValue.length > 7 ? 'text-xl' : 'text-2xl'}`}>{centerValue}</span>
+            <span className={`font-bold font-mono ${unavailable ? 'text-slate-400 text-lg' : text} ${centerValue.length > 9 ? 'text-lg' : centerValue.length > 7 ? 'text-xl' : 'text-2xl'}`}>{centerValue}</span>
             <span className="mt-1 max-w-[120px] truncate text-[11px] text-slate-300">{centerTokenValue}</span>
             <span className="text-[10px] text-muted-foreground">{centerLabel}</span>
           </div>
