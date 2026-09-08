@@ -25,7 +25,6 @@ import {
   Flame,
   Calendar,
   Sparkles,
-  TrendingDown,
   ShieldAlert,
   FileCode2,
   Ban,
@@ -83,6 +82,38 @@ export interface CodexRateLimits {
 export interface CodexAccountUsageState {
   status: 'idle' | 'loaded' | 'unavailable' | 'error';
   rateLimits: CodexRateLimits | null;
+  errorMessage?: string | null;
+  lastSyncedAt?: string | null;
+}
+
+export interface GeminiQuotaPool {
+  poolId: string;
+  poolName: string;
+  windowMinutes?: number | null;
+  usedPercent: number;
+  remainingPercent: number;
+  resetsAt: string | null;
+  remainingDuration: string | null;
+}
+
+export interface GeminiQuotaSnapshot {
+  fiveHourPool: GeminiQuotaPool | null;
+  weeklyPool: GeminiQuotaPool | null;
+  confirmedAt: string;
+  source: 'cli' | 'cache' | 'file';
+  isAvailable: boolean;
+}
+
+export interface GeminiQuotaResponse {
+  quota: GeminiQuotaSnapshot | null;
+  isAvailable: boolean;
+  error?: string | null;
+  lastSyncedAt: string;
+}
+
+export interface GeminiQuotaState {
+  status: 'idle' | 'loaded' | 'unavailable' | 'error';
+  quota: GeminiQuotaSnapshot | null;
   errorMessage?: string | null;
   lastSyncedAt?: string | null;
 }
@@ -836,6 +867,14 @@ export default function Home() {
     lastSyncedAt: null,
   });
 
+  // Gemini Quota State
+  const [geminiQuota, setGeminiQuota] = useState<GeminiQuotaState>({
+    status: 'idle',
+    quota: null,
+    errorMessage: null,
+    lastSyncedAt: null,
+  });
+
   const formatSyncTime = (isoString: string | null) => {
     if (!isoString) return '';
     try {
@@ -920,6 +959,39 @@ export default function Home() {
     } catch (err: unknown) {
       console.error('Failed to fetch /api/codex-usage:', err);
       applyCodexUsageError(err instanceof Error ? err.message : 'Codex 사용량 동기화 지연');
+    }
+  };
+
+  const fetchGeminiQuota = async (bypassCache = false) => {
+    try {
+      const url = bypassCache ? `/api/gemini-quota?refresh=true&t=${Date.now()}` : `/api/gemini-quota?t=${Date.now()}`;
+      const res = await fetch(url);
+      if (!res.ok) {
+        throw new Error(`API 응답 오류 (${res.status})`);
+      }
+      const json = (await res.json()) as GeminiQuotaResponse;
+      if (json.quota && json.isAvailable) {
+        setGeminiQuota({
+          status: 'loaded',
+          quota: json.quota,
+          errorMessage: null,
+          lastSyncedAt: json.lastSyncedAt || new Date().toISOString(),
+        });
+      } else {
+        setGeminiQuota({
+          status: json.error ? 'error' : 'unavailable',
+          quota: json.quota ?? null,
+          errorMessage: json.error ?? null,
+          lastSyncedAt: json.lastSyncedAt || new Date().toISOString(),
+        });
+      }
+    } catch (err: unknown) {
+      console.error('Failed to fetch /api/gemini-quota:', err);
+      setGeminiQuota(prev => ({
+        ...prev,
+        status: 'error',
+        errorMessage: err instanceof Error ? err.message : 'Gemini 쿼터 동기화 실패',
+      }));
     }
   };
 
@@ -1019,6 +1091,7 @@ export default function Home() {
       if (!ignore) {
         fetchDashboardData(false);
         void fetchCodexUsage();
+        void fetchGeminiQuota(false);
       }
     }, 0);
     return () => {
@@ -1033,9 +1106,13 @@ export default function Home() {
     const codexTimer = setInterval(() => {
       void fetchCodexUsage();
     }, 2500);
+    const quotaTimer = setInterval(() => {
+      void fetchGeminiQuota(false);
+    }, 5000);
     return () => {
       clearInterval(dashTimer);
       clearInterval(codexTimer);
+      clearInterval(quotaTimer);
     };
   }, [autoRefresh]);
 
@@ -1211,6 +1288,27 @@ export default function Home() {
       resetText: formatResetTime(normalized.resetsAt),
     };
   }, [codexAccountUsage]);
+
+  // Gemini Account Quota Data (for 4th Donut Card)
+  const geminiQuotaData = useMemo(() => {
+    const snapshot = geminiQuota.quota;
+    const fiveHour = snapshot?.fiveHourPool ?? null;
+    const weekly = snapshot?.weeklyPool ?? null;
+    const isAvailable = Boolean(snapshot?.isAvailable && (fiveHour || weekly));
+
+    // Choose primary pool for donut center: 5h pool preferred, weekly as fallback
+    const primaryPool = fiveHour || weekly;
+
+    return {
+      isAvailable,
+      primaryPool,
+      fiveHour,
+      weekly,
+      status: geminiQuota.status,
+      errorMessage: geminiQuota.errorMessage,
+      lastSyncedAt: geminiQuota.lastSyncedAt,
+    };
+  }, [geminiQuota]);
 
   // Filter & Search Jobs
   const filteredJobs = useMemo(() => {
@@ -1462,6 +1560,7 @@ export default function Home() {
                   onClick={() => {
                     fetchDashboardData(true);
                     void fetchCodexUsage();
+                    void fetchGeminiQuota(true);
                   }}
                   disabled={isRefreshing}
                   title="수동 새로고침"
@@ -1632,33 +1731,7 @@ export default function Home() {
             ariaLabel={`Gemini 오늘 실질 사용량: ${dailyTokenStats.geminiActiveTokens.toLocaleString()} 토큰 (실질 ${dailyTokenStats.geminiActiveTokens.toLocaleString()} + 캐시 ${dailyTokenStats.geminiCachedTokens.toLocaleString()} = 오늘 전체 처리 ${dailyTokenStats.geminiTotalTokens.toLocaleString()}), 오늘 전체 실질 토큰 대비 ${dailyTokenStats.geminiActiveRatio.toFixed(1)}%`}
           />
 
-          {/* Donut 3: 추정 Codex 절감량 */}
-          <DonutStatCard
-            title="오늘 추정 Codex 절감량"
-            subtitle="오늘 로컬 기준 1:1 토큰 환산 추정 (실측 비용 절감액 아님)"
-            icon={<TrendingDown className="h-5 w-5" />}
-            accent="emerald"
-            percent={dailyTokenStats.estimatedCodexSavingsRatio}
-            centerValue={dailyTokenStats.estimatedCodexSavedTokens.toLocaleString()}
-            centerTokenValue={`비중 ${dailyTokenStats.estimatedCodexSavingsRatio.toFixed(1)}%`}
-            centerLabel="추정 절감 토큰"
-            badge={
-              <div className="flex items-center gap-1.5 flex-wrap justify-end">
-                <Badge variant="secondary" className="text-amber-300 border border-amber-500/30 bg-amber-500/10 text-[10px] px-1.5 py-0.5 font-normal">
-                  신뢰도: 낮음
-                </Badge>
-                <Badge variant="secondary" className="text-emerald-300 border border-emerald-400/20 bg-black/20 text-[10px] px-1.5 py-0.5">
-                  {`비중 ${dailyTokenStats.estimatedCodexSavingsRatio.toFixed(1)}%`}
-                </Badge>
-              </div>
-            }
-            tokenCountLabel="오늘 추정 절감 토큰 (1:1)"
-            tokenCountValue={`${dailyTokenStats.estimatedCodexSavedTokens.toLocaleString()} 토큰`}
-            basisText={`오늘 전체 실질 작업 중 추정 절감분의 비중이며 비용 절감률이 아닙니다. 1:1 토큰 환산 추정 · 실측 비용 절감액 아님 · 신뢰도: 낮음 (오늘 Gemini 실질 ${dailyTokenStats.geminiActiveTokens.toLocaleString()} / 오늘 전체 실질 ${(dailyTokenStats.codexActiveTokens + dailyTokenStats.estimatedCodexSavedTokens).toLocaleString()})`}
-            ariaLabel={`오늘 추정 Codex 절감량: ${dailyTokenStats.estimatedCodexSavedTokens.toLocaleString()} 토큰, 오늘 전체 실질 작업 중 추정 비중 ${dailyTokenStats.estimatedCodexSavingsRatio.toFixed(1)}% (1:1 토큰 환산 추정, 실측 비용 절감액 아님, 신뢰도: 낮음)`}
-          />
-
-          {/* Donut 4: Codex 계정 1차 한도 */}
+          {/* Donut 3: Codex 계정 1차 한도 */}
           <DonutStatCard
             title="Codex 계정 1차 한도"
             subtitle="API 1차 쿼터 잔여율 (토큰 점유율과 무관)"
@@ -1692,6 +1765,101 @@ export default function Home() {
                 : 'Codex 계정 1차 한도: 확인 불가 (토큰 점유율과 무관한 계정 한도)'
             }
             isUnavailable={!primaryLimitData.isAvailable}
+          />
+
+          {/* Donut 4: Gemini 계정 잔여 한도 */}
+          <DonutStatCard
+            title="Gemini 계정 잔여 한도"
+            subtitle="공식 5시간 및 주간 공유 쿼터 (토큰 점유율과 무관)"
+            icon={<Sparkles className="h-5 w-5" />}
+            accent="emerald"
+            percent={geminiQuotaData.primaryPool ? geminiQuotaData.primaryPool.remainingPercent : null}
+            centerValue={geminiQuotaData.primaryPool ? `${geminiQuotaData.primaryPool.remainingPercent.toFixed(1)}%` : '확인 불가'}
+            centerTokenValue={geminiQuotaData.primaryPool ? `사용률 ${geminiQuotaData.primaryPool.usedPercent.toFixed(1)}%` : '한도 정보 없음'}
+            centerLabel={geminiQuotaData.primaryPool ? `${geminiQuotaData.primaryPool.poolName} 잔여` : '계정 잔여 한도'}
+            badge={
+              geminiQuotaData.primaryPool ? (
+                <Badge variant="secondary" className="text-emerald-300 border border-emerald-400/20 bg-black/20">
+                  {geminiQuotaData.primaryPool.poolName} {geminiQuotaData.primaryPool.remainingPercent.toFixed(1)}% 잔여
+                </Badge>
+              ) : (
+                <Badge variant="secondary" className="text-slate-400 border border-slate-700 bg-slate-800/60 text-[10px] py-0.5 px-2 font-normal">
+                  확인 불가
+                </Badge>
+              )
+            }
+            tokenCountLabel={geminiQuotaData.fiveHour ? '5시간 풀 사용률' : geminiQuotaData.weekly ? '주간 풀 사용률' : '공유 풀 사용률'}
+            tokenCountValue={geminiQuotaData.primaryPool ? `${geminiQuotaData.primaryPool.usedPercent.toFixed(1)}% 사용` : '확인 불가'}
+            basisText={
+              geminiQuotaData.isAvailable
+                ? `공식 Antigravity CLI 기준 · 5시간 및 주간 공유 풀 할당량 (토큰 점유율과 무관한 계정 API 쿼터)`
+                : '리셋 시각: 확인 불가 · Gemini 쿼터 정보를 불러올 수 없거나 CLI 환경이 구성되지 않았습니다. (토큰 점유율과 무관)'
+            }
+            ariaLabel={
+              geminiQuotaData.primaryPool
+                ? `Gemini 계정 잔여 한도 (${geminiQuotaData.primaryPool.poolName}): 잔여 ${geminiQuotaData.primaryPool.remainingPercent.toFixed(1)}%, 사용률 ${geminiQuotaData.primaryPool.usedPercent.toFixed(1)}% (토큰 점유율과 무관한 계정 한도)`
+                : 'Gemini 계정 잔여 한도: 확인 불가 (토큰 점유율과 무관한 계정 한도)'
+            }
+            isUnavailable={!geminiQuotaData.isAvailable || !geminiQuotaData.primaryPool}
+            extraContent={
+              <div className="space-y-2 text-xs">
+                {/* 5-Hour Shared Pool */}
+                <div className="flex flex-col gap-1 rounded bg-black/20 p-2 border border-border/30">
+                  <div className="flex items-center justify-between">
+                    <span className="font-medium text-slate-300">5시간 공유 풀 (5h)</span>
+                    {geminiQuotaData.fiveHour ? (
+                      <span className="font-mono font-semibold text-emerald-400">
+                        잔여 {geminiQuotaData.fiveHour.remainingPercent.toFixed(1)}% (사용 {geminiQuotaData.fiveHour.usedPercent.toFixed(1)}%)
+                      </span>
+                    ) : (
+                      <span className="text-slate-500 font-mono">확인 불가</span>
+                    )}
+                  </div>
+                  <div className="flex items-center justify-between text-[11px] text-slate-400">
+                    <span>리셋 시각</span>
+                    <span className="font-mono text-slate-300">
+                      {geminiQuotaData.fiveHour ? formatResetTime(geminiQuotaData.fiveHour.resetsAt) : '확인 불가'}
+                    </span>
+                  </div>
+                  {geminiQuotaData.fiveHour?.remainingDuration && (
+                    <div className="flex items-center justify-between text-[11px] text-slate-400">
+                      <span>남은 시간</span>
+                      <span className="font-mono text-cyan-300">
+                        {geminiQuotaData.fiveHour.remainingDuration}
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Weekly Shared Pool */}
+                <div className="flex flex-col gap-1 rounded bg-black/20 p-2 border border-border/30">
+                  <div className="flex items-center justify-between">
+                    <span className="font-medium text-slate-300">주간 공유 풀 (Weekly)</span>
+                    {geminiQuotaData.weekly ? (
+                      <span className="font-mono font-semibold text-emerald-400">
+                        잔여 {geminiQuotaData.weekly.remainingPercent.toFixed(1)}% (사용 {geminiQuotaData.weekly.usedPercent.toFixed(1)}%)
+                      </span>
+                    ) : (
+                      <span className="text-slate-500 font-mono">확인 불가</span>
+                    )}
+                  </div>
+                  <div className="flex items-center justify-between text-[11px] text-slate-400">
+                    <span>리셋 시각</span>
+                    <span className="font-mono text-slate-300">
+                      {geminiQuotaData.weekly ? formatResetTime(geminiQuotaData.weekly.resetsAt) : '확인 불가'}
+                    </span>
+                  </div>
+                  {geminiQuotaData.weekly?.remainingDuration && (
+                    <div className="flex items-center justify-between text-[11px] text-slate-400">
+                      <span>남은 시간</span>
+                      <span className="font-mono text-cyan-300">
+                        {geminiQuotaData.weekly.remainingDuration}
+                      </span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            }
           />
         </section>
 
@@ -2814,6 +2982,7 @@ function DonutStatCard({
   title, subtitle, icon, accent, percent, centerValue, centerTokenValue,
   centerLabel, badge, tokenCountLabel, tokenCountValue, basisText, ariaLabel,
   isUnavailable = false,
+  extraContent,
 }: {
   title: string;
   subtitle: string;
@@ -2829,6 +2998,7 @@ function DonutStatCard({
   basisText: string;
   ariaLabel: string;
   isUnavailable?: boolean;
+  extraContent?: React.ReactNode;
 }) {
   const unavailable = isUnavailable || percent === null || !Number.isFinite(percent);
   const safePercent = Math.max(0, Math.min(100, Number.isFinite(percent) ? (percent as number) : 0));
@@ -2913,6 +3083,11 @@ function DonutStatCard({
             <strong className="font-mono text-slate-200">{tokenCountValue}</strong>
           </div>
           <p className="mt-2 text-[11px] leading-relaxed text-slate-400">{basisText}</p>
+          {extraContent && (
+            <div className="mt-3 pt-3 border-t border-border/40">
+              {extraContent}
+            </div>
+          )}
         </div>
       </div>
     </article>
