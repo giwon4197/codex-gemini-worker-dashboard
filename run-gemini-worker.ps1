@@ -9,11 +9,17 @@ param(
   [string]$TaskId = '',
   [string]$StateRoot = '',
   [string]$BaseCommit = '',
-  [ValidateRange(1, 4)][int]$Attempt = 1
+  [ValidateRange(1, 4)][int]$Attempt = 1,
+  [string]$DashboardPath = '',
+  [string]$DataDir = '',
+  [string[]]$MockOutputLines = @(),
+  [string]$MockOutputJson = '',
+  [int]$MockExitCode = 0
 )
 
+$isMockRun = ($MockOutputLines -and $MockOutputLines.Count -gt 0) -or (-not [string]::IsNullOrWhiteSpace($MockOutputJson))
 $antigravity = Join-Path $env:LOCALAPPDATA 'agy\bin\agy.exe'
-if (-not (Test-Path -LiteralPath $antigravity)) {
+if (-not $isMockRun -and -not (Test-Path -LiteralPath $antigravity)) {
   throw 'Antigravity CLI를 찾을 수 없습니다.'
 }
 
@@ -129,15 +135,72 @@ if (-not ([System.Management.Automation.PSTypeName]'AgyProcessRunner').Type) {
 "@
 }
 
+function Resolve-SharedDashboardPaths {
+  param(
+    [string]$ExplicitDataDir = '',
+    [string]$ExplicitDashboardPath = '',
+    [string]$RepoPath = ''
+  )
+  if (-not [string]::IsNullOrWhiteSpace($ExplicitDashboardPath)) {
+    $dash = [System.IO.Path]::GetFullPath($ExplicitDashboardPath)
+    return [pscustomobject]@{ DataDir = Split-Path -Parent $dash; DashboardPath = $dash }
+  }
+  if (-not [string]::IsNullOrWhiteSpace($ExplicitDataDir)) {
+    $dDir = [System.IO.Path]::GetFullPath($ExplicitDataDir)
+    return [pscustomobject]@{ DataDir = $dDir; DashboardPath = (Join-Path $dDir 'dashboard.json') }
+  }
+  if (-not [string]::IsNullOrWhiteSpace($env:CODEX_GEMINI_DASHBOARD_PATH)) {
+    $dash = [System.IO.Path]::GetFullPath($env:CODEX_GEMINI_DASHBOARD_PATH)
+    return [pscustomobject]@{ DataDir = Split-Path -Parent $dash; DashboardPath = $dash }
+  }
+  if (-not [string]::IsNullOrWhiteSpace($env:CODEX_GEMINI_DATA_DIR)) {
+    $dDir = [System.IO.Path]::GetFullPath($env:CODEX_GEMINI_DATA_DIR)
+    return [pscustomobject]@{ DataDir = $dDir; DashboardPath = (Join-Path $dDir 'dashboard.json') }
+  }
+  $checkDirs = @($PSScriptRoot, $RepoPath) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and (Test-Path -LiteralPath $_) }
+  foreach ($dir in $checkDirs) {
+    $commonDir = (& git -C $dir rev-parse --git-common-dir 2>$null)
+    if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($commonDir)) {
+      $commonTrim = $commonDir.Trim()
+      $mainGitRoot = if ([System.IO.Path]::IsPathRooted($commonTrim)) {
+        [System.IO.Path]::GetFullPath((Join-Path $commonTrim '..'))
+      } else {
+        [System.IO.Path]::GetFullPath((Join-Path $dir (Join-Path $commonTrim '..')))
+      }
+      $candData = Join-Path $mainGitRoot 'gemini-dashboard\public\data'
+      if (Test-Path -LiteralPath $candData) {
+        return [pscustomobject]@{ DataDir = $candData; DashboardPath = (Join-Path $candData 'dashboard.json') }
+      }
+    }
+  }
+  if (-not [string]::IsNullOrWhiteSpace($env:CODEX_GEMINI_INSTALL_ROOT)) {
+    $candData = Join-Path $env:CODEX_GEMINI_INSTALL_ROOT 'gemini-dashboard\public\data'
+    if (Test-Path -LiteralPath $candData) {
+      return [pscustomobject]@{ DataDir = $candData; DashboardPath = (Join-Path $candData 'dashboard.json') }
+    }
+  }
+  if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+    $candData = Join-Path $env:LOCALAPPDATA 'codex-gemini-worker-dashboard\gemini-dashboard\public\data'
+    if (Test-Path -LiteralPath $candData) {
+      return [pscustomobject]@{ DataDir = $candData; DashboardPath = (Join-Path $candData 'dashboard.json') }
+    }
+  }
+  $fallbackData = Join-Path $PSScriptRoot 'gemini-dashboard\public\data'
+  return [pscustomobject]@{ DataDir = $fallbackData; DashboardPath = (Join-Path $fallbackData 'dashboard.json') }
+}
+
+$resolvedDashboard = Resolve-SharedDashboardPaths -ExplicitDataDir $DataDir -ExplicitDashboardPath $DashboardPath -RepoPath $Workspace
+$dashboardPath = $resolvedDashboard.DashboardPath
+$dataDir = $resolvedDashboard.DataDir
+
 $isParallelWorker = -not [string]::IsNullOrWhiteSpace($StateRoot)
 $workerKey = if ($TaskId) { $TaskId } else { [System.Guid]::NewGuid().ToString('N') }
-$dashboardPath = Join-Path $PSScriptRoot 'gemini-dashboard\public\data\dashboard.json'
 $liveWorkerPath = if ($isParallelWorker) {
   $workersDir = Join-Path $StateRoot 'workers'
   New-Item -ItemType Directory -Path $workersDir -Force | Out-Null
   Join-Path $workersDir "$workerKey.json"
 } else {
-  Join-Path $PSScriptRoot 'gemini-dashboard\public\data\live-worker.json'
+  Join-Path $dataDir 'live-worker.json'
 }
 $liveWorkerRootPath = if ($isParallelWorker) { $null } else { Join-Path $PSScriptRoot 'live-worker.json' }
 $eventPath = if ($isParallelWorker) {
@@ -251,6 +314,9 @@ function Sync-LiveWorker {
     $promptTokens + $candidateTokens + $thoughtTokens
   }
 
+  $effectiveRequests = if ($requests -gt 0) { [int64]$requests } else { 1 }
+  $effectiveLatency = if ($latency -gt 0) { [int64]$latency } else { [math]::Round($elapsed * 1000) }
+
   $liveObj = [pscustomobject]@{
     runId          = if ($OrchestrationRunId) { $OrchestrationRunId } else { $workerRunId }
     taskId         = $workerKey
@@ -271,6 +337,8 @@ function Sync-LiveWorker {
       cached     = [int64]$cachedTokens
       thoughts   = [int64]$thoughtTokens
       total      = [int64]$calcTotal
+      requests   = [int64]$effectiveRequests
+      latencyMs  = [int64]$effectiveLatency
     }
     finalResponse  = if ($FinalResp) { Redact-Secrets -Text $FinalResp } else { $null }
     error          = if ($Err) { Redact-Secrets -Text $Err } else { $null }
@@ -303,11 +371,23 @@ $exitCode = 0
 $lastHeartbeat = [System.Diagnostics.Stopwatch]::StartNew()
 
 try {
-  $runner.Start($antigravity, [string[]]$cliArgs, $Workspace)
-  $agentProcessId = $runner.Process.Id
+  if ($isMockRun) {
+    $linesToFeed = if ($MockOutputLines -and $MockOutputLines.Count -gt 0) {
+      @($MockOutputLines)
+    } else {
+      @($MockOutputJson -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    }
+    foreach ($mLine in $linesToFeed) {
+      $runner.Lines.Enqueue($mLine)
+    }
+    $exitCode = $MockExitCode
+  } else {
+    $runner.Start($antigravity, [string[]]$cliArgs, $Workspace)
+    $agentProcessId = $runner.Process.Id
+  }
   Sync-LiveWorker -Status 'running'
 
-  while (-not $runner.Process.HasExited -or -not $runner.Lines.IsEmpty) {
+  while (($isMockRun -and -not $runner.Lines.IsEmpty) -or (-not $isMockRun -and (-not $runner.Process.HasExited -or -not $runner.Lines.IsEmpty))) {
     $hasData = $false
     $line = ""
     while ($runner.Lines.TryDequeue([ref]$line)) {
@@ -408,17 +488,21 @@ try {
       $lastHeartbeat.Restart()
     }
 
-    Start-Sleep -Milliseconds 80
+    if (-not $isMockRun) {
+      Start-Sleep -Milliseconds 80
+    }
   }
 
-  $runner.Process.WaitForExit()
-  $exitCode = $runner.Process.ExitCode
+  if (-not $isMockRun -and $runner.Process) {
+    $runner.Process.WaitForExit()
+    $exitCode = $runner.Process.ExitCode
+  }
 } catch {
   $exitCode = 1
   $errorMessage = $_.Exception.Message
   Add-WorkerLog -Message "워커 프로세스 예외: $errorMessage" -Type 'error'
 } finally {
-  if ($runner -and $runner.Process -and -not $runner.Process.HasExited) {
+  if (-not $isMockRun -and $runner -and $runner.Process -and -not $runner.Process.HasExited) {
     try { $runner.Process.Kill($true) } catch {}
   }
 }
@@ -459,6 +543,26 @@ Add-WorkerLog -Message "작업 종료: 상태=$finalStatus, 소요시간=${elaps
 # 1. Update live-worker.json with final state
 Sync-LiveWorker -Status $finalStatus -FinalResp $parsedResponse -Err $errorMessage
 
+if ($eventPath) {
+  $usageRecord = [pscustomobject]@{
+    timestamp = (Get-Date).ToString('o')
+    runId     = if ($OrchestrationRunId) { $OrchestrationRunId } else { $workerRunId }
+    taskId    = $workerKey
+    type      = 'confirmed_usage'
+    status    = $finalStatus
+    usage     = [pscustomobject]@{
+      prompt     = [int64]$promptTokens
+      candidates = [int64]$candidateTokens
+      cached     = [int64]$cachedTokens
+      thoughts   = [int64]$thoughtTokens
+      total      = [int64]$runTokens
+      requests   = [int64]$requests
+      latencyMs  = [int64]$latency
+    }
+  }
+  Add-Content -LiteralPath $eventPath -Value ($usageRecord | ConvertTo-Json -Compress) -Encoding utf8
+}
+
 # Parallel workers own only their state/event files. The orchestrator is the
 # single writer for shared dashboard data, preventing lost read-modify-write updates.
 if ($isParallelWorker) {
@@ -483,22 +587,56 @@ if (Test-Path -LiteralPath $dashboardPath) {
 # Fallback/Initial layout if dashboard data is missing or corrupt
 if (-not $data) {
   $data = [pscustomobject]@{
-    updatedAt = (Get-Date).ToString('o')
-    summary   = [pscustomobject]@{
+    updatedAt     = (Get-Date).ToString('o')
+    summary       = [pscustomobject]@{
       tokens           = 0
       requests         = 0
       completed        = 0
       failed           = 0
       averageLatencyMs = 0
     }
-    tokens    = [pscustomobject]@{
+    tokens        = [pscustomobject]@{
       prompt     = 0
       candidates = 0
       cached     = 0
       thoughts   = 0
     }
-    jobs      = @()
+    codexDaily    = @()
+    jobs          = @()
+    processedKeys = @()
   }
+}
+
+$effectiveRunId = if ($OrchestrationRunId) { $OrchestrationRunId } else { $workerRunId }
+$effectiveTaskId = $workerKey
+$processingKey = "$effectiveRunId+$effectiveTaskId"
+$colonKey = "$($effectiveRunId):$($effectiveTaskId)"
+
+$processedKeys = if ($data.PSObject.Properties.Name -contains 'processedKeys' -and $data.processedKeys) {
+  @($data.processedKeys | ForEach-Object { [string]$_ })
+} else {
+  @()
+}
+
+$alreadyProcessed = ($processedKeys -contains $processingKey) -or ($processedKeys -contains $colonKey)
+if (-not $alreadyProcessed -and $data.PSObject.Properties.Name -contains 'jobs' -and $data.jobs) {
+  foreach ($j in @($data.jobs)) {
+    if ($j.PSObject.Properties.Name -contains 'runId' -and $j.PSObject.Properties.Name -contains 'taskId') {
+      if ($j.runId -eq $effectiveRunId -and $j.taskId -eq $effectiveTaskId) {
+        $alreadyProcessed = $true
+        break
+      }
+    }
+  }
+}
+
+if ($alreadyProcessed) {
+  if ($parsedResponse) {
+    $parsedResponse
+  } elseif ($errorMessage) {
+    Write-Error $errorMessage
+  }
+  exit $exitCode
 }
 
 $completedCount = if ($isSuccess) { 1 } else { 0 }
@@ -558,10 +696,13 @@ $job = [pscustomobject]@{
   time      = (Get-Date).ToString('tt h:mm')
   timestamp = (Get-Date).ToString('o')
   snippet   = $snippet
+  runId     = $effectiveRunId
+  taskId    = $effectiveTaskId
   stats     = $jobStats
 }
 
 $data.jobs = @($job) + @($data.jobs) | Select-Object -First 50
+$data.processedKeys = @($processedKeys) + @($processingKey) | Select-Object -Unique
 Write-AtomicJson -Path $dashboardPath -Data $data
 
 if ($parsedResponse) {

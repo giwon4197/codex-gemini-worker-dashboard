@@ -1,17 +1,83 @@
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'Run')]
 param(
-  [Parameter(Mandatory = $true)][string]$TasksFile,
+  [Parameter(Mandatory = $true, ParameterSetName = 'Run', Position = 0)]
+  [string]$TasksFile,
+  [Parameter(ParameterSetName = 'Run')]
   [string]$Repository = (Get-Location).Path,
+  [Parameter(ParameterSetName = 'Run')]
   [ValidateRange(1, 2)][int]$MaxWorkers = 2,
+  [Parameter(ParameterSetName = 'Run')]
   [ValidateRange(1, 86400)][int]$WorkerTimeoutSeconds = 3600,
   [string]$Timeout = '24h',
-  [switch]$CleanupWorktrees
+  [switch]$CleanupWorktrees,
+  [string]$DataDir = '',
+  [string]$DashboardPath = '',
+  [Parameter(Mandatory = $true, ParameterSetName = 'SyncOnly')]
+  [string]$SyncStateRoot = ''
 )
 
 $ErrorActionPreference = 'Stop'
 $orchestratorRoot = $PSScriptRoot
 $workerScript = Join-Path $orchestratorRoot 'run-gemini-worker.ps1'
-$publicData = Join-Path $orchestratorRoot 'gemini-dashboard\public\data'
+
+function Resolve-SharedDashboardPaths {
+  param(
+    [string]$ExplicitDataDir = '',
+    [string]$ExplicitDashboardPath = '',
+    [string]$RepoPath = ''
+  )
+  if (-not [string]::IsNullOrWhiteSpace($ExplicitDashboardPath)) {
+    $dash = [System.IO.Path]::GetFullPath($ExplicitDashboardPath)
+    return [pscustomobject]@{ DataDir = Split-Path -Parent $dash; DashboardPath = $dash }
+  }
+  if (-not [string]::IsNullOrWhiteSpace($ExplicitDataDir)) {
+    $dDir = [System.IO.Path]::GetFullPath($ExplicitDataDir)
+    return [pscustomobject]@{ DataDir = $dDir; DashboardPath = (Join-Path $dDir 'dashboard.json') }
+  }
+  if (-not [string]::IsNullOrWhiteSpace($env:CODEX_GEMINI_DASHBOARD_PATH)) {
+    $dash = [System.IO.Path]::GetFullPath($env:CODEX_GEMINI_DASHBOARD_PATH)
+    return [pscustomobject]@{ DataDir = Split-Path -Parent $dash; DashboardPath = $dash }
+  }
+  if (-not [string]::IsNullOrWhiteSpace($env:CODEX_GEMINI_DATA_DIR)) {
+    $dDir = [System.IO.Path]::GetFullPath($env:CODEX_GEMINI_DATA_DIR)
+    return [pscustomobject]@{ DataDir = $dDir; DashboardPath = (Join-Path $dDir 'dashboard.json') }
+  }
+  $checkDirs = @($PSScriptRoot, $RepoPath) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and (Test-Path -LiteralPath $_) }
+  foreach ($dir in $checkDirs) {
+    $commonDir = (& git -C $dir rev-parse --git-common-dir 2>$null)
+    if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($commonDir)) {
+      $commonTrim = $commonDir.Trim()
+      $mainGitRoot = if ([System.IO.Path]::IsPathRooted($commonTrim)) {
+        [System.IO.Path]::GetFullPath((Join-Path $commonTrim '..'))
+      } else {
+        [System.IO.Path]::GetFullPath((Join-Path $dir (Join-Path $commonTrim '..')))
+      }
+      $candData = Join-Path $mainGitRoot 'gemini-dashboard\public\data'
+      if (Test-Path -LiteralPath $candData) {
+        return [pscustomobject]@{ DataDir = $candData; DashboardPath = (Join-Path $candData 'dashboard.json') }
+      }
+    }
+  }
+  if (-not [string]::IsNullOrWhiteSpace($env:CODEX_GEMINI_INSTALL_ROOT)) {
+    $candData = Join-Path $env:CODEX_GEMINI_INSTALL_ROOT 'gemini-dashboard\public\data'
+    if (Test-Path -LiteralPath $candData) {
+      return [pscustomobject]@{ DataDir = $candData; DashboardPath = (Join-Path $candData 'dashboard.json') }
+    }
+  }
+  if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+    $candData = Join-Path $env:LOCALAPPDATA 'codex-gemini-worker-dashboard\gemini-dashboard\public\data'
+    if (Test-Path -LiteralPath $candData) {
+      return [pscustomobject]@{ DataDir = $candData; DashboardPath = (Join-Path $candData 'dashboard.json') }
+    }
+  }
+  $fallbackData = Join-Path $PSScriptRoot 'gemini-dashboard\public\data'
+  return [pscustomobject]@{ DataDir = $fallbackData; DashboardPath = (Join-Path $fallbackData 'dashboard.json') }
+}
+
+$targetRepo = if ($Repository) { $Repository } else { $PSScriptRoot }
+$resolvedPaths = Resolve-SharedDashboardPaths -ExplicitDataDir $DataDir -ExplicitDashboardPath $DashboardPath -RepoPath $targetRepo
+$publicData = $resolvedPaths.DataDir
+$dashboardPath = $resolvedPaths.DashboardPath
 
 function Write-AtomicJson([string]$Path, $Data) {
   $parent = Split-Path -Parent $Path
@@ -45,6 +111,238 @@ function Stop-WorkerProcesses([string]$StatePath) {
   } catch {}
 }
 
+function Update-DashboardUsage {
+  param(
+    [Parameter(Mandatory = $true)][string]$RunRoot,
+    [Parameter(Mandatory = $true)][string]$DashboardPath
+  )
+
+  if (-not (Test-Path -LiteralPath $RunRoot)) { return }
+
+  $workerDir = Join-Path $RunRoot 'workers'
+  $resultsDir = Join-Path $RunRoot 'results'
+
+  $workerStates = [System.Collections.Generic.List[object]]::new()
+
+  if (Test-Path -LiteralPath $workerDir) {
+    foreach ($file in Get-ChildItem -LiteralPath $workerDir -Filter '*.json' -ErrorAction SilentlyContinue) {
+      try {
+        $content = Get-Content -Raw -LiteralPath $file.FullName | ConvertFrom-Json
+        if ($content -and $content.runId -and $content.taskId) {
+          $workerStates.Add($content)
+        }
+      } catch {}
+    }
+  }
+
+  if (Test-Path -LiteralPath $resultsDir) {
+    foreach ($file in Get-ChildItem -LiteralPath $resultsDir -Filter '*-result.json' -ErrorAction SilentlyContinue) {
+      try {
+        $content = Get-Content -Raw -LiteralPath $file.FullName | ConvertFrom-Json
+        if ($content -and $content.runId -and $content.taskId) {
+          $existingIdx = -1
+          for ($i = 0; $i -lt $workerStates.Count; $i++) {
+            if ($workerStates[$i].taskId -eq $content.taskId) {
+              $existingIdx = $i
+              break
+            }
+          }
+          if ($existingIdx -ge 0) {
+            $workerStates[$existingIdx] = $content
+          } else {
+            $workerStates.Add($content)
+          }
+        }
+      } catch {}
+    }
+  }
+
+  if ($workerStates.Count -eq 0) { return }
+
+  $terminalStates = @($workerStates | Where-Object {
+    $_.status -notin @('running', 'preparing') -and $_.partialUsage
+  })
+
+  if ($terminalStates.Count -eq 0) { return }
+
+  $data = $null
+  if (Test-Path -LiteralPath $DashboardPath) {
+    try {
+      $data = Get-Content -Raw -LiteralPath $DashboardPath | ConvertFrom-Json
+    } catch {
+      $data = $null
+    }
+  }
+
+  if (-not $data) {
+    $data = [pscustomobject]@{
+      updatedAt     = (Get-Date).ToString('o')
+      summary       = [pscustomobject]@{
+        tokens           = 0
+        requests         = 0
+        completed        = 0
+        failed           = 0
+        averageLatencyMs = 0
+      }
+      tokens        = [pscustomobject]@{
+        prompt     = 0
+        candidates = 0
+        cached     = 0
+        thoughts   = 0
+      }
+      codexDaily    = @()
+      jobs          = @()
+      processedKeys = @()
+    }
+  }
+
+  if (-not ($data.PSObject.Properties.Name -contains 'summary') -or -not $data.summary) {
+    $data | Add-Member -NotePropertyName 'summary' -NotePropertyValue ([pscustomobject]@{
+      tokens = 0; requests = 0; completed = 0; failed = 0; averageLatencyMs = 0
+    }) -Force
+  }
+  if (-not ($data.PSObject.Properties.Name -contains 'tokens') -or -not $data.tokens) {
+    $data | Add-Member -NotePropertyName 'tokens' -NotePropertyValue ([pscustomobject]@{
+      prompt = 0; candidates = 0; cached = 0; thoughts = 0
+    }) -Force
+  }
+  if (-not ($data.PSObject.Properties.Name -contains 'jobs') -or -not $data.jobs) {
+    $data | Add-Member -NotePropertyName 'jobs' -NotePropertyValue @() -Force
+  }
+  if (-not ($data.PSObject.Properties.Name -contains 'processedKeys') -or -not $data.processedKeys) {
+    $data | Add-Member -NotePropertyName 'processedKeys' -NotePropertyValue @() -Force
+  }
+
+  $existingKeys = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+  foreach ($k in @($data.processedKeys)) {
+    if (-not [string]::IsNullOrWhiteSpace($k)) {
+      [void]$existingKeys.Add([string]$k)
+    }
+  }
+
+  foreach ($j in @($data.jobs)) {
+    if ($j.PSObject.Properties.Name -contains 'runId' -and $j.PSObject.Properties.Name -contains 'taskId') {
+      if (-not [string]::IsNullOrWhiteSpace($j.runId) -and -not [string]::IsNullOrWhiteSpace($j.taskId)) {
+        [void]$existingKeys.Add("$($j.runId)+$($j.taskId)")
+        [void]$existingKeys.Add("$($j.runId):$($j.taskId)")
+      }
+    }
+  }
+
+  $newJobs = [System.Collections.Generic.List[object]]::new()
+  $keysToAdd = [System.Collections.Generic.List[string]]::new()
+  $hasChanges = $false
+
+  foreach ($state in $terminalStates) {
+    $rId = [string]$state.runId
+    $tId = [string]$state.taskId
+    $primaryKey = "$rId+$tId"
+    $colonKey = "$($rId):$($tId)"
+
+    if ($existingKeys.Contains($primaryKey) -or $existingKeys.Contains($colonKey)) {
+      continue
+    }
+
+    $pu = $state.partialUsage
+    $prompt = if ($pu.prompt) { [int64]$pu.prompt } else { 0 }
+    $candidates = if ($pu.candidates) { [int64]$pu.candidates } else { 0 }
+    $cached = if ($pu.cached) { [int64]$pu.cached } else { 0 }
+    $thoughts = if ($pu.thoughts) { [int64]$pu.thoughts } else { 0 }
+    $runTokens = if ($pu.total -and [int64]$pu.total -gt 0) {
+      [int64]$pu.total
+    } else {
+      $prompt + $candidates + $thoughts
+    }
+
+    $reqs = if ($pu.requests -and [int64]$pu.requests -gt 0) { [int64]$pu.requests } else { 1 }
+    $elapsed = if ($state.elapsedSeconds) { [double]$state.elapsedSeconds } else { 0 }
+    $lat = if ($pu.latencyMs -and [int64]$pu.latencyMs -gt 0) {
+      [int64]$pu.latencyMs
+    } else {
+      [math]::Round($elapsed * 1000)
+    }
+
+    $isSuccess = ($state.status -eq 'completed')
+    $completedCount = if ($isSuccess) { 1 } else { 0 }
+    $failedCount = if ($isSuccess) { 0 } else { 1 }
+
+    $prevRequests = [int64]$data.summary.requests
+    $totalRequests = $prevRequests + $reqs
+    $totalLatency = ([int64]$data.summary.averageLatencyMs * $prevRequests) + $lat
+
+    $data.summary.tokens = [int64]$data.summary.tokens + $runTokens
+    $data.summary.requests = $totalRequests
+    $data.summary.completed = [int64]$data.summary.completed + $completedCount
+    $data.summary.failed = [int64]$data.summary.failed + $failedCount
+    $data.summary.averageLatencyMs = if ($totalRequests -gt 0) { [math]::Round($totalLatency / $totalRequests) } else { 0 }
+
+    $data.tokens.prompt = [int64]$data.tokens.prompt + $prompt
+    $data.tokens.candidates = [int64]$data.tokens.candidates + $candidates
+    $data.tokens.cached = [int64]$data.tokens.cached + $cached
+    $data.tokens.thoughts = [int64]$data.tokens.thoughts + $thoughts
+
+    $jobModel = if ($state.model) { [string]$state.model } else { 'gemini-3.8-flash-medium' }
+    $jobStatus = if ($isSuccess) { '완료' } else { '실패' }
+    $jobSnippet = ""
+    if ($isSuccess) {
+      if ($state.finalResponse) {
+        $jobSnippet = [string]$state.finalResponse
+        if ($jobSnippet.Length -gt 800) { $jobSnippet = $jobSnippet.Substring(0, 770) + "..." }
+      }
+    } else {
+      if ($state.error) {
+        $jobSnippet = "에러: $($state.error)"
+      } else {
+        $jobSnippet = "작업 실패 (상태: $($state.status))"
+      }
+    }
+
+    $jobTime = try { ([datetime]$state.updatedAt).ToString('tt h:mm') } catch { (Get-Date).ToString('tt h:mm') }
+    $jobTimestamp = if ($state.updatedAt) { [string]$state.updatedAt } else { (Get-Date).ToString('o') }
+
+    $jobStats = [pscustomobject]@{
+      prompt     = $prompt
+      candidates = $candidates
+      cached     = $cached
+      thoughts   = $thoughts
+      requests   = $reqs
+      latency    = $lat
+    }
+
+    $job = [pscustomobject]@{
+      name      = if ($state.task) { [string]$state.task } else { $tId }
+      model     = $jobModel
+      status    = $jobStatus
+      tokens    = $runTokens.ToString('N0')
+      duration  = "${elapsed}초"
+      time      = $jobTime
+      timestamp = $jobTimestamp
+      snippet   = $jobSnippet
+      runId     = $rId
+      taskId    = $tId
+      stats     = $jobStats
+    }
+
+    $newJobs.Add($job)
+    $keysToAdd.Add($primaryKey)
+    [void]$existingKeys.Add($primaryKey)
+    [void]$existingKeys.Add($colonKey)
+    $hasChanges = $true
+  }
+
+  if ($hasChanges) {
+    $data.updatedAt = (Get-Date).ToString('o')
+    $data.jobs = @($newJobs) + @($data.jobs) | Select-Object -First 50
+    $data.processedKeys = @($data.processedKeys) + @($keysToAdd) | Select-Object -Unique
+    Write-AtomicJson -Path $DashboardPath -Data $data
+  }
+}
+
+if ($SyncStateRoot) {
+  Update-DashboardUsage -RunRoot $SyncStateRoot -DashboardPath $dashboardPath
+  return
+}
+
 function Start-WorkerProcess($Task, $Worktree, [string]$Tier, [string]$RunId, [string]$RunRoot, [string]$BaseCommit, [string]$TimeoutValue, [int]$Attempt = 1) {
   $info = [Diagnostics.ProcessStartInfo]::new()
   $info.FileName = (Get-Command pwsh.exe).Source
@@ -61,7 +359,9 @@ function Start-WorkerProcess($Task, $Worktree, [string]$Tier, [string]$RunId, [s
     '-TaskId', [string]$Task.id,
     '-StateRoot', $RunRoot,
     '-BaseCommit', $BaseCommit,
-    '-Attempt', $Attempt.ToString()
+    '-Attempt', $Attempt.ToString(),
+    '-DashboardPath', $dashboardPath,
+    '-DataDir', $publicData
   )) { $null = $info.ArgumentList.Add($argument) }
   $process = [Diagnostics.Process]::new()
   $process.StartInfo = $info
@@ -106,7 +406,11 @@ function Invoke-Verification([string]$Worktree, $Commands) {
     foreach ($commandValue in @($Commands)) {
       $command = [string]$commandValue
       $started = Get-Date
-      $output = @(& pwsh.exe -NoProfile -Command $command 2>&1 | ForEach-Object { $_.ToString() })
+      $output = if ($IsWindows -or ($env:OS -like '*Windows*')) {
+        @(& cmd.exe /d /s /c $command 2>&1 | ForEach-Object { $_.ToString() })
+      } else {
+        @(& /bin/sh -c $command 2>&1 | ForEach-Object { $_.ToString() })
+      }
       $exitCode = $LASTEXITCODE
       $joined = $output -join "`n"
       $results += [pscustomobject]@{
@@ -384,6 +688,7 @@ $compressed
     Set-ObjectProperty $state 'escalation' $(if ($decision -eq 'PASS') { $null } else { [pscustomobject]@{ requiresCodex=$true; category=$decision; reason="자동 처리 중단: $decision" } })
     Set-ObjectProperty $state 'updatedAt' (Get-Date).ToString('o')
     Write-AtomicJson $statePath $state; Write-AtomicJson (Join-Path $runRoot "results\$safeId-result.json") $state
+    Update-DashboardUsage -RunRoot $runRoot -DashboardPath $dashboardPath
     if ($decision -ne 'PASS') { $failed++ }
   }
 
@@ -439,11 +744,15 @@ $compressed
   }
 
   Sync-LiveWorkers $runRoot
+  Update-DashboardUsage -RunRoot $runRoot -DashboardPath $dashboardPath
   $manifest.status = if (Test-Path -LiteralPath $cancelPath) { 'cancelled' } elseif ($failed -gt 0) { 'failed' } elseif ($integration -and $integration.decision -eq 'AWAITING_CODEX_REVIEW') { 'awaiting_review' } else { 'completed' }
   $manifest.updatedAt = (Get-Date).ToString('o'); Write-AtomicJson $manifestPath $manifest
   Write-Output "Run: $runId"; Write-Output "State: $runRoot"; Write-Output "Status: $($manifest.status)"
   if ($manifest.status -notin @('completed', 'awaiting_review')) { exit 1 }
 } finally {
+  if ($runRoot -and (Test-Path -LiteralPath $runRoot)) {
+    try { Update-DashboardUsage -RunRoot $runRoot -DashboardPath $dashboardPath } catch {}
+  }
   foreach ($record in $jobRecords) {
     if (-not $record.Process.HasExited) { try { $record.Process.Kill($true) } catch {} }
     $record.Process.Dispose()

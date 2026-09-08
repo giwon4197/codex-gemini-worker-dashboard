@@ -114,7 +114,9 @@ param(
 )
 $root = '__INSTALL_ROOT__'
 $workspacePath = if ([string]::IsNullOrWhiteSpace($Workspace)) { (Get-Location).Path } else { (Resolve-Path -LiteralPath $Workspace).Path }
-$argsMap = @{Task=$Task;Prompt=$Prompt;ApprovalMode=$ApprovalMode;Workspace=$workspacePath;Timeout=$Timeout}
+$sharedDataDir = Join-Path $root 'gemini-dashboard\public\data'
+$sharedDashboardPath = Join-Path $sharedDataDir 'dashboard.json'
+$argsMap = @{Task=$Task;Prompt=$Prompt;ApprovalMode=$ApprovalMode;Workspace=$workspacePath;Timeout=$Timeout;DashboardPath=$sharedDashboardPath;DataDir=$sharedDataDir}
 if ($Model) { $argsMap.Model = $Model }
 & (Join-Path $root 'run-gemini-worker.ps1') @argsMap
 exit $LASTEXITCODE
@@ -133,7 +135,9 @@ param(
 )
 $root = '__INSTALL_ROOT__'
 $repo = if ([string]::IsNullOrWhiteSpace($Repository)) { (Get-Location).Path } else { (Resolve-Path -LiteralPath $Repository).Path }
-& (Join-Path $root 'run-parallel-workers.ps1') -TasksFile $TasksFile -Repository $repo -MaxWorkers $MaxWorkers -WorkerTimeoutSeconds $WorkerTimeoutSeconds -Timeout $Timeout -CleanupWorktrees:$CleanupWorktrees
+$sharedDataDir = Join-Path $root 'gemini-dashboard\public\data'
+$sharedDashboardPath = Join-Path $sharedDataDir 'dashboard.json'
+& (Join-Path $root 'run-parallel-workers.ps1') -TasksFile $TasksFile -Repository $repo -MaxWorkers $MaxWorkers -WorkerTimeoutSeconds $WorkerTimeoutSeconds -Timeout $Timeout -CleanupWorktrees:$CleanupWorktrees -DashboardPath $sharedDashboardPath -DataDir $sharedDataDir
 exit $LASTEXITCODE
 '@.Replace('__INSTALL_ROOT__', $escapedRoot)
     Set-Content -LiteralPath (Join-Path $launcherDir 'parallel-gemini-workers.ps1') -Value $parallelLauncher -Encoding utf8
