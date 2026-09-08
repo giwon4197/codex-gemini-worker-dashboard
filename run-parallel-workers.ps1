@@ -183,7 +183,8 @@ function Update-DashboardUsage {
       if ((-not $existing.elapsedSeconds -or [double]$existing.elapsedSeconds -le 0) -and $elapsedSec) {
         $existing.elapsedSeconds = $elapsedSec
       }
-      if ((-not $existing.updatedAt) -and $updAt) { $existing.updatedAt = $updAt }
+      # State/result metadata is richer than the earlier confirmed_usage event.
+      if ($updAt) { $existing.updatedAt = $updAt }
       if (-not $existing.hasConfirmedUsage -and $hasConfirmedUsage) {
         $existing.hasConfirmedUsage = $true
         $existing.prompt = $prompt
