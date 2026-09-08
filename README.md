@@ -61,7 +61,8 @@ parallel-gemini-workers -TasksFile .\parallel-tasks.json -MaxWorkers 2
   "tier": "fast",
   "allowed_files": ["docs/worker-a.md"],
   "test_commands": ["if (-not (Test-Path 'docs/worker-a.md')) { exit 1 }"],
-  "timeout_seconds": 300
+  "timeout_seconds": 300,
+  "retry_limit": 3
 }
 ```
 
@@ -74,6 +75,11 @@ stop-parallel-run -RunId <run-id> -Repository C:\path\to\project
 
 다음 실행을 시작할 때 중단된 run과 고아 worktree를 자동 점검합니다. 변경이 없는 고아 worktree만 정리하고,
 수정 사항이 있는 worktree는 데이터 손실 방지를 위해 보존합니다.
+
+검증 결과가 `TEST_FAILED`이면 동일 worktree와 branch에서 실패 로그를 압축해 같은 Worker에 전달하고,
+최대 3회까지 수정과 재검증을 반복합니다. `INTERFACE_ERROR`, `DESIGN_ERROR`, `PERMISSION_ERROR`,
+`ENVIRONMENT_ERROR`, `POLICY_VIOLATION`은 재시도하지 않고 즉시 Codex 검토 대상으로 기록합니다.
+동일한 실패 지문이 반복되면 `REPEATED_FAILURE`, 한도를 모두 사용하면 `RETRY_EXHAUSTED`로 escalation합니다.
 
 | 등급 | 모델 | 권장 용도 |
 |---|---|---|

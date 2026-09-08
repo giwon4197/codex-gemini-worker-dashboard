@@ -6,7 +6,8 @@
     "tier": "fast",
     "allowed_files": ["docs/worker-a.md"],
     "test_commands": ["if (-not (Test-Path -LiteralPath 'docs/worker-a.md')) { exit 1 }"],
-    "timeout_seconds": 300
+    "timeout_seconds": 300,
+    "retry_limit": 3
   },
   {
     "id": "TASK-002",
@@ -15,6 +16,7 @@
     "tier": "fast",
     "allowed_files": ["docs/worker-b.md"],
     "test_commands": ["if (-not (Test-Path -LiteralPath 'docs/worker-b.md')) { exit 1 }"],
-    "timeout_seconds": 300
+    "timeout_seconds": 300,
+    "retry_limit": 3
   }
 ]

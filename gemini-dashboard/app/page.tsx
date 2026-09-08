@@ -124,7 +124,7 @@ export interface LiveWorkerData {
   taskId?: string;
   task: string;
   model: string;
-  status: 'running' | 'completed' | 'failed' | 'policy_violation' | 'test_failed' | 'timed_out' | 'cancelled' | 'interrupted';
+  status: 'running' | 'completed' | 'failed' | 'policy_violation' | 'test_failed' | 'timed_out' | 'cancelled' | 'interrupted' | 'escalated';
   startedAt: string;
   updatedAt: string;
   elapsedSeconds: number;

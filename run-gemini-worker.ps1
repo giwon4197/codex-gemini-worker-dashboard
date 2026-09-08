@@ -8,7 +8,8 @@ param(
   [string]$OrchestrationRunId = '',
   [string]$TaskId = '',
   [string]$StateRoot = '',
-  [string]$BaseCommit = ''
+  [string]$BaseCommit = '',
+  [ValidateRange(1, 4)][int]$Attempt = 1
 )
 
 $antigravity = Join-Path $env:LOCALAPPDATA 'agy\bin\agy.exe'
@@ -253,6 +254,7 @@ function Sync-LiveWorker {
   $liveObj = [pscustomobject]@{
     runId          = if ($OrchestrationRunId) { $OrchestrationRunId } else { $workerRunId }
     taskId         = $workerKey
+    attempt        = $Attempt
     baseCommit     = if ($BaseCommit) { $BaseCommit } else { $null }
     runnerProcessId = $runnerProcessId
     agentProcessId = $agentProcessId
@@ -282,7 +284,7 @@ function Sync-LiveWorker {
 }
 
 # 1. Immediately record running status and initial log
-Add-WorkerLog -Message "워커 초기화: 작업 '$Task' (모델: $targetModel)" -Type 'system'
+Add-WorkerLog -Message "워커 초기화: 작업 '$Task' (모델: $targetModel, 시도: $Attempt)" -Type 'system'
 Sync-LiveWorker -Status 'running'
 
 $agentMode = if ($ApprovalMode -eq 'plan') { 'plan' } else { 'accept-edits' }
