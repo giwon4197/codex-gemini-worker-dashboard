@@ -250,7 +250,7 @@ try {
     $statePath = Join-Path $runRoot "workers\$safeId.json"
     $state = if (Test-Path -LiteralPath $statePath) { Get-Content -Raw -LiteralPath $statePath | ConvertFrom-Json } else { [pscustomobject]@{ runId=$runId; taskId=$task.id; task=$task.name; status='failed'; error='워커 상태 파일이 생성되지 않음' } }
     $record = $jobRecords | Where-Object { $_.Task.id -eq $task.id } | Select-Object -First 1
-    $wasCancelled = (Test-Path -LiteralPath $cancelPath) -and (-not $record -or $record.Cancelled)
+    $wasCancelled = Test-Path -LiteralPath $cancelPath
     $wasTimedOut = $record -and $record.TimedOut
     $changed = @(Get-ChangedFiles $wt.path $baseCommit)
     $violations = @($changed | Where-Object { -not (Test-AllowedPath $_ @($task.allowed_files)) })
