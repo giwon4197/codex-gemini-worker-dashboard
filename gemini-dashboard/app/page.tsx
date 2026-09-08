@@ -980,8 +980,9 @@ export default function Home() {
 
   const fetchGeminiQuota = async (bypassCache = false) => {
     try {
+      const staticRes = await fetch(`/data/gemini-quota.json?t=${Date.now()}`, { cache: 'no-store' });
       const url = bypassCache ? `/api/gemini-quota?refresh=true&t=${Date.now()}` : `/api/gemini-quota?t=${Date.now()}`;
-      const res = await fetch(url);
+      const res = staticRes.ok ? staticRes : await fetch(url);
       if (!res.ok) {
         throw new Error(`API 응답 오류 (${res.status})`);
       }

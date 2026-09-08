@@ -388,6 +388,15 @@ try {
     Write-Host "대시보드 서버를 시작합니다 ($url)..." -ForegroundColor Cyan
     Record-Action 'SERVER_STARTING'
 
+    $quotaUpdater = Join-Path (Split-Path -Parent $targetDashboardDir) 'refresh-gemini-quota.ps1'
+    if (Test-Path -LiteralPath $quotaUpdater) {
+        Start-Process -FilePath 'powershell.exe' `
+            -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $quotaUpdater + '"'), '-DashboardDir', ('"' + $targetDashboardDir + '"')) `
+            -WorkingDirectory (Split-Path -Parent $targetDashboardDir) `
+            -WindowStyle Hidden | Out-Null
+        Record-Action 'GEMINI_QUOTA_UPDATER_STARTED'
+    }
+
     $serverProcess = $null
     if ($MockProcessMode -eq 'early_exit') {
         Record-Action 'MOCK_EARLY_EXIT'

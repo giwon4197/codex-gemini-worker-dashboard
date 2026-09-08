@@ -443,7 +443,23 @@ export function findAntigravityCliExecutable(): string | null {
     }
   }
 
-  // 3. User Home Directory (supports Korean characters e.g. C:\Users\김기원)
+  // 3. Server runtimes such as vinext may not forward USERPROFILE or
+  // LOCALAPPDATA. Recover the Windows profile directory from the dashboard's
+  // working directory without assuming an ASCII-only user name.
+  if (process.platform === 'win32') {
+    try {
+      const cwd = process.cwd();
+      const profileMatch = cwd.match(/^([A-Za-z]:\\Users\\[^\\]+)/i);
+      if (profileMatch) {
+        const candidate = path.join(profileMatch[1], 'AppData', 'Local', 'agy', 'bin', 'agy.exe');
+        if (fs.existsSync(candidate)) return candidate;
+      }
+    } catch {
+      // Ignore runtimes that do not expose a native working directory
+    }
+  }
+
+  // 4. User Home Directory (supports Korean characters e.g. C:\Users\김기원)
   try {
     const home = os.homedir();
     const homeCandidates = [
@@ -458,7 +474,7 @@ export function findAntigravityCliExecutable(): string | null {
     // Ignore
   }
 
-  // 4. System PATH search
+  // 5. System PATH search
   try {
     const pathEnv = process.env.PATH || '';
     const pathDirs = pathEnv.split(path.delimiter);

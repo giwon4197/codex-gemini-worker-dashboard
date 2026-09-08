@@ -11,6 +11,7 @@ worker-settings.json
 live-worker.json
 gemini-dashboard/public/data/dashboard.json
 gemini-dashboard/public/data/live-worker.json
+gemini-dashboard/public/data/gemini-quota.json
 
 # Local credentials and agent sessions
 .env
