@@ -38,6 +38,7 @@ Rules:
 7. Avoid overlapping allowed_files between workers. Shared manifests, lockfiles, schemas, and generated files belong to one task only.
 8. Use fast for trivial work, normal for ordinary implementation, advanced for complex implementation, and reasoning only for hard algorithms or deep ambiguity.
 9. Keep the plan minimal. Do not invent unrelated improvements.
+10. Set retry_limit to at least 2 for implementation tasks: after two failed attempts the orchestrator promotes the next attempt to advanced, and any failure on advanced is escalated to Codex.
 "@
 
 & codex.exe exec --sandbox read-only --ephemeral --color never --output-schema $schemaPath --output-last-message $planPath --cd $repoRoot $prompt

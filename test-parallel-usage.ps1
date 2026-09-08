@@ -590,6 +590,13 @@ try {
     }
 
     Write-Host ''
+    Write-Host '14. 실패 반복 시 모델 승급 및 Codex 인계 정책 검사' -ForegroundColor Cyan
+    $parallelSource = Get-Content -Raw -LiteralPath $parallelScript
+    Assert-Test '최소 2회 retry 허용' ($parallelSource.Contains('[math]::Max(2, [int]$task.retry_limit)'))
+    Assert-Test '2회 실패 뒤 advanced 승급' ($parallelSource.Contains("`$history.Count -ge 2") -and $parallelSource.Contains("`$currentTier = 'advanced'"))
+    Assert-Test 'High 실패 시 Codex 인계 상태' ($parallelSource.Contains("`$decision = 'HIGH_MODEL_FAILED'"))
+
+    Write-Host ''
     Write-Host '======================================================' -ForegroundColor Cyan
     Write-Host "   테스트 완료: $passCount 통과 / $failCount 실패" -ForegroundColor $(if ($failCount -eq 0) { 'Green' } else { 'Red' })
     Write-Host '======================================================' -ForegroundColor Cyan

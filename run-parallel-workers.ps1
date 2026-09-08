@@ -881,9 +881,10 @@ try {
     $statePath = Join-Path $runRoot "workers\$safeId.json"
     $record = $jobRecords | Where-Object { $_.Task.id -eq $task.id } | Select-Object -First 1
     $attempt = 1
-    $retryLimit = if ($null -ne $task.retry_limit) { [math]::Min(3, [math]::Max(0, [int]$task.retry_limit)) } else { 3 }
+    $retryLimit = if ($null -ne $task.retry_limit) { [math]::Min(3, [math]::Max(2, [int]$task.retry_limit)) } else { 3 }
     $history = @()
     $fingerprints = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $currentTier = if ($task.tier) { [string]$task.tier } else { 'normal' }
 
     while ($true) {
       $state = if (Test-Path -LiteralPath $statePath) { Get-Content -Raw -LiteralPath $statePath | ConvertFrom-Json } else { [pscustomobject]@{ runId=$runId; taskId=$task.id; task=$task.name; status='failed'; error='워커 상태 파일이 생성되지 않음' } }
@@ -905,9 +906,15 @@ try {
       $fingerprint = Get-FailureFingerprint $tests $decision
       $compressed = Get-CompressedFailureLog $tests
       $history += [pscustomobject]@{ attempt=$attempt; decision=$decision; fingerprint=$fingerprint; failureLog=$compressed; verifiedAt=(Get-Date).ToString('o') }
-      if ($fingerprints.Contains($fingerprint)) { $decision = 'REPEATED_FAILURE'; break }
+      $isHighTier = $currentTier -in @('advanced', 'reasoning')
+      if ($isHighTier) { $decision = 'HIGH_MODEL_FAILED'; break }
+      $isRepeated = $fingerprints.Contains($fingerprint)
       $null = $fingerprints.Add($fingerprint)
       if (($attempt - 1) -ge $retryLimit) { $decision = 'RETRY_EXHAUSTED'; break }
+
+      # Two failed attempts (including the same fingerprint twice) promote the
+      # next invocation to High. A failure on High is handed back to Codex.
+      if ($history.Count -ge 2 -or $isRepeated) { $currentTier = 'advanced' }
 
       $attempt++
       $retryPrompt = @"
@@ -922,8 +929,7 @@ FAILURE_LOG:
 $compressed
 "@
       $retryTask = [pscustomobject]@{ id=$task.id; name="$($task.name) (retry $($attempt - 1)/$retryLimit)"; prompt=$retryPrompt }
-      $tier = if ($task.tier) { [string]$task.tier } else { 'normal' }
-      $process = Start-WorkerProcess $retryTask $wt $tier $runId $runRoot $baseCommit $Timeout $attempt
+      $process = Start-WorkerProcess $retryTask $wt $currentTier $runId $runRoot $baseCommit $Timeout $attempt
       $record = [pscustomobject]@{ Process=$process; Task=$task; SafeId=$safeId; Worktree=$wt; StartedAt=Get-Date; TimedOut=$false; Cancelled=$false; Attempt=$attempt }
       $jobRecords += $record
       $limit = if ($task.timeout_seconds) { [int]$task.timeout_seconds } else { $WorkerTimeoutSeconds }
