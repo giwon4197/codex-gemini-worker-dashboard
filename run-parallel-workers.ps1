@@ -188,17 +188,17 @@ try {
 
   $manifest.status = 'running'; $manifest.updatedAt = (Get-Date).ToString('o'); Write-AtomicJson $manifestPath $manifest
   $pending = [Collections.Queue]::new(); foreach ($task in $tasks) { $pending.Enqueue($task) }
-  while ($pending.Count -gt 0 -or @($jobRecords | Where-Object { $_.Job.State -in @('NotStarted', 'Running') }).Count -gt 0) {
+  while ($pending.Count -gt 0 -or @($jobRecords | Where-Object { -not $_.TimedOut -and -not $_.Cancelled -and $_.Job.State -in @('NotStarted', 'Running') }).Count -gt 0) {
     if (Test-Path -LiteralPath $cancelPath) {
       $manifest.status = 'cancelling'; $manifest.updatedAt = (Get-Date).ToString('o'); Write-AtomicJson $manifestPath $manifest
-      foreach ($record in $jobRecords | Where-Object { $_.Job.State -in @('NotStarted', 'Running') }) {
+      foreach ($record in $jobRecords | Where-Object { -not $_.TimedOut -and -not $_.Cancelled -and $_.Job.State -in @('NotStarted', 'Running') }) {
         Stop-WorkerProcesses (Join-Path $runRoot "workers\$($record.SafeId).json")
         $record.Cancelled = $true
       }
       while ($pending.Count -gt 0) { $null = $pending.Dequeue() }
     }
 
-    $running = @($jobRecords | Where-Object { $_.Job.State -in @('NotStarted', 'Running') }).Count
+    $running = @($jobRecords | Where-Object { -not $_.TimedOut -and -not $_.Cancelled -and $_.Job.State -in @('NotStarted', 'Running') }).Count
     while ($pending.Count -gt 0 -and $running -lt $MaxWorkers) {
       $task = $pending.Dequeue(); $safeId = ([string]$task.id) -replace '[^A-Za-z0-9._-]', '-'
       $wt = $worktrees | Where-Object id -eq $task.id | Select-Object -First 1
@@ -212,7 +212,7 @@ try {
       $running++
     }
 
-    foreach ($record in $jobRecords | Where-Object { $_.Job.State -in @('NotStarted', 'Running') }) {
+    foreach ($record in $jobRecords | Where-Object { -not $_.TimedOut -and -not $_.Cancelled -and $_.Job.State -in @('NotStarted', 'Running') }) {
       $limit = if ($record.Task.timeout_seconds) { [int]$record.Task.timeout_seconds } else { $WorkerTimeoutSeconds }
       if (((Get-Date) - $record.StartedAt).TotalSeconds -gt $limit) {
         Stop-WorkerProcesses (Join-Path $runRoot "workers\$($record.SafeId).json")
@@ -220,10 +220,10 @@ try {
       }
     }
     Sync-LiveWorkers $runRoot
-    if (@($jobRecords | Where-Object { $_.Job.State -in @('NotStarted', 'Running') }).Count -gt 0) { Start-Sleep -Milliseconds 500 }
+    if (@($jobRecords | Where-Object { -not $_.TimedOut -and -not $_.Cancelled -and $_.Job.State -in @('NotStarted', 'Running') }).Count -gt 0) { Start-Sleep -Milliseconds 500 }
   }
 
-  foreach ($record in $jobRecords) { Receive-Job -Job $record.Job -Wait -ErrorAction SilentlyContinue | ForEach-Object { "[$($record.Job.Name)] $_" } }
+  foreach ($record in $jobRecords | Where-Object { -not $_.TimedOut -and -not $_.Cancelled }) { Receive-Job -Job $record.Job -Wait -ErrorAction SilentlyContinue | ForEach-Object { "[$($record.Job.Name)] $_" } }
 
   $failed = 0
   foreach ($task in $tasks) {
@@ -254,7 +254,7 @@ try {
   Write-Output "Run: $runId"; Write-Output "State: $runRoot"; Write-Output "Status: $($manifest.status)"
   if ($manifest.status -ne 'completed') { exit 1 }
 } finally {
-  $jobRecords | ForEach-Object { Remove-Job -Job $_.Job -Force -ErrorAction SilentlyContinue }
+  $jobRecords | Where-Object { -not $_.TimedOut -and -not $_.Cancelled } | ForEach-Object { Remove-Job -Job $_.Job -Force -ErrorAction SilentlyContinue }
   if ($CleanupWorktrees) {
     foreach ($wt in $worktrees) {
       if (-not (& git -C $wt.path status --porcelain)) { & git -C $repoRoot worktree remove $wt.path --force 2>$null }
