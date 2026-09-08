@@ -189,6 +189,21 @@ try {
     $rec10Content = if (Test-Path -LiteralPath $rec10) { Get-Content -LiteralPath $rec10 -Raw -Encoding UTF8 } else { '' }
     Assert-Test 'TIMEOUT 기록' ($rec10Content -like '*TIMEOUT*')
     Assert-Test '제한 시간 및 로그 파일 안내 포함' ($res10.Output -like '*제한 시간*' -and $res10.Output -like '*.dev-server.stderr.log*')
+    Assert-Test '시간 초과 시 프로세스 트리 정리' ($rec10Content -like '*PROCESS_TREE_STOPPED*')
+
+    # 10-1. Structured argument forwarding and custom port
+    Write-Host ''
+    Write-Host '10-1. 안전한 인자 전달 및 사용자 지정 포트 테스트' -ForegroundColor Cyan
+    $rec10a = Join-Path $testTempRoot 'rec10a.txt'
+    $specialRoot = Join-Path $testTempRoot 'dashboard & safe'
+    $dashSpecial = New-MockDashboardDir $specialRoot -withDependencies $true
+    $res10a = Invoke-Launcher @('-DashboardDir', "`"$dashSpecial`"", '-Port', '4317', '-MockHttp', 'none', '-MockPortListen', 'false', '-MockProcessMode', 'success', '-NoBrowser', '-NonInteractive', '-RecordFile', "`"$rec10a`"")
+    Assert-Test '특수문자가 포함된 경로를 코드 평가 없이 전달' ($res10a.ExitCode -eq 0) "실제 종료 코드: $($res10a.ExitCode)"
+    Assert-Test '사용자 지정 포트 URL 사용' ((Get-Content -LiteralPath $rec10a -Raw -Encoding UTF8) -like '*OPEN_BROWSER:http://localhost:4317/*')
+
+    $launcherContent = Get-Content -LiteralPath $launcherPath -Raw -Encoding UTF8
+    Assert-Test 'Invoke-Expression 미사용' ($launcherContent -notmatch 'Invoke-Expression')
+    Assert-Test '실제 서버 시작 명령에 포트 전달' ($launcherContent -match '\$devArguments\s*=.*''--port''.*\$Port')
 
     # 11. Finding dashboard from repo root and install root
     Write-Host ''

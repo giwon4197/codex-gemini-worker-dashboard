@@ -1,10 +1,15 @@
 <# :
 @echo off
 setlocal
+chcp 65001 >nul
 set "LAUNCHER_FILE=%~f0"
-set "LAUNCHER_ARGS=%*"
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$code = [System.IO.File]::ReadAllText($env:LAUNCHER_FILE, [System.Text.Encoding]::UTF8); $sb = [ScriptBlock]::Create($code); if ($env:LAUNCHER_ARGS) { Invoke-Expression ('& $sb ' + $env:LAUNCHER_ARGS) } else { & $sb }"
-exit /b %ERRORLEVEL%
+set "LAUNCHER_PS1=%TEMP%\dashboard-launcher-%RANDOM%-%RANDOM%.ps1"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$code=[IO.File]::ReadAllText($env:LAUNCHER_FILE,[Text.Encoding]::UTF8); $start=$code.LastIndexOf('[CmdletBinding()]'); if($start -lt 0){exit 90}; [IO.File]::WriteAllText($env:LAUNCHER_PS1,$code.Substring($start),[Text.UTF8Encoding]::new($true))"
+if errorlevel 1 exit /b %ERRORLEVEL%
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%LAUNCHER_PS1%" %*
+set "LAUNCHER_EXIT=%ERRORLEVEL%"
+del /q "%LAUNCHER_PS1%" >nul 2>nul
+exit /b %LAUNCHER_EXIT%
 #>
 [CmdletBinding()]
 param(
@@ -86,6 +91,22 @@ function Open-Browser([string]$TargetUrl) {
     } catch {
         Write-Host "기본 브라우저를 열지 못했습니다: $($_.Exception.Message)" -ForegroundColor Yellow
         Write-Host "브라우저에서 직접 접속하세요: $TargetUrl" -ForegroundColor Yellow
+    }
+}
+
+function Stop-ServerProcess($Process) {
+    if (-not $Process) {
+        if ($MockProcessMode) { Record-Action 'PROCESS_TREE_STOPPED' }
+        return
+    }
+    try {
+        if (-not $Process.HasExited) {
+            & taskkill.exe /PID $Process.Id /T /F 2>$null | Out-Null
+            Record-Action 'PROCESS_TREE_STOPPED'
+        }
+    } catch {
+        try { Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue } catch {}
+        Record-Action 'PROCESS_TREE_STOPPED'
     }
 }
 
@@ -350,6 +371,7 @@ try {
         exit 5
     } elseif ($MockProcessMode -eq 'timeout') {
         Record-Action 'MOCK_TIMEOUT'
+        Stop-ServerProcess $serverProcess
         Set-Content -LiteralPath $errLog -Value "Mock server startup timed out waiting for readiness" -Encoding utf8
         Write-Host "`n[오류] 제한 시간(${ReadyTimeoutSeconds}초) 내에 대시보드 서버 준비를 확인하지 못했습니다." -ForegroundColor Red
         Write-Host "로그 파일을 확인하여 오류를 진단하세요:" -ForegroundColor Yellow
@@ -362,8 +384,10 @@ try {
         Record-Action 'MOCK_SUCCESS'
         Set-Content -LiteralPath $outLog -Value "Mock server ready at $url" -Encoding utf8
     } else {
+        $devArguments = @('run', 'dev', '--', '--port', [string]$Port)
+        Record-Action ("START_ARGUMENTS:" + ($devArguments -join ' '))
         $serverProcess = Start-Process -FilePath $npmCmd `
-            -ArgumentList 'run', 'dev' `
+            -ArgumentList $devArguments `
             -WorkingDirectory $targetDashboardDir `
             -WindowStyle Hidden `
             -RedirectStandardOutput $outLog `
@@ -402,6 +426,7 @@ try {
     }
 
     if (-not $isReady) {
+        Stop-ServerProcess $serverProcess
         Write-Host "`n[오류] 제한 시간(${ReadyTimeoutSeconds}초) 내에 대시보드 서버 준비를 확인하지 못했습니다." -ForegroundColor Red
         Write-Host "로그 파일을 확인하여 오류를 진단하세요:" -ForegroundColor Yellow
         Write-Host "  에러 로그: $errLog" -ForegroundColor Yellow
@@ -421,6 +446,7 @@ try {
     Wait-Acknowledgment "잠시 후 창이 닫힙니다 (3초)..." 3
     exit 0
 } catch {
+    Stop-ServerProcess $serverProcess
     Write-Host "`n[오류] 예기치 않은 오류가 발생했습니다: $($_.Exception.Message)" -ForegroundColor Red
     Record-Action "FATAL_ERROR:$($_.Exception.Message)"
     Wait-Acknowledgment "창을 닫으려면 아무 키나 누르세요 (10초 후 자동 종료)..." 10
