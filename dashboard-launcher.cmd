@@ -99,15 +99,23 @@ function Stop-ServerProcess($Process) {
         if ($MockProcessMode) { Record-Action 'PROCESS_TREE_STOPPED' }
         return
     }
+    if ($Process.HasExited) { return }
+    $taskkillSucceeded = $false
     try {
-        if (-not $Process.HasExited) {
-            & taskkill.exe /PID $Process.Id /T /F 2>$null | Out-Null
-            Record-Action 'PROCESS_TREE_STOPPED'
-        }
-    } catch {
-        try { Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue } catch {}
-        Record-Action 'PROCESS_TREE_STOPPED'
+        & taskkill.exe /PID $Process.Id /T /F 2>$null | Out-Null
+        $taskkillSucceeded = ($LASTEXITCODE -eq 0)
+        [void]$Process.WaitForExit(3000)
+        $Process.Refresh()
+    } catch {}
+    if (-not $taskkillSucceeded -or -not $Process.HasExited) {
+        try {
+            Stop-Process -Id $Process.Id -Force -ErrorAction Stop
+            [void]$Process.WaitForExit(3000)
+            $Process.Refresh()
+        } catch {}
     }
+    if (-not $Process.HasExited) { throw "대시보드 서버 프로세스(PID $($Process.Id))를 종료하지 못했습니다." }
+    Record-Action 'PROCESS_TREE_STOPPED'
 }
 
 try {
