@@ -11,7 +11,7 @@
     "start": "wrangler dev --config dist/server/wrangler.json",
     "lint": "oxlint",
     "format": "oxfmt",
-    "test": "node --test lib/codex-usage.test.ts"
+    "test": "node --test lib/codex-usage.test.ts lib/daily-token-stats.test.ts"
   },
   "dependencies": {
     "react": "19.2.6",

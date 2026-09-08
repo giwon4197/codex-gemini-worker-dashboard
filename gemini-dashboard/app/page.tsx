@@ -36,6 +36,7 @@ import {
 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { calculateDailyTokenStats, getLocalDateKey } from '@/lib/daily-token-stats';
 
 // Define TS Interfaces for our enriched schema
 export interface DailyActivity {
@@ -758,6 +759,56 @@ export default function Home() {
   const [copiedJobId, setCopiedJobId] = useState<string | null>(null);
   const [visibleCount, setVisibleCount] = useState(10);
 
+  // Local calendar date key for daily metrics (with local-midnight rollover mechanism)
+  const [currentLocalDateKey, setCurrentLocalDateKey] = useState<string>(() => getLocalDateKey());
+
+  useEffect(() => {
+    let timerId: ReturnType<typeof setTimeout> | null = null;
+    let isMounted = true;
+
+    const scheduleMidnightRollover = () => {
+      const now = new Date();
+      const nextKey = getLocalDateKey(now);
+      if (isMounted) {
+        setCurrentLocalDateKey(prev => (prev !== nextKey ? nextKey : prev));
+      }
+
+      // Milliseconds until next local midnight (00:00:00.100 tomorrow)
+      const tomorrowMidnight = new Date(
+        now.getFullYear(),
+        now.getMonth(),
+        now.getDate() + 1,
+        0,
+        0,
+        0,
+        100
+      );
+      const msUntilMidnight = Math.max(1000, tomorrowMidnight.getTime() - now.getTime());
+
+      timerId = setTimeout(() => {
+        if (!isMounted) return;
+        const rolledKey = getLocalDateKey();
+        setCurrentLocalDateKey(prev => (prev !== rolledKey ? rolledKey : prev));
+        scheduleMidnightRollover();
+      }, msUntilMidnight);
+    };
+
+    scheduleMidnightRollover();
+
+    // Periodic check every 60s to handle system clock changes / sleep-wake
+    const periodicCheck = setInterval(() => {
+      if (!isMounted) return;
+      const verifiedKey = getLocalDateKey();
+      setCurrentLocalDateKey(prev => (prev !== verifiedKey ? verifiedKey : prev));
+    }, 60000);
+
+    return () => {
+      isMounted = false;
+      if (timerId) clearTimeout(timerId);
+      clearInterval(periodicCheck);
+    };
+  }, []);
+
   // Model Tier state & API integration
   const [currentTier, setCurrentTier] = useState<WorkerTier>('normal');
   const [currentModel, setCurrentModel] = useState<string>('gemini-3.8-flash-medium');
@@ -1084,65 +1135,26 @@ export default function Home() {
     };
   }, [data]);
 
-  // Cumulative Codex & Gemini Real Active Token Stats & Estimated Savings
-  const cumulativeStats = useMemo(() => {
-    // 1. Codex cumulative totals from codexDaily
-    // Codex: totalTokens는 캐시 포함 총량, cachedInputTokens는 캐시, activeTokens는 캐시 제외 실질 토큰
-    const codexTotals = (data.codexDaily ?? []).reduce(
-      (acc, cur) => {
-        const total = Math.max(0, cur.totalTokens ?? cur.tokens ?? 0);
-        const cached = Math.max(0, cur.cachedInputTokens ?? 0);
-        const active = Math.max(0, cur.activeTokens ?? (total - cached));
-        return {
-          totalTokens: acc.totalTokens + total,
-          cachedInputTokens: acc.cachedInputTokens + cached,
-          activeTokens: acc.activeTokens + active,
-        };
-      },
-      { totalTokens: 0, cachedInputTokens: 0, activeTokens: 0 }
+  // Daily Codex & Gemini Real Active Token Stats (local 00:00 through now)
+  const dailyTokenStats = useMemo(() => {
+    return calculateDailyTokenStats({
+      codexDaily: data.codexDaily,
+      jobs: data.jobs,
+      referenceDate: currentLocalDateKey,
+    });
+  }, [data.codexDaily, data.jobs, currentLocalDateKey]);
+
+  // Cumulative totals for Core Metric Cards (Section 3: grand total cumulative tokens)
+  const cumulativeGrandTotalTokens = useMemo(() => {
+    const codexTotal = (data.codexDaily ?? []).reduce(
+      (acc, cur) => acc + Math.max(0, cur.totalTokens ?? cur.tokens ?? 0),
+      0
     );
-
-    // 2. Real data based active tokens:
-    // Codex: activeTokens (캐시 제외)
-    // Gemini: summary.tokens (Antigravity usage.total_tokens 누적 = 캐시 제외 실질 토큰)
-    // Gemini 캐시: tokens.cached (Antigravity usage.cache_read_tokens 누적)
-    // Gemini 캐시 포함 전체 처리량: geminiActiveTokens + geminiCachedTokens
-    const codexActiveTokens = codexTotals.activeTokens;
-    const geminiActiveTokens = Math.max(0, data.summary?.tokens ?? 0);
-    const geminiCachedTokens = Math.max(0, data.tokens?.cached ?? 0);
-    const geminiTotalTokens = geminiActiveTokens + geminiCachedTokens;
-
-    // 3. Proportion within total active tokens
-    const totalActiveTokens = codexActiveTokens + geminiActiveTokens;
-    const codexActiveRatio = totalActiveTokens > 0 ? (codexActiveTokens / totalActiveTokens) * 100 : 0;
-    const geminiActiveRatio = totalActiveTokens > 0 ? (geminiActiveTokens / totalActiveTokens) * 100 : 0;
-
-    // 4. Estimated Codex Savings (1:1 Proxy):
-    // Gemini 처리 실질 토큰(캐시 제외)을 Codex 동일 작업 처리 시 1:1 예상 토큰 프록시로 간주
-    const estimatedCodexSavedTokens = geminiActiveTokens;
-    const estimatedTotalWork = codexActiveTokens + estimatedCodexSavedTokens;
-    const estimatedCodexSavingsRatio = estimatedTotalWork > 0 
-      ? (estimatedCodexSavedTokens / estimatedTotalWork) * 100 
-      : 0;
-
-    const totalCachedTokens = codexTotals.cachedInputTokens + geminiCachedTokens;
-    const grandTotalTokens = codexTotals.totalTokens + geminiTotalTokens;
-
-    return {
-      codexActiveTokens,
-      geminiActiveTokens,
-      totalActiveTokens,
-      codexActiveRatio,
-      geminiActiveRatio,
-      codexTotals,
-      geminiTotalTokens,
-      geminiCachedTokens,
-      totalCachedTokens,
-      grandTotalTokens,
-      estimatedCodexSavedTokens,
-      estimatedCodexSavingsRatio,
-    };
-  }, [data.codexDaily, data.summary, data.tokens]);
+    const geminiActive = Math.max(0, data.summary?.tokens ?? 0);
+    const geminiCached = Math.max(0, data.tokens?.cached ?? 0);
+    const geminiTotal = geminiActive + geminiCached;
+    return codexTotal + geminiTotal;
+  }, [data.codexDaily, data.summary.tokens, data.tokens.cached]);
 
   // Codex Primary Rate Limit Data (for 4th Donut Card)
   const primaryLimitData = useMemo(() => {
@@ -1563,22 +1575,22 @@ export default function Home() {
           </div>
         </header>
 
-        {/* 1. TOP STATS: 4 CIRCULAR DONUT CHARTS (Codex active, Gemini active, Cumulative savings, Codex primary account limit) */}
+        {/* 1. TOP STATS: 4 CIRCULAR DONUT CHARTS (Codex active, Gemini active, Daily savings proxy, Codex primary account limit) */}
         <section className="grid gap-5 grid-cols-1 sm:grid-cols-2 xl:grid-cols-4" aria-label="4대 핵심 통계 원형 그래프">
-          {/* Donut 1: Codex 누적 실질 사용량 */}
+          {/* Donut 1: Codex 오늘 실질 사용량 */}
           <DonutStatCard
-            title="Codex 누적 실질 사용량"
-            subtitle="캐시 제외 실질 토큰 사용 현황"
+            title="Codex 오늘 실질 사용량"
+            subtitle="오늘(로컬) 캐시 제외 실질 토큰 사용 현황"
             icon={<Cpu className="h-5 w-5" />}
             accent="violet"
-            percent={cumulativeStats.codexActiveRatio}
-            centerValue={`${cumulativeStats.codexActiveRatio.toFixed(1)}%`}
-            centerTokenValue={`${cumulativeStats.codexActiveTokens.toLocaleString()} 토큰`}
+            percent={dailyTokenStats.codexActiveRatio}
+            centerValue={`${dailyTokenStats.codexActiveRatio.toFixed(1)}%`}
+            centerTokenValue={`${dailyTokenStats.codexActiveTokens.toLocaleString()} 토큰`}
             centerLabel="실질 점유율"
             badge={
               <div className="flex flex-col items-end gap-1">
                 <Badge variant="secondary" className="text-violet-300 border border-violet-400/20 bg-black/20">
-                  점유율 {cumulativeStats.codexActiveRatio.toFixed(1)}%
+                  점유율 {dailyTokenStats.codexActiveRatio.toFixed(1)}%
                 </Badge>
                 {codexSyncStatus.isTracking ? (
                   <span className="inline-flex items-center gap-1 text-[10px] text-emerald-400 font-mono" title={`마지막 동기화: ${codexSyncStatus.lastSyncedAt || ''}`}>
@@ -1598,37 +1610,37 @@ export default function Home() {
               </div>
             }
             tokenCountLabel="캐시 제외 실질 토큰"
-            tokenCountValue={`${cumulativeStats.codexActiveTokens.toLocaleString()} 토큰`}
-            basisText={`총 입력 ${cumulativeStats.codexTotals.totalTokens.toLocaleString()} 중 캐시 ${cumulativeStats.codexTotals.cachedInputTokens.toLocaleString()} 제외 (${codexSyncStatus.isTracking ? '세션 자동 추적 실시간 반영' : '초기 스냅샷'})`}
-            ariaLabel={`Codex 누적 실질 사용량: ${cumulativeStats.codexActiveTokens.toLocaleString()} 토큰, 전체 실질 토큰 대비 ${cumulativeStats.codexActiveRatio.toFixed(1)}%`}
+            tokenCountValue={`${dailyTokenStats.codexActiveTokens.toLocaleString()} 토큰`}
+            basisText={`오늘 총 입력 ${dailyTokenStats.codexTotals.totalTokens.toLocaleString()} 중 캐시 ${dailyTokenStats.codexTotals.cachedInputTokens.toLocaleString()} 제외 (${codexSyncStatus.isTracking ? '세션 자동 추적 실시간 반영' : '초기 스냅샷'})`}
+            ariaLabel={`Codex 오늘 실질 사용량: ${dailyTokenStats.codexActiveTokens.toLocaleString()} 토큰, 오늘 전체 실질 토큰 대비 ${dailyTokenStats.codexActiveRatio.toFixed(1)}%`}
           />
 
-          {/* Donut 2: Gemini 누적 실질 사용량 */}
+          {/* Donut 2: Gemini 오늘 실질 사용량 */}
           <DonutStatCard
-            title="Gemini 누적 실질 사용량"
-            subtitle="캐시 제외 실질 토큰 사용 현황"
+            title="Gemini 오늘 실질 사용량"
+            subtitle="오늘(로컬) 캐시 제외 실질 토큰 사용 현황"
             icon={<Zap className="h-5 w-5" />}
             accent="cyan"
-            percent={cumulativeStats.geminiActiveRatio}
-            centerValue={`${cumulativeStats.geminiActiveRatio.toFixed(1)}%`}
-            centerTokenValue={`${cumulativeStats.geminiActiveTokens.toLocaleString()} 토큰`}
+            percent={dailyTokenStats.geminiActiveRatio}
+            centerValue={`${dailyTokenStats.geminiActiveRatio.toFixed(1)}%`}
+            centerTokenValue={`${dailyTokenStats.geminiActiveTokens.toLocaleString()} 토큰`}
             centerLabel="실질 점유율"
-            badge={`점유율 ${cumulativeStats.geminiActiveRatio.toFixed(1)}%`}
+            badge={`점유율 ${dailyTokenStats.geminiActiveRatio.toFixed(1)}%`}
             tokenCountLabel="캐시 제외 실질 토큰"
-            tokenCountValue={`${cumulativeStats.geminiActiveTokens.toLocaleString()} 토큰`}
-            basisText={`실질 ${cumulativeStats.geminiActiveTokens.toLocaleString()} + 캐시 ${cumulativeStats.geminiCachedTokens.toLocaleString()} = 전체 처리 ${cumulativeStats.geminiTotalTokens.toLocaleString()}`}
-            ariaLabel={`Gemini 누적 실질 사용량: ${cumulativeStats.geminiActiveTokens.toLocaleString()} 토큰 (실질 ${cumulativeStats.geminiActiveTokens.toLocaleString()} + 캐시 ${cumulativeStats.geminiCachedTokens.toLocaleString()} = 전체 처리 ${cumulativeStats.geminiTotalTokens.toLocaleString()}), 전체 실질 토큰 대비 ${cumulativeStats.geminiActiveRatio.toFixed(1)}%`}
+            tokenCountValue={`${dailyTokenStats.geminiActiveTokens.toLocaleString()} 토큰`}
+            basisText={`오늘 실질 ${dailyTokenStats.geminiActiveTokens.toLocaleString()} + 캐시 ${dailyTokenStats.geminiCachedTokens.toLocaleString()} = 전체 처리 ${dailyTokenStats.geminiTotalTokens.toLocaleString()}`}
+            ariaLabel={`Gemini 오늘 실질 사용량: ${dailyTokenStats.geminiActiveTokens.toLocaleString()} 토큰 (실질 ${dailyTokenStats.geminiActiveTokens.toLocaleString()} + 캐시 ${dailyTokenStats.geminiCachedTokens.toLocaleString()} = 오늘 전체 처리 ${dailyTokenStats.geminiTotalTokens.toLocaleString()}), 오늘 전체 실질 토큰 대비 ${dailyTokenStats.geminiActiveRatio.toFixed(1)}%`}
           />
 
           {/* Donut 3: 추정 Codex 절감량 */}
           <DonutStatCard
-            title="추정 Codex 절감량"
-            subtitle="1:1 토큰 환산 추정 (실측 비용 절감액 아님)"
+            title="오늘 추정 Codex 절감량"
+            subtitle="오늘 로컬 기준 1:1 토큰 환산 추정 (실측 비용 절감액 아님)"
             icon={<TrendingDown className="h-5 w-5" />}
             accent="emerald"
-            percent={cumulativeStats.estimatedCodexSavingsRatio}
-            centerValue={cumulativeStats.estimatedCodexSavedTokens.toLocaleString()}
-            centerTokenValue={`비중 ${cumulativeStats.estimatedCodexSavingsRatio.toFixed(1)}%`}
+            percent={dailyTokenStats.estimatedCodexSavingsRatio}
+            centerValue={dailyTokenStats.estimatedCodexSavedTokens.toLocaleString()}
+            centerTokenValue={`비중 ${dailyTokenStats.estimatedCodexSavingsRatio.toFixed(1)}%`}
             centerLabel="추정 절감 토큰"
             badge={
               <div className="flex items-center gap-1.5 flex-wrap justify-end">
@@ -1636,14 +1648,14 @@ export default function Home() {
                   신뢰도: 낮음
                 </Badge>
                 <Badge variant="secondary" className="text-emerald-300 border border-emerald-400/20 bg-black/20 text-[10px] px-1.5 py-0.5">
-                  {`비중 ${cumulativeStats.estimatedCodexSavingsRatio.toFixed(1)}%`}
+                  {`비중 ${dailyTokenStats.estimatedCodexSavingsRatio.toFixed(1)}%`}
                 </Badge>
               </div>
             }
-            tokenCountLabel="추정 절감 토큰 (1:1)"
-            tokenCountValue={`${cumulativeStats.estimatedCodexSavedTokens.toLocaleString()} 토큰`}
-            basisText={`전체 실질 작업 중 추정 절감분의 비중이며 비용 절감률이 아닙니다. 1:1 토큰 환산 추정 · 실측 비용 절감액 아님 · 신뢰도: 낮음 (Gemini 실질 ${cumulativeStats.geminiActiveTokens.toLocaleString()} / 전체 실질 ${(cumulativeStats.codexActiveTokens + cumulativeStats.estimatedCodexSavedTokens).toLocaleString()})`}
-            ariaLabel={`추정 Codex 절감량: ${cumulativeStats.estimatedCodexSavedTokens.toLocaleString()} 토큰, 전체 실질 작업 중 추정 비중 ${cumulativeStats.estimatedCodexSavingsRatio.toFixed(1)}% (1:1 토큰 환산 추정, 실측 비용 절감액 아님, 신뢰도: 낮음)`}
+            tokenCountLabel="오늘 추정 절감 토큰 (1:1)"
+            tokenCountValue={`${dailyTokenStats.estimatedCodexSavedTokens.toLocaleString()} 토큰`}
+            basisText={`오늘 전체 실질 작업 중 추정 절감분의 비중이며 비용 절감률이 아닙니다. 1:1 토큰 환산 추정 · 실측 비용 절감액 아님 · 신뢰도: 낮음 (오늘 Gemini 실질 ${dailyTokenStats.geminiActiveTokens.toLocaleString()} / 오늘 전체 실질 ${(dailyTokenStats.codexActiveTokens + dailyTokenStats.estimatedCodexSavedTokens).toLocaleString()})`}
+            ariaLabel={`오늘 추정 Codex 절감량: ${dailyTokenStats.estimatedCodexSavedTokens.toLocaleString()} 토큰, 오늘 전체 실질 작업 중 추정 비중 ${dailyTokenStats.estimatedCodexSavingsRatio.toFixed(1)}% (1:1 토큰 환산 추정, 실측 비용 절감액 아님, 신뢰도: 낮음)`}
           />
 
           {/* Donut 4: Codex 계정 1차 한도 */}
@@ -1937,7 +1949,7 @@ export default function Home() {
           <Metric 
             icon={<Zap />} 
             label="누적 토큰" 
-            value={cumulativeStats.grandTotalTokens.toLocaleString()} 
+            value={cumulativeGrandTotalTokens.toLocaleString()}
             note="Codex + Gemini 캐시 포함 합산" 
             accent="cyan" 
           />
