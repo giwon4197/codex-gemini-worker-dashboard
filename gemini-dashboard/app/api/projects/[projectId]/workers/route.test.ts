@@ -118,6 +118,77 @@ void describe('/api/projects/[projectId]/workers API Route Handlers', () => {
     ]);
   });
 
+  void test('tracks live worker in project control when dashboard run is linked to actual run', async () => {
+    const dashboardRunId = '20260909-PROJ-DASH-01';
+    const actualRunId = '20260909-PROJ-ACTUAL-01';
+
+    // Save initial compact state with child PID
+    fs.writeFileSync(
+      path.join(testRepoDir, '.agent', 'dashboard-state', 'compact', `${dashboardRunId}.json`),
+      JSON.stringify({
+        runId: dashboardRunId,
+        prompt: '프로젝트 실시간 관제 연동',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        status: 'running',
+        requiresUserAction: false,
+        tasksCount: 1,
+        activeWorkersCount: 1,
+        completedTasksCount: 0,
+        orchestratorProcessId: 7788,
+      }),
+      'utf8'
+    );
+
+    // Create actual run in .agent/runs/<actualRunId>
+    const actualRunDir = path.join(testRepoDir, '.agent', 'runs', actualRunId);
+    fs.mkdirSync(path.join(actualRunDir, 'workers'), { recursive: true });
+    fs.mkdirSync(path.join(actualRunDir, 'results'), { recursive: true });
+    fs.mkdirSync(path.join(actualRunDir, 'tasks'), { recursive: true });
+
+    fs.writeFileSync(
+      path.join(actualRunDir, 'run.json'),
+      JSON.stringify({
+        runId: actualRunId,
+        status: 'running',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        repository: testRepoDir,
+        orchestratorProcessId: 7788,
+        tasks: ['TASK-PROJ-01'],
+      }),
+      'utf8'
+    );
+
+    fs.writeFileSync(
+      path.join(actualRunDir, 'workers', 'TASK-PROJ-01.json'),
+      JSON.stringify({
+        runId: actualRunId,
+        taskId: 'TASK-PROJ-01',
+        task: '프로젝트 관제 활성 워커',
+        status: 'running',
+        startedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        recentLogs: [],
+      }),
+      'utf8'
+    );
+
+    const req = new Request('http://localhost:3000/api/projects/current/workers');
+    const res = await getProjectWorkers(req, {
+      params: Promise.resolve({ projectId: 'current' }),
+    });
+
+    assert.strictEqual(res.status, 200);
+    const data = await res.json() as {
+      ok: boolean;
+      activeWorkers: Array<{ taskId: string; status: string }>;
+    };
+
+    assert.strictEqual(data.ok, true);
+    assert.ok(data.activeWorkers.some(w => w.taskId === 'TASK-PROJ-01' && w.status === 'running'));
+  });
+
   void test('rejects path traversal in projectId parameter with status 400', async () => {
     const req = new Request('http://localhost:3000/api/projects/../../secret/workers');
     const res = await getProjectWorkers(req, {

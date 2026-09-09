@@ -169,5 +169,130 @@ void describe('/api/runs API Route Handlers', () => {
       const data = await res.json() as { ok: boolean; error: string };
       assert.strictEqual(data.ok, false);
     });
+
+    void test('resolves linked actual worker run and returns live worker data for dashboard runId', async () => {
+      const dashboardRunId = '20260909-DASH-RUN-01';
+      const actualRunId = '20260909-ACTUAL-RUN-01';
+
+      // Save initial compact state for dashboardRunId
+      fs.writeFileSync(
+        path.join(testRepoDir, '.agent', 'dashboard-state', 'compact', `${dashboardRunId}.json`),
+        JSON.stringify({
+          runId: dashboardRunId,
+          prompt: '실시간 관제 추적 테스트',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          status: 'running',
+          requiresUserAction: false,
+          tasksCount: 1,
+          activeWorkersCount: 1,
+          completedTasksCount: 0,
+          orchestratorProcessId: 5555,
+        }),
+        'utf8'
+      );
+
+      // Create actual run directory structure in .agent/runs/<actualRunId>
+      const actualRunDir = path.join(testRepoDir, '.agent', 'runs', actualRunId);
+      fs.mkdirSync(path.join(actualRunDir, 'workers'), { recursive: true });
+      fs.mkdirSync(path.join(actualRunDir, 'tasks'), { recursive: true });
+
+      fs.writeFileSync(
+        path.join(actualRunDir, 'run.json'),
+        JSON.stringify({
+          runId: actualRunId,
+          status: 'running',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          repository: testRepoDir,
+          orchestratorProcessId: 5555,
+          tasks: ['TASK-001'],
+        }),
+        'utf8'
+      );
+
+      fs.writeFileSync(
+        path.join(actualRunDir, 'workers', 'TASK-001.json'),
+        JSON.stringify({
+          runId: actualRunId,
+          taskId: 'TASK-001',
+          task: '실시간 워커 상태 연동',
+          status: 'running',
+          startedAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          recentLogs: [],
+        }),
+        'utf8'
+      );
+
+      const req = new Request(`http://localhost:3000/api/runs/${dashboardRunId}`);
+      const res = await getRunDetail(req, {
+        params: Promise.resolve({ runId: dashboardRunId }),
+      });
+
+      assert.strictEqual(res.status, 200);
+      const data = await res.json() as {
+        ok: boolean;
+        run: {
+          runId: string;
+          actualRunId?: string;
+          activeWorkers: Array<{ taskId: string; status: string }>;
+        };
+      };
+
+      assert.strictEqual(data.ok, true);
+      assert.strictEqual(data.run.runId, dashboardRunId);
+      assert.strictEqual(data.run.actualRunId, actualRunId);
+      assert.strictEqual(data.run.activeWorkers.length, 1);
+      assert.strictEqual(data.run.activeWorkers[0].taskId, 'TASK-001');
+      assert.strictEqual(data.run.activeWorkers[0].status, 'running');
+    });
+  });
+
+  void describe('Korean Repository Path Support (한글 저장소 경로)', () => {
+    let koreanTestRepo: string;
+
+    beforeEach(() => {
+      koreanTestRepo = fs.mkdtempSync(path.join(os.tmpdir(), '한글-저장소-API-'));
+      fs.mkdirSync(path.join(koreanTestRepo, '.agent', 'runs'), { recursive: true });
+      fs.mkdirSync(path.join(koreanTestRepo, '.agent', 'dashboard-state', 'compact'), { recursive: true });
+      fs.mkdirSync(path.join(koreanTestRepo, '.agent', 'dashboard-state', 'idempotency'), { recursive: true });
+    });
+
+    afterEach(() => {
+      try {
+        fs.rmSync(koreanTestRepo, { recursive: true, force: true });
+      } catch {
+        // Ignore
+      }
+    });
+
+    void test('POST /api/runs successfully creates run in Korean repository root', async () => {
+      const saved = process.env.ALLOWED_REPO_ROOT;
+      process.env.ALLOWED_REPO_ROOT = koreanTestRepo;
+
+      try {
+        const req = new Request('http://localhost:3000/api/runs', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            prompt: '한글 저장소에서 작업 실행',
+            repository: koreanTestRepo,
+          }),
+        });
+
+        const res = await createRun(req);
+        assert.strictEqual(res.status, 201);
+        const data = await res.json() as { ok: boolean; runId: string };
+        assert.strictEqual(data.ok, true);
+        assert.ok(data.runId);
+      } finally {
+        if (saved !== undefined) {
+          process.env.ALLOWED_REPO_ROOT = saved;
+        } else {
+          delete process.env.ALLOWED_REPO_ROOT;
+        }
+      }
+    });
   });
 });

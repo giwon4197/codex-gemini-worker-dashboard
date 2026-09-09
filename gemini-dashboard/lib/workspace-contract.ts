@@ -142,6 +142,7 @@ export interface TaskProgressSummary {
 
 export interface CompactRunState {
   runId: string;
+  actualRunId?: string;
   prompt: string;
   createdAt: string;
   updatedAt: string;
@@ -153,6 +154,17 @@ export interface CompactRunState {
   completedTasksCount: number;
   integrationBranch?: string;
   baseCommit?: string;
+  orchestratorProcessId?: number;
+  error?: string | null;
+}
+
+export interface RunAliasRecord {
+  dashboardRunId: string;
+  actualRunId?: string | null;
+  orchestratorProcessId?: number;
+  createdAt: string;
+  linkedAt?: string;
+  prompt?: string;
 }
 
 export interface RunDetail extends CompactRunState {

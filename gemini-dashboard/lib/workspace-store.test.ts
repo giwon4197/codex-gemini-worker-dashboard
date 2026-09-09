@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 // @ts-expect-error TS5097 allowed for test runner
-import { validateRunId, validateRepository, validatePrompt, generateRunId, spawnRouterRun, getCompactRunState, saveCompactRunState, listCompactRuns, getProjectWorkers } from './workspace-store.ts';
+import { validateRunId, validateRepository, validatePrompt, generateRunId, spawnRouterRun, getCompactRunState, saveCompactRunState, listCompactRuns, getProjectWorkers, resolveRequiredTools, getRunDetails, getAliasRecord, findAndLinkActualRun } from './workspace-store.ts';
 
 void describe('Workspace Store (Idempotency, Path Traversal, & Recovery)', () => {
   let testTempDir: string;
@@ -261,6 +261,296 @@ void describe('Workspace Store (Idempotency, Path Traversal, & Recovery)', () =>
 
       // History contains TASK-DONE
       assert.ok(historyIds.includes('TASK-DONE'));
+    });
+  });
+
+  void describe('Tool Resolution & Safe Environment Propagation', () => {
+    void test('discovers PowerShell 7 and essential tools (codex, rg, agy) and prepends augmented PATH', () => {
+      const result = resolveRequiredTools();
+      assert.strictEqual(result.ok, true);
+      assert.ok(result.tools);
+      assert.ok(result.tools.pwsh);
+      assert.ok(result.tools.codex);
+      assert.ok(result.tools.rg);
+      assert.ok(result.tools.agy);
+
+      // PowerShell 7 (pwsh) must be resolved
+      assert.ok(result.tools.pwsh.toLowerCase().includes('pwsh'));
+
+      // Augmented PATH must contain tool directories
+      assert.ok(result.tools.augmentedPath);
+      const dirs = result.tools.augmentedPath.split(path.delimiter);
+      assert.ok(dirs.includes(path.dirname(result.tools.pwsh)));
+      assert.ok(dirs.includes(path.dirname(result.tools.codex)));
+      assert.ok(dirs.includes(path.dirname(result.tools.rg)));
+      assert.ok(dirs.includes(path.dirname(result.tools.agy)));
+    });
+
+    void test('immediately transitions to sanitized failed state when required tools are missing', async () => {
+      const isolatedEnv: Record<string, string> = {
+        PATH: '',
+        LOCALAPPDATA: path.join(testTempDir, 'empty-appdata'),
+        USERPROFILE: path.join(testTempDir, 'empty-userprofile'),
+      };
+
+      // Tool resolution should fail
+      const result = resolveRequiredTools({
+        env: isolatedEnv,
+        platform: process.platform,
+      });
+      assert.strictEqual(result.ok, false);
+      assert.ok(result.missing && result.missing.length > 0);
+
+      // spawnRouterRun with missing tools should throw and persist a sanitized failed state
+      let thrownError: (Error & { runId?: string }) | null = null;
+      try {
+        await spawnRouterRun({
+          prompt: '도구 누락 작업',
+          repoRoot: testTempDir,
+          env: isolatedEnv,
+        });
+      } catch (err: unknown) {
+        thrownError = err as Error & { runId?: string };
+      }
+
+      assert.ok(thrownError);
+      assert.ok(thrownError.runId);
+
+      const compact = await getCompactRunState(thrownError.runId, testTempDir);
+      assert.ok(compact);
+      assert.strictEqual(compact.status, 'failed');
+      assert.strictEqual(compact.requiresUserAction, true);
+      assert.ok(compact.userActionReason);
+      assert.ok(compact.userActionReason.includes('필수 실행 도구'));
+
+      // Confirm sanitization: error does not expose raw root path
+      assert.ok(!compact.userActionReason.includes(testTempDir));
+    });
+  });
+
+  void describe('Korean Repository Path (한글 경로) Preservation & Execution Without Mojibake', () => {
+    let koreanRepoDir: string;
+
+    beforeEach(() => {
+      koreanRepoDir = fs.mkdtempSync(path.join(os.tmpdir(), '테스트-저장소-한글경로-'));
+      fs.mkdirSync(path.join(koreanRepoDir, '.agent', 'runs'), { recursive: true });
+      fs.mkdirSync(path.join(koreanRepoDir, '.agent', 'dashboard-state', 'compact'), { recursive: true });
+      fs.mkdirSync(path.join(koreanRepoDir, '.agent', 'dashboard-state', 'idempotency'), { recursive: true });
+      fs.mkdirSync(path.join(koreanRepoDir, '.agent', 'dashboard-state', 'aliases'), { recursive: true });
+    });
+
+    afterEach(() => {
+      try {
+        fs.rmSync(koreanRepoDir, { recursive: true, force: true });
+      } catch {
+        // Ignore
+      }
+    });
+
+    void test('validates Korean repository path without mojibake or normalization error', () => {
+      const res = validateRepository(koreanRepoDir, koreanRepoDir);
+      assert.strictEqual(res.ok, true);
+      assert.strictEqual(res.repoRoot.toLowerCase(), path.resolve(koreanRepoDir).toLowerCase());
+    });
+
+    void test('spawnRouterRun and state persistence operate reliably in Korean directory path', async () => {
+      const spawnCalls: Array<{ command: string; args: string[]; opts: unknown }> = [];
+      const mockSpawner = (command: string, args: string[], opts: unknown) => {
+        spawnCalls.push({ command, args, opts });
+        return { unref: () => {}, pid: 4321 };
+      };
+
+      const result = await spawnRouterRun({
+        prompt: '한글 경로 테스트 작업',
+        repoRoot: koreanRepoDir,
+        spawner: mockSpawner,
+      });
+
+      assert.strictEqual(result.status, 'running');
+      assert.ok(result.runId);
+
+      const compact = await getCompactRunState(result.runId, koreanRepoDir);
+      assert.ok(compact);
+      assert.strictEqual(compact.prompt, '한글 경로 테스트 작업');
+      assert.strictEqual(compact.orchestratorProcessId, 4321);
+
+      // Verify spawn call passed PowerShell 7 (pwsh) and Korean repo path
+      const call = spawnCalls[0];
+      assert.ok(call.command.toLowerCase().includes('pwsh'));
+      assert.ok(call.args.includes(koreanRepoDir));
+    });
+
+    void test('real child process spawned in Korean path outputs UTF-8 without mojibake', async () => {
+      const toolsResult = resolveRequiredTools();
+      if (!toolsResult.ok || !toolsResult.tools) {
+        return; // Skip if environment cannot resolve pwsh
+      }
+
+      const { spawnSync } = await import('node:child_process');
+      const testString = '한글_문자열_인코딩_정상_검증';
+
+      const child = spawnSync(toolsResult.tools.pwsh, [
+        '-NoProfile',
+        '-Command',
+        `Write-Output '${testString}'`,
+      ], {
+        cwd: koreanRepoDir,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: toolsResult.tools.augmentedPath,
+          PYTHONIOENCODING: 'utf-8',
+        },
+      });
+
+      assert.strictEqual(child.status, 0);
+      assert.ok(
+        child.stdout && child.stdout.includes(testString),
+        `stdout was: ${JSON.stringify(child.stdout)}, stderr: ${child.stderr}`
+      );
+    });
+  });
+
+  void describe('Actual Child Process ID Connection & Atomic Alias Linking (실제 자식 프로세스 ID 연결)', () => {
+    void test('atomically links dashboard runId to actual run manifest via child PID and tracks live worker', async () => {
+      const { spawn: nodeSpawn } = await import('node:child_process');
+
+      // Spawn a real short-lived child process to get an authentic OS PID
+      const realChild = nodeSpawn(process.execPath, ['-e', 'setTimeout(() => {}, 3000)'], {
+        detached: true,
+        stdio: 'ignore',
+      });
+      realChild.unref();
+
+      const realChildPid = realChild.pid;
+      assert.ok(typeof realChildPid === 'number' && realChildPid > 0);
+
+      // Custom spawner returning our real child process
+      const realSpawner = () => realChild;
+
+      const prompt = '실제 PID 연결 테스트 작업';
+      const spawnResult = await spawnRouterRun({
+        prompt,
+        repoRoot: testTempDir,
+        spawner: realSpawner,
+      });
+
+      const dashboardRunId = spawnResult.runId;
+      assert.ok(dashboardRunId);
+
+      // Verify child PID was persisted in initial compact state
+      const initialCompact = await getCompactRunState(dashboardRunId, testTempDir);
+      assert.ok(initialCompact);
+      assert.strictEqual(initialCompact.orchestratorProcessId, realChildPid);
+
+      // Simulate the background router orchestrator creating an actual run directory with its own runId
+      const actualRunId = '20260909-ACTUAL-ORCHESTRATOR-RUN-77';
+      const actualRunDir = path.join(testTempDir, '.agent', 'runs', actualRunId);
+      fs.mkdirSync(path.join(actualRunDir, 'workers'), { recursive: true });
+      fs.mkdirSync(path.join(actualRunDir, 'results'), { recursive: true });
+      fs.mkdirSync(path.join(actualRunDir, 'tasks'), { recursive: true });
+
+      // Write actual run.json containing orchestratorProcessId matching child PID
+      fs.writeFileSync(
+        path.join(actualRunDir, 'run.json'),
+        JSON.stringify({
+          runId: actualRunId,
+          status: 'running',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          repository: testTempDir,
+          orchestratorProcessId: realChildPid,
+          tasks: ['TASK-REAL-01'],
+        }),
+        'utf8'
+      );
+
+      // Write active live worker
+      fs.writeFileSync(
+        path.join(actualRunDir, 'workers', 'TASK-REAL-01.json'),
+        JSON.stringify({
+          runId: actualRunId,
+          taskId: 'TASK-REAL-01',
+          task: '실제 워커 구현 작업',
+          status: 'running',
+          startedAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          recentLogs: [{ timestamp: '12:00:00', message: '작업 진행 중', type: 'log' }],
+        }),
+        'utf8'
+      );
+
+      // 1. Calling findAndLinkActualRun must discover and link via real child PID
+      const resolvedActualId = await findAndLinkActualRun(dashboardRunId, testTempDir);
+      assert.strictEqual(resolvedActualId, actualRunId);
+
+      // 2. Calling getRunDetails with the dashboardRunId must return actual worker state!
+      const detail = await getRunDetails(dashboardRunId, testTempDir);
+      assert.ok(detail);
+      assert.strictEqual(detail.runId, dashboardRunId);
+      assert.strictEqual(detail.actualRunId, actualRunId);
+      assert.strictEqual(detail.activeWorkers.length, 1);
+      assert.strictEqual(detail.activeWorkers[0].taskId, 'TASK-REAL-01');
+      assert.strictEqual(detail.activeWorkers[0].status, 'running');
+      assert.strictEqual(detail.tasks.length, 1);
+      assert.strictEqual(detail.tasks[0].taskName, '실제 워커 구현 작업');
+
+      // 3. Project control must track the live worker
+      const projectWorkers = await getProjectWorkers(testTempDir);
+      const activeIds = projectWorkers.activeWorkers.map(w => w.taskId);
+      assert.ok(activeIds.includes('TASK-REAL-01'));
+
+      // 4. Verify atomic alias record exists on disk
+      const alias = await getAliasRecord(dashboardRunId, testTempDir);
+      assert.ok(alias);
+      assert.strictEqual(alias.dashboardRunId, dashboardRunId);
+      assert.strictEqual(alias.actualRunId, actualRunId);
+      assert.strictEqual(alias.orchestratorProcessId, realChildPid);
+
+      // 5. Simulate worker completion
+      fs.writeFileSync(
+        path.join(actualRunDir, 'results', 'TASK-REAL-01-result.json'),
+        JSON.stringify({
+          runId: actualRunId,
+          taskId: 'TASK-REAL-01',
+          task: '실제 워커 구현 작업',
+          status: 'completed',
+          startedAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          recentLogs: [],
+        }),
+        'utf8'
+      );
+
+      fs.writeFileSync(
+        path.join(actualRunDir, 'run.json'),
+        JSON.stringify({
+          runId: actualRunId,
+          status: 'awaiting_review',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          repository: testTempDir,
+          orchestratorProcessId: realChildPid,
+          tasks: ['TASK-REAL-01'],
+        }),
+        'utf8'
+      );
+
+      // Once completed, worker must immediately drop out of active terminal
+      const updatedDetail = await getRunDetails(dashboardRunId, testTempDir);
+      assert.ok(updatedDetail);
+      assert.strictEqual(updatedDetail.status, 'awaiting_review');
+      assert.strictEqual(updatedDetail.requiresUserAction, true);
+      assert.strictEqual(updatedDetail.activeWorkers.length, 0);
+      assert.strictEqual(updatedDetail.historyWorkers.length, 1);
+      assert.strictEqual(updatedDetail.historyWorkers[0].taskId, 'TASK-REAL-01');
+
+      const updatedProject = await getProjectWorkers(testTempDir);
+      assert.ok(!updatedProject.activeWorkers.some(w => w.taskId === 'TASK-REAL-01'));
+      assert.ok(updatedProject.historyWorkers.some(w => w.taskId === 'TASK-REAL-01'));
+
+      // Clean up child process
+      try { realChild.kill(); } catch {}
     });
   });
 });
