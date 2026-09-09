@@ -498,7 +498,10 @@ function readLatestFromFile(filePath: string): FileReadResult | null {
  * 2. Sums across multiple distinct sessions on each date.
  * 3. Exactly 1 latest valid payload.rate_limits snapshot chosen deterministically.
  */
-export function getCodexDailyUsage(): CodexUsageResponse {
+export function getCodexDailyUsage(options?: { bypassCache?: boolean }): CodexUsageResponse {
+  if (options?.bypassCache) {
+    clearCodexUsageCache();
+  }
   try {
     const sessionsDir = getCodexSessionsDirectory();
 

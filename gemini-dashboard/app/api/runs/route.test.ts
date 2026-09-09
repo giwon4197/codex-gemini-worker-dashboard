@@ -8,6 +8,10 @@ import { GET as listRuns, POST as createRun } from './route.ts';
 // @ts-expect-error TS5097 allowed for test runner
 import { GET as getRunDetail } from './[runId]/route.ts';
 // @ts-expect-error TS5097 allowed for test runner
+import { POST as retryRunRoute } from './[runId]/retry/route.ts';
+// @ts-expect-error TS5097 allowed for test runner
+import { getProjectWorkGraph, getCompactRunState } from '../../../lib/workspace-store.ts';
+// @ts-expect-error TS5097 allowed for test runner
 import { STALE_PROCESS_MISMATCH_REASON, setGlobalLivenessOptions, resetGlobalLivenessOptions } from '../../../lib/process-liveness.ts';
 
 void describe('/api/runs API Route Handlers', () => {
@@ -502,6 +506,395 @@ void describe('/api/runs API Route Handlers', () => {
       assert.strictEqual(data.ok, true);
       assert.strictEqual(data.run.status, 'running');
       assert.strictEqual(data.run.activeWorkers.length, 1);
+    });
+  });
+
+  void describe('POST /api/runs/[runId]/retry (Safe Retry Flow & Idempotency)', () => {
+    void test('allows retry for failed run without user action required and links DAG', async () => {
+      const origRunId = '20260909-FAIL-SAFE-01';
+      fs.writeFileSync(
+        path.join(testRepoDir, '.agent', 'dashboard-state', 'compact', `${origRunId}.json`),
+        JSON.stringify({
+          runId: origRunId,
+          prompt: '안전 실패 작업 원본 프롬프트',
+          status: 'failed',
+          requiresUserAction: false,
+          errorCategory: 'launcher_error',
+          failureReason: '프로세스 비정상 종료 (exit code 1)',
+          createdAt: new Date(Date.now() - 60_000).toISOString(),
+          updatedAt: new Date(Date.now() - 60_000).toISOString(),
+        }),
+        'utf8'
+      );
+
+      const req = new Request(`http://localhost:3000/api/runs/${origRunId}/retry`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+
+      const res = await retryRunRoute(req, {
+        params: Promise.resolve({ runId: origRunId }),
+      });
+
+      assert.strictEqual(res.status, 201);
+      const data = await res.json() as {
+        ok: boolean;
+        runId: string;
+        isDuplicate: boolean;
+        retryOf: string;
+        retryCount: number;
+      };
+
+      assert.strictEqual(data.ok, true);
+      assert.strictEqual(data.isDuplicate, false);
+      assert.strictEqual(data.retryOf, origRunId);
+      assert.strictEqual(data.retryCount, 1);
+      assert.ok(data.runId);
+      assert.notStrictEqual(data.runId, origRunId);
+
+      // Verify server persisted relationship on disk
+      const updatedOrig = await getCompactRunState(origRunId, testRepoDir);
+      assert.strictEqual(updatedOrig?.retriedByRunId, data.runId);
+
+      const newRun = await getCompactRunState(data.runId, testRepoDir);
+      assert.strictEqual(newRun?.retryOf, origRunId);
+      assert.strictEqual(newRun?.retryCount, 1);
+      assert.strictEqual(newRun?.prompt, '안전 실패 작업 원본 프롬프트');
+    });
+
+    void test('idempotent deduplication: identical retry request returns 200 with isDuplicate: true and same runId', async () => {
+      const origRunId = '20260909-FAIL-IDEMPOTENT-01';
+      fs.writeFileSync(
+        path.join(testRepoDir, '.agent', 'dashboard-state', 'compact', `${origRunId}.json`),
+        JSON.stringify({
+          runId: origRunId,
+          prompt: '멱등 재시도 테스트 프롬프트',
+          status: 'failed',
+          requiresUserAction: false,
+          errorCategory: 'launcher_error',
+          createdAt: new Date(Date.now() - 60_000).toISOString(),
+          updatedAt: new Date(Date.now() - 60_000).toISOString(),
+        }),
+        'utf8'
+      );
+
+      const makeReq = () =>
+        new Request(`http://localhost:3000/api/runs/${origRunId}/retry`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        });
+
+      // 1st request -> 201 Created
+      const res1 = await retryRunRoute(makeReq(), {
+        params: Promise.resolve({ runId: origRunId }),
+      });
+      assert.strictEqual(res1.status, 201);
+      const data1 = await res1.json() as { ok: boolean; runId: string; isDuplicate: boolean };
+      assert.strictEqual(data1.ok, true);
+      assert.strictEqual(data1.isDuplicate, false);
+
+      // 2nd request -> 200 OK with identical runId
+      const res2 = await retryRunRoute(makeReq(), {
+        params: Promise.resolve({ runId: origRunId }),
+      });
+      assert.strictEqual(res2.status, 200);
+      const data2 = await res2.json() as { ok: boolean; runId: string; isDuplicate: boolean };
+      assert.strictEqual(data2.ok, true);
+      assert.strictEqual(data2.isDuplicate, true);
+      assert.strictEqual(data2.runId, data1.runId);
+    });
+
+    void test('enforces server authority: client cannot override prompt or safety checks', async () => {
+      const origRunId = '20260909-FAIL-AUTH-01';
+      fs.writeFileSync(
+        path.join(testRepoDir, '.agent', 'dashboard-state', 'compact', `${origRunId}.json`),
+        JSON.stringify({
+          runId: origRunId,
+          prompt: '서버에 저장된 정품 프롬프트',
+          status: 'failed',
+          requiresUserAction: false,
+          createdAt: new Date(Date.now() - 60_000).toISOString(),
+          updatedAt: new Date(Date.now() - 60_000).toISOString(),
+        }),
+        'utf8'
+      );
+
+      const spoofReq = new Request(`http://localhost:3000/api/runs/${origRunId}/retry`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt: '클라이언트 위조 프롬프트 (malicious)',
+          status: 'completed',
+        }),
+      });
+
+      const res = await retryRunRoute(spoofReq, {
+        params: Promise.resolve({ runId: origRunId }),
+      });
+      assert.strictEqual(res.status, 201);
+      const data = await res.json() as { ok: boolean; runId: string };
+      assert.strictEqual(data.ok, true);
+
+      const savedRun = await getCompactRunState(data.runId, testRepoDir);
+      assert.strictEqual(savedRun?.prompt, '서버에 저장된 정품 프롬프트');
+    });
+
+    void test('blocks retry for policy violation with status 400 and clear Korean reason', async () => {
+      const runId = '20260909-POLICY-VIOLATION-01';
+      fs.writeFileSync(
+        path.join(testRepoDir, '.agent', 'dashboard-state', 'compact', `${runId}.json`),
+        JSON.stringify({
+          runId,
+          prompt: '정책 위반 작업',
+          status: 'failed',
+          errorCategory: 'policy_violation',
+          failureReason: 'allowed_files 위반 감지',
+          requiresUserAction: false,
+          createdAt: new Date(Date.now() - 60_000).toISOString(),
+          updatedAt: new Date(Date.now() - 60_000).toISOString(),
+        }),
+        'utf8'
+      );
+
+      const req = new Request(`http://localhost:3000/api/runs/${runId}/retry`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+
+      const res = await retryRunRoute(req, {
+        params: Promise.resolve({ runId }),
+      });
+      assert.strictEqual(res.status, 400);
+      const data = await res.json() as { ok: boolean; code: string; error: string };
+      assert.strictEqual(data.ok, false);
+      assert.strictEqual(data.code, 'RETRY_NOT_PERMITTED');
+      assert.ok(data.error.includes('허용된 파일 범위'));
+    });
+
+    void test('blocks retry for secret disclosures with status 400 without leaking secrets', async () => {
+      const runId = '20260909-SECRET-LEAK-01';
+      fs.writeFileSync(
+        path.join(testRepoDir, '.agent', 'dashboard-state', 'compact', `${runId}.json`),
+        JSON.stringify({
+          runId,
+          prompt: '비밀정보 유출 작업',
+          status: 'failed',
+          errorCategory: 'secret_violation',
+          failureReason: 'OAuth token leak: ya29.secret_token_abc123',
+          requiresUserAction: false,
+          createdAt: new Date(Date.now() - 60_000).toISOString(),
+          updatedAt: new Date(Date.now() - 60_000).toISOString(),
+        }),
+        'utf8'
+      );
+
+      const req = new Request(`http://localhost:3000/api/runs/${runId}/retry`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+
+      const res = await retryRunRoute(req, {
+        params: Promise.resolve({ runId }),
+      });
+      assert.strictEqual(res.status, 400);
+      const data = await res.json() as { ok: boolean; code: string; error: string };
+      assert.strictEqual(data.ok, false);
+      assert.strictEqual(data.code, 'RETRY_NOT_PERMITTED');
+      assert.ok(!data.error.includes('ya29.secret_token_abc123'));
+      assert.ok(data.error.includes('비밀정보'));
+    });
+
+    void test('blocks retry for destructive operations with status 400', async () => {
+      const runId = '20260909-DESTRUCTIVE-01';
+      fs.writeFileSync(
+        path.join(testRepoDir, '.agent', 'dashboard-state', 'compact', `${runId}.json`),
+        JSON.stringify({
+          runId,
+          prompt: '파괴적 작업',
+          status: 'failed',
+          errorCategory: 'destructive_action',
+          failureReason: 'git reset --hard detected',
+          requiresUserAction: false,
+          createdAt: new Date(Date.now() - 60_000).toISOString(),
+          updatedAt: new Date(Date.now() - 60_000).toISOString(),
+        }),
+        'utf8'
+      );
+
+      const req = new Request(`http://localhost:3000/api/runs/${runId}/retry`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+
+      const res = await retryRunRoute(req, {
+        params: Promise.resolve({ runId }),
+      });
+      assert.strictEqual(res.status, 400);
+      const data = await res.json() as { ok: boolean; code: string };
+      assert.strictEqual(data.ok, false);
+      assert.strictEqual(data.code, 'RETRY_NOT_PERMITTED');
+    });
+
+    void test('blocks retry for Codex escalation with status 400', async () => {
+      const runId = '20260909-ESCALATED-01';
+      fs.writeFileSync(
+        path.join(testRepoDir, '.agent', 'dashboard-state', 'compact', `${runId}.json`),
+        JSON.stringify({
+          runId,
+          prompt: '에스컬레이션 작업',
+          status: 'failed',
+          escalation: {
+            requiresCodex: true,
+            reason: 'Gemini 워커 실패 후 Codex 개입 필요',
+          },
+          requiresUserAction: false,
+          createdAt: new Date(Date.now() - 60_000).toISOString(),
+          updatedAt: new Date(Date.now() - 60_000).toISOString(),
+        }),
+        'utf8'
+      );
+
+      const req = new Request(`http://localhost:3000/api/runs/${runId}/retry`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+
+      const res = await retryRunRoute(req, {
+        params: Promise.resolve({ runId }),
+      });
+      assert.strictEqual(res.status, 400);
+      const data = await res.json() as { ok: boolean; code: string; error: string };
+      assert.strictEqual(data.ok, false);
+      assert.strictEqual(data.code, 'RETRY_NOT_PERMITTED');
+      assert.ok(data.error.includes('Codex') || data.error.includes('개입'));
+    });
+
+    void test('blocks retry when requiresUserAction is true with status 400', async () => {
+      const runId = '20260909-USER-ACTION-01';
+      fs.writeFileSync(
+        path.join(testRepoDir, '.agent', 'dashboard-state', 'compact', `${runId}.json`),
+        JSON.stringify({
+          runId,
+          prompt: '사용자 조치 필요 작업',
+          status: 'failed',
+          requiresUserAction: true,
+          userActionReason: '사용자의 설정 변경이 필요합니다.',
+          createdAt: new Date(Date.now() - 60_000).toISOString(),
+          updatedAt: new Date(Date.now() - 60_000).toISOString(),
+        }),
+        'utf8'
+      );
+
+      const req = new Request(`http://localhost:3000/api/runs/${runId}/retry`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+
+      const res = await retryRunRoute(req, {
+        params: Promise.resolve({ runId }),
+      });
+      assert.strictEqual(res.status, 400);
+      const data = await res.json() as { ok: boolean; code: string; error: string };
+      assert.strictEqual(data.ok, false);
+      assert.strictEqual(data.code, 'RETRY_NOT_PERMITTED');
+      assert.ok(data.error.includes('사용자의 설정 변경이 필요'));
+    });
+
+    void test('blocks retry for non-failed runs with status 400', async () => {
+      const completedRunId = '20260909-COMPLETED-01';
+      fs.writeFileSync(
+        path.join(testRepoDir, '.agent', 'dashboard-state', 'compact', `${completedRunId}.json`),
+        JSON.stringify({
+          runId: completedRunId,
+          prompt: '완료된 작업',
+          status: 'completed',
+          requiresUserAction: false,
+          createdAt: new Date(Date.now() - 60_000).toISOString(),
+          updatedAt: new Date(Date.now() - 60_000).toISOString(),
+        }),
+        'utf8'
+      );
+
+      const req = new Request(`http://localhost:3000/api/runs/${completedRunId}/retry`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+
+      const res = await retryRunRoute(req, {
+        params: Promise.resolve({ runId: completedRunId }),
+      });
+      assert.strictEqual(res.status, 400);
+      const data = await res.json() as { ok: boolean; code: string; error: string };
+      assert.strictEqual(data.ok, false);
+      assert.strictEqual(data.code, 'RETRY_NOT_PERMITTED');
+      assert.ok(data.error.includes('완료'));
+    });
+
+    void test('recovers retry relationship across server restart in work graph DAG', async () => {
+      const origRunId = '20260909-RESTART-DAG-01';
+      fs.writeFileSync(
+        path.join(testRepoDir, '.agent', 'dashboard-state', 'compact', `${origRunId}.json`),
+        JSON.stringify({
+          runId: origRunId,
+          prompt: '재시작 복구 작업',
+          status: 'failed',
+          requiresUserAction: false,
+          createdAt: new Date(Date.now() - 60_000).toISOString(),
+          updatedAt: new Date(Date.now() - 60_000).toISOString(),
+        }),
+        'utf8'
+      );
+
+      const req = new Request(`http://localhost:3000/api/runs/${origRunId}/retry`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+
+      const res = await retryRunRoute(req, {
+        params: Promise.resolve({ runId: origRunId }),
+      });
+      assert.strictEqual(res.status, 201);
+      const data = await res.json() as { runId: string };
+
+      // Query graphs after "restart"
+      const origGraph = await getProjectWorkGraph(origRunId, testRepoDir);
+      assert.ok(origGraph);
+      assert.strictEqual(origGraph?.retriedByRunId, data.runId);
+      assert.strictEqual(origGraph?.tips[0]?.retriedByRunId, data.runId);
+
+      const retryGraph = await getProjectWorkGraph(data.runId, testRepoDir);
+      assert.ok(retryGraph);
+      assert.strictEqual(retryGraph?.retryOf, origRunId);
+      assert.strictEqual(retryGraph?.tips[0]?.retryOf, origRunId);
+      assert.strictEqual(retryGraph?.retryCount, 1);
+    });
+
+    void test('returns 404 for non-existent runId with sanitized error and no paths leaked', async () => {
+      const missingRunId = '20260909-NONEXISTENT-99';
+      const req = new Request(`http://localhost:3000/api/runs/${missingRunId}/retry`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+
+      const res = await retryRunRoute(req, {
+        params: Promise.resolve({ runId: missingRunId }),
+      });
+      assert.strictEqual(res.status, 404);
+      const data = await res.json() as { ok: boolean; code: string; error: string };
+      assert.strictEqual(data.ok, false);
+      assert.strictEqual(data.code, 'RUN_NOT_FOUND');
+      assert.ok(!data.error.includes(testRepoDir));
+      assert.ok(!data.error.includes(':\\'));
     });
   });
 });

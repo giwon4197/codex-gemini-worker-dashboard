@@ -5,12 +5,16 @@ import type { SpawnerFn } from './workspace-store.ts';
 // @ts-expect-error TS5097 allowed for test runner
 import { validateSessionId, createEmptyConversationSession } from './workspace-contract.ts';
 // @ts-expect-error TS5097 allowed for test runner
-import { getAllowedRepoRoot, validateRunId, validateRepository, validatePrompt, spawnRouterRun, listCompactRuns, getRunDetails, getProjectWorkers, getConversationSession, listConversationSessions, saveConversationSession, approveConversationPlan } from './workspace-store.ts';
+import { getAllowedRepoRoot, validateRunId, validateRepository, validatePrompt, spawnRouterRun, retryRun, listCompactRuns, getRunDetails, getProjectWorkers, getConversationSession, listConversationSessions, saveConversationSession, approveConversationPlan } from './workspace-store.ts';
 // @ts-expect-error TS5097 allowed for test runner
 import { sanitizeText } from './workspace-sanitize.ts';
 // @ts-expect-error TS5097 allowed for test runner
 import { evaluateCodexConversation } from './codex-conversation.ts';
 import type { CodexRunnerFn } from './codex-conversation.ts';
+// @ts-expect-error TS5097 allowed for test runner
+import { getCodexDailyUsage } from './codex-usage.ts';
+// @ts-expect-error TS5097 allowed for test runner
+import { getGeminiQuota } from './gemini-quota.ts';
 
 export interface WorkspaceBridgeOptions {
   repoRoot?: string;
@@ -159,6 +163,123 @@ export async function handleWorkspaceBridgeRequest(
       return Response.json(
         { ok: false, error: '작업 목록을 불러오지 못했습니다.' },
         { status: 500, headers: JSON_HEADERS }
+      );
+    }
+  }
+
+  // 3a. POST /api/runs/:runId/retry (Safe Run Retry Flow)
+  const retryMatch = pathname.match(/^\/api\/runs\/([^/]+)\/retry$/);
+  if (retryMatch) {
+    if (method !== 'POST') {
+      return Response.json(
+        { ok: false, error: `지원하지 않는 HTTP 메서드입니다: ${method}` },
+        { status: 405, headers: JSON_HEADERS }
+      );
+    }
+
+    let rawRunId = retryMatch[1];
+    try {
+      rawRunId = decodeURIComponent(retryMatch[1]);
+    } catch {
+      rawRunId = retryMatch[1];
+    }
+
+    if (!validateRunId(rawRunId)) {
+      return Response.json(
+        { ok: false, error: '유효하지 않은 run ID 형식입니다.' },
+        { status: 400, headers: JSON_HEADERS }
+      );
+    }
+
+    let body: {
+      idempotencyKey?: unknown;
+      repository?: unknown;
+    } = {};
+
+    try {
+      const text = await request.text();
+      if (text && text.trim()) {
+        body = JSON.parse(text);
+      }
+    } catch {
+      return Response.json(
+        { ok: false, error: '유효하지 않은 JSON 요청 본문입니다.' },
+        { status: 400, headers: JSON_HEADERS }
+      );
+    }
+
+    const repoValidation = validateRepository(body.repository, activeOptions.repoRoot);
+    if (!repoValidation.ok) {
+      return Response.json(
+        { ok: false, error: repoValidation.error || '허용되지 않은 저장소 경로입니다.' },
+        { status: 400, headers: JSON_HEADERS }
+      );
+    }
+
+    const idempotencyKey =
+      typeof body.idempotencyKey === 'string' && body.idempotencyKey.trim()
+        ? body.idempotencyKey.trim().slice(0, 128)
+        : undefined;
+
+    try {
+      const result = await retryRun({
+        runId: rawRunId,
+        idempotencyKey,
+        repoRoot: repoValidation.repoRoot,
+        spawner: activeOptions.spawner,
+        env: activeOptions.env,
+        toolOverrides: activeOptions.toolOverrides,
+      });
+
+      return Response.json(
+        {
+          ok: true,
+          runId: result.runId,
+          retryOf: result.originalRunId,
+          originalRunId: result.originalRunId,
+          retryCount: result.retryCount,
+          isDuplicate: result.isDuplicate,
+          status: result.status,
+          message: result.isDuplicate
+            ? '이미 진행된 동일 재시도 작업이 반환되었습니다.'
+            : '안전 재시도 작업이 성공적으로 시작되었습니다.',
+        },
+        { status: result.isDuplicate ? 200 : 201, headers: JSON_HEADERS }
+      );
+    } catch (err: unknown) {
+      const root = repoValidation.repoRoot;
+      const rawMsg = err instanceof Error ? err.message : String(err);
+      const sanitizedMsg = sanitizeText(rawMsg, root);
+      const errCode = (err as { code?: string })?.code;
+
+      const isNotFound = errCode === 'RUN_NOT_FOUND' || sanitizedMsg.includes('찾을 수 없습니다');
+      const isClientReject =
+        errCode === 'RETRY_NOT_PERMITTED' ||
+        sanitizedMsg.includes('허용된 파일 범위') ||
+        sanitizedMsg.includes('정책 위반') ||
+        sanitizedMsg.includes('비밀정보') ||
+        sanitizedMsg.includes('파괴적') ||
+        sanitizedMsg.includes('에스컬레이션') ||
+        sanitizedMsg.includes('사용자 조치') ||
+        sanitizedMsg.includes('재시도') ||
+        sanitizedMsg.includes('실패한 작업만') ||
+        sanitizedMsg.includes('완료된 작업') ||
+        sanitizedMsg.includes('진행 중') ||
+        sanitizedMsg.includes('승인 대기') ||
+        isNotFound;
+
+      const code = isNotFound ? 'RUN_NOT_FOUND' : isClientReject ? 'RETRY_NOT_PERMITTED' : 'INTERNAL_ERROR';
+
+      return Response.json(
+        {
+          ok: false,
+          code,
+          error: sanitizedMsg,
+          retryable: false,
+          requiresUserAction: true,
+          userActionReason: sanitizedMsg,
+        },
+        { status: isNotFound ? 404 : isClientReject ? 400 : 500, headers: JSON_HEADERS }
       );
     }
   }
@@ -483,6 +604,32 @@ export async function handleWorkspaceBridgeRequest(
     return Response.json({ ok: true, session }, { status: 200, headers: JSON_HEADERS });
   }
 
+  // 10. GET /api/codex-usage
+  if (pathname === '/api/codex-usage') {
+    if (method !== 'GET') {
+      return Response.json(
+        { ok: false, error: `지원하지 않는 HTTP 메서드입니다: ${method}` },
+        { status: 405, headers: JSON_HEADERS }
+      );
+    }
+    const bypassCache = url.searchParams.get('refresh') === 'true';
+    const result = getCodexDailyUsage({ bypassCache });
+    return Response.json(result, { status: 200, headers: JSON_HEADERS });
+  }
+
+  // 11. GET /api/gemini-quota
+  if (pathname === '/api/gemini-quota') {
+    if (method !== 'GET') {
+      return Response.json(
+        { ok: false, error: `지원하지 않는 HTTP 메서드입니다: ${method}` },
+        { status: 405, headers: JSON_HEADERS }
+      );
+    }
+    const bypassCache = url.searchParams.get('refresh') === 'true';
+    const result = await getGeminiQuota({ bypassCache });
+    return Response.json(result, { status: 200, headers: JSON_HEADERS });
+  }
+
   // Check for known route prefixes with invalid method
   if (
     pathname === '/api/runs' ||
@@ -490,7 +637,9 @@ export async function handleWorkspaceBridgeRequest(
     pathname === '/api/projects' ||
     pathname.startsWith('/api/projects/') ||
     pathname === '/api/conversations' ||
-    pathname.startsWith('/api/conversations/')
+    pathname.startsWith('/api/conversations/') ||
+    pathname === '/api/codex-usage' ||
+    pathname === '/api/gemini-quota'
   ) {
     if (method !== 'GET' && method !== 'POST') {
       return Response.json(
@@ -529,7 +678,9 @@ export function createWorkspaceBridgeMiddleware(options?: WorkspaceBridgeOptions
       pathname === '/api/projects' ||
       pathname.startsWith('/api/projects/') ||
       pathname === '/api/conversations' ||
-      pathname.startsWith('/api/conversations/');
+      pathname.startsWith('/api/conversations/') ||
+      pathname === '/api/codex-usage' ||
+      pathname === '/api/gemini-quota';
 
     if (!isWorkspaceRoute) {
       return next();

@@ -80,6 +80,10 @@ export interface ProjectGraphNode {
   escalation?: LiveWorkerEscalation | null;
   rawOutput?: string[];
   metadata?: Record<string, unknown>;
+  retryOf?: string;
+  retriedByRunId?: string;
+  retryCount?: number;
+  retryable?: boolean;
 }
 
 export interface ProjectGraphEdge {
@@ -99,6 +103,9 @@ export interface ProjectWorkGraphData {
   lanesCount: number;
   tips: ProjectGraphNode[];
   selectedNodeId?: string;
+  retryOf?: string;
+  retriedByRunId?: string;
+  retryCount?: number;
 }
 
 export interface RawWorkerEventRecord {
@@ -343,6 +350,10 @@ export interface BuildProjectGraphOptions {
     [key: string]: unknown;
   } | null;
   repoRoot?: string;
+  retryOf?: string;
+  retriedByRunId?: string;
+  retryCount?: number;
+  retryable?: boolean;
 }
 
 /**
@@ -703,6 +714,14 @@ export function buildProjectWorkGraph(
     tips.push(planNode);
   }
 
+  // Propagate run retry metadata to tips
+  for (const tip of tips) {
+    if (options.retryOf) tip.retryOf = options.retryOf;
+    if (options.retriedByRunId) tip.retriedByRunId = options.retriedByRunId;
+    if (options.retryCount !== undefined) tip.retryCount = options.retryCount;
+    if (options.retryable !== undefined) tip.retryable = options.retryable;
+  }
+
   return {
     runId,
     prompt: sanitizeText(prompt, repoRoot),
@@ -711,6 +730,9 @@ export function buildProjectWorkGraph(
     edges,
     lanesCount: maxLane + 1,
     tips,
+    retryOf: options.retryOf,
+    retriedByRunId: options.retriedByRunId,
+    retryCount: options.retryCount,
   };
 }
 

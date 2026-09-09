@@ -24,6 +24,7 @@ import {
   extractTimelineEvents,
   validateSessionId,
   isLauncherError,
+  evaluateRunRetrySafety,
 // @ts-expect-error TS5097 allowed for test runner
 } from './workspace-contract.ts';
 // @ts-expect-error TS5097 allowed for test runner
@@ -1593,6 +1594,125 @@ export async function spawnRouterRun(options: {
 }
 
 /**
+ * Retries a failed run using server authority.
+ * Acceptance criteria 1, 2, 3:
+ * - Does NOT create a Codex conversation.
+ * - Reads original stored prompt and failure reason from disk.
+ * - Enforces safety checks: blocks policy violations, secrets, destructive actions,
+ *   Codex escalations, or user action required states.
+ * - Uses stable derived or provided idempotency key to guarantee exactly one new run
+ *   per logical retry attempt despite duplicate clicks or network retries.
+ * - Atomically links original run and new run in durable compact states.
+ */
+export async function retryRun(options: {
+  runId: string;
+  idempotencyKey?: string;
+  repoRoot?: string;
+  spawner?: SpawnerFn;
+  env?: Record<string, string | undefined>;
+  toolOverrides?: Partial<Record<'pwsh' | 'codex' | 'rg' | 'agy', string>>;
+}): Promise<{
+  runId: string;
+  originalRunId: string;
+  retryCount: number;
+  isDuplicate: boolean;
+  status: string;
+}> {
+  const root = options.repoRoot || getAllowedRepoRoot();
+
+  if (!validateRunId(options.runId)) {
+    throw new Error('유효하지 않은 원본 run ID 형식입니다.');
+  }
+
+  // 1. Retrieve original compact state
+  const settled = await settleRunState(options.runId, root);
+  let originalCompact = settled?.compact || (await getCompactRunState(options.runId, root));
+  if (!originalCompact) {
+    const actualId = await findAndLinkActualRun(options.runId, root);
+    if (actualId) {
+      originalCompact = await getCompactRunState(actualId, root);
+    }
+  }
+
+  if (!originalCompact) {
+    const err = new Error('재시도할 원본 작업을 찾을 수 없습니다.');
+    (err as unknown as { code: string }).code = 'RUN_NOT_FOUND';
+    throw err;
+  }
+
+  // 2. Check if already retried (idempotent duplicate return)
+  if (originalCompact.retriedByRunId) {
+    const existingRetry = await getCompactRunState(originalCompact.retriedByRunId, root);
+    if (existingRetry) {
+      return {
+        runId: originalCompact.retriedByRunId,
+        originalRunId: options.runId,
+        retryCount: originalCompact.retryCount || 1,
+        isDuplicate: true,
+        status: existingRetry.status,
+      };
+    }
+  }
+
+  // 3. Validate safe retryability on server
+  const decision = evaluateRunRetrySafety(originalCompact);
+  if (!decision.canRetry) {
+    const err = new Error(decision.reason || '안전 정책에 의해 재시도가 제한되었습니다.');
+    (err as unknown as { code: string }).code = 'RETRY_NOT_PERMITTED';
+    throw err;
+  }
+
+  // 4. Derive stable idempotency key
+  const nextRetryCount = (originalCompact.retryCount || 0) + 1;
+  const stableIdempotencyKey =
+    options.idempotencyKey?.trim() || `retry-${options.runId}-${nextRetryCount}`;
+
+  // 5. Check existing idempotency record
+  const existing = await getIdempotencyRecord(stableIdempotencyKey, root);
+  if (existing) {
+    return {
+      runId: existing.runId,
+      originalRunId: options.runId,
+      retryCount: originalCompact.retryCount || nextRetryCount,
+      isDuplicate: true,
+      status: existing.status,
+    };
+  }
+
+  // 5. Spawn new run using stored original prompt (server authority, client cannot spoof prompt)
+  const result = await spawnRouterRun({
+    prompt: originalCompact.prompt,
+    idempotencyKey: stableIdempotencyKey,
+    repoRoot: root,
+    spawner: options.spawner,
+    env: options.env,
+    toolOverrides: options.toolOverrides,
+  });
+
+  // 6. Atomically persist retry relationship on original run and new run
+  originalCompact.retriedByRunId = result.runId;
+  originalCompact.retryCount = nextRetryCount;
+  originalCompact.updatedAt = new Date().toISOString();
+  await saveCompactRunState(originalCompact, root);
+
+  const newCompact = await getCompactRunState(result.runId, root);
+  if (newCompact) {
+    newCompact.retryOf = options.runId;
+    newCompact.retryCount = nextRetryCount;
+    newCompact.updatedAt = new Date().toISOString();
+    await saveCompactRunState(newCompact, root);
+  }
+
+  return {
+    runId: result.runId,
+    originalRunId: options.runId,
+    retryCount: nextRetryCount,
+    isDuplicate: result.isDuplicate,
+    status: result.status,
+  };
+}
+
+/**
  * Reads detailed state for a specific run, building sanitized worker and timeline data.
  * Seamlessly resolves dashboard run IDs to actual worker run directories in .agent/runs/.
  */
@@ -2066,6 +2186,10 @@ export async function getProjectWorkGraph(
     eventsByTask,
     integration,
     repoRoot: root,
+    retryOf: compact?.retryOf,
+    retriedByRunId: compact?.retriedByRunId,
+    retryCount: compact?.retryCount,
+    retryable: compact?.retryable,
   });
 
   return sanitizeGraphData(rawGraph, root);

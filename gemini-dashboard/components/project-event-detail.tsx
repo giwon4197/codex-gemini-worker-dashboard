@@ -18,11 +18,14 @@ import {
   ChevronRight,
 } from 'lucide-react';
 import type { ProjectGraphNode, GraphNodeOwner } from '../lib/project-event-graph';
-import { formatDuration, WORKER_STATUS_META, RUN_STATUS_META } from '../lib/workspace-contract';
+import { formatDuration, WORKER_STATUS_META, RUN_STATUS_META, evaluateRunRetrySafety } from '../lib/workspace-contract';
 
 interface ProjectEventDetailProps {
   node: ProjectGraphNode | null;
   onClose?: () => void;
+  currentRunId?: string;
+  onSelectRun?: (runId: string) => void;
+  onRefresh?: () => void;
 }
 
 function getOwnerBadge(owner: GraphNodeOwner) {
@@ -48,8 +51,75 @@ function getOwnerBadge(owner: GraphNodeOwner) {
   }
 }
 
-export function ProjectEventDetail({ node, onClose }: ProjectEventDetailProps) {
+export function ProjectEventDetail({
+  node,
+  onClose,
+  currentRunId,
+  onSelectRun,
+  onRefresh,
+}: ProjectEventDetailProps) {
   const [rawOpen, setRawOpen] = useState(false);
+  const [isRetrying, setIsRetrying] = useState(false);
+  const [retryError, setRetryError] = useState<string | null>(null);
+  const [retrySuccess, setRetrySuccess] = useState<{ runId: string; retryCount: number } | null>(null);
+
+  const targetRunId = currentRunId || (node?.id?.includes(':') ? node.id.split(':')[0] : node?.id) || '';
+
+  const isFailed =
+    node?.status === 'failed' ||
+    node?.status === 'policy_violation' ||
+    node?.status === 'test_failed' ||
+    node?.status === 'timed_out' ||
+    node?.status === 'escalated';
+
+  const retrySafety = evaluateRunRetrySafety({
+    status: isFailed ? 'failed' : node?.status,
+    requiresUserAction: Boolean(
+      node?.escalation?.requiresCodex ||
+      node?.status === 'policy_violation' ||
+      node?.status === 'test_failed' ||
+      node?.status === 'escalated'
+    ),
+    errorCategory: (node?.metadata?.errorCategory as string) || (node?.status === 'policy_violation' ? 'policy_violation' : undefined),
+    failureReason: node?.error || (node?.metadata?.failureReason as string),
+    error: node?.error,
+    retryable: node?.retryable,
+    escalation: node?.escalation,
+  });
+
+  const handleRetry = async () => {
+    if (!targetRunId || isRetrying) return;
+    setIsRetrying(true);
+    setRetryError(null);
+    try {
+      const idempotencyKey = `retry-${targetRunId}-${Date.now()}`;
+      const res = await fetch(`/api/runs/${encodeURIComponent(targetRunId)}/retry`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ idempotencyKey }),
+      });
+      const data = (await res.json()) as {
+        ok: boolean;
+        runId?: string;
+        retryCount?: number;
+        error?: string;
+      };
+
+      if (!res.ok || !data.ok || !data.runId) {
+        throw new Error(data.error || '재시도 요청에 실패했습니다.');
+      }
+
+      setRetrySuccess({ runId: data.runId, retryCount: data.retryCount || 1 });
+      if (onRefresh) {
+        onRefresh();
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setRetryError(msg);
+    } finally {
+      setIsRetrying(false);
+    }
+  };
 
   if (!node) {
     return (
@@ -289,6 +359,107 @@ export function ProjectEventDetail({ node, onClose }: ProjectEventDetailProps) {
                 </div>
               ))}
             </div>
+          </section>
+        )}
+
+        {/* Retry & Action Reason Section (Criteria 1 & 3) */}
+        {(isFailed || node.retriedByRunId || node.retryOf) && (
+          <section aria-labelledby="retry-action-heading" className="space-y-2">
+            <h4 id="retry-action-heading" className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
+              <RotateCcw className="h-3.5 w-3.5 text-cyan-400" aria-hidden="true" />
+              재시도 및 조치 안내
+            </h4>
+
+            {/* If this run was a retry of another run */}
+            {node.retryOf && (
+              <div className="rounded-lg border border-border/60 bg-card/30 p-2.5 text-xs text-slate-400">
+                <span>이 작업은 이전 원본 Run (</span>
+                <span className="font-mono text-cyan-300 font-semibold">{node.retryOf.slice(-8)}</span>
+                <span>)의 {node.retryCount || 1}회차 재시도입니다.</span>
+              </div>
+            )}
+
+            {/* If this run was already retried into a new run */}
+            {node.retriedByRunId && (
+              <div className="rounded-lg border border-cyan-500/40 bg-cyan-950/20 p-3 space-y-2 text-xs text-cyan-200">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1.5 font-semibold text-cyan-300">
+                    <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
+                    <span>재시도 연결됨 ({node.retryCount || 1}회차)</span>
+                  </div>
+                  <span className="font-mono text-[10px] text-slate-400">
+                    새 Run ID: {node.retriedByRunId.slice(-8)}
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-300">
+                  이 실패한 작업은 단일 서버 권위 재시도를 통해 새 Run으로 연결되었습니다.
+                </p>
+                {onSelectRun && (
+                  <button
+                    type="button"
+                    onClick={() => onSelectRun(node.retriedByRunId!)}
+                    className="inline-flex items-center gap-1 rounded-md bg-cyan-500/20 px-2.5 py-1 text-xs font-semibold text-cyan-300 hover:bg-cyan-500/30 transition-colors"
+                  >
+                    <span>새 Run ({node.retriedByRunId.slice(-8)})으로 전환</span>
+                  </button>
+                )}
+              </div>
+            )}
+
+            {/* Safe Retry Button (Criterion 1 & 3: Only when safe to retry and not requiresUserAction) */}
+            {retrySafety.canRetry && (
+              <div className="rounded-lg border border-cyan-500/40 bg-cyan-950/20 p-3 space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs text-slate-300 font-medium">
+                    안전하게 재시도 가능한 실패 상태입니다.
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => void handleRetry()}
+                    disabled={isRetrying}
+                    aria-label="안전 실패 작업 재시도"
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-cyan-500/20 px-3 py-1.5 text-xs font-semibold text-cyan-300 ring-1 ring-cyan-500/40 hover:bg-cyan-500/30 hover:text-white transition-colors disabled:opacity-50"
+                  >
+                    <RotateCcw className={`h-3.5 w-3.5 ${isRetrying ? 'animate-spin' : ''}`} aria-hidden="true" />
+                    <span>{isRetrying ? '재시도 중…' : '재시도'}</span>
+                  </button>
+                </div>
+
+                {retrySuccess && (
+                  <div className="rounded-md border border-emerald-500/40 bg-emerald-950/30 p-2.5 text-xs text-emerald-200 flex items-center justify-between gap-2">
+                    <span>새 Run ({retrySuccess.runId.slice(-8)})이 생성되었습니다.</span>
+                    {onSelectRun && (
+                      <button
+                        type="button"
+                        onClick={() => onSelectRun(retrySuccess.runId)}
+                        className="underline text-emerald-300 font-semibold"
+                      >
+                        새 Run으로 이동
+                      </button>
+                    )}
+                  </div>
+                )}
+
+                {retryError && (
+                  <div className="rounded-md border border-rose-500/40 bg-rose-950/30 p-2.5 text-xs text-rose-200">
+                    {retryError}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Refined Action Reason (Criterion 1: When NOT safe to retry) */}
+            {!retrySafety.canRetry && isFailed && (
+              <div className="rounded-lg border border-amber-500/40 bg-amber-950/20 p-3 space-y-1.5 text-xs text-amber-200">
+                <div className="flex items-center gap-1.5 font-semibold text-amber-300">
+                  <AlertTriangle className="h-4 w-4 shrink-0" aria-hidden="true" />
+                  <span>조치 필요 안내 (재시도 불가)</span>
+                </div>
+                <p className="text-[11px] leading-relaxed text-amber-100/90 font-mono">
+                  {retrySafety.reason}
+                </p>
+              </div>
+            )}
           </section>
         )}
 

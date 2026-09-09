@@ -162,6 +162,9 @@ export interface CompactRunState {
   errorCategory?: string;
   errorDisplayName?: string;
   retryable?: boolean;
+  retryOf?: string;
+  retriedByRunId?: string;
+  retryCount?: number;
 }
 
 export interface LaunchMetadata {
@@ -566,6 +569,135 @@ export function getUserActionReason(
     return escalation?.reason || '자동 재시도 한도를 초과하여 상위 모델 또는 수동 개입이 필요합니다.';
   }
   return undefined;
+}
+
+export interface RetrySafetyDecision {
+  canRetry: boolean;
+  reason?: string;
+}
+
+/**
+ * Pure function evaluating whether a failed run or graph tip is safe to retry.
+ * Acceptance criteria 1:
+ * - Only failed items that are retryable and do NOT require user action can be retried.
+ * - Policy violation, secrets/credentials, destructive operations, Codex escalation,
+ *   or user action required must NOT show retry, returning a sanitized action reason instead.
+ */
+export function evaluateRunRetrySafety(run: {
+  status?: string | null;
+  requiresUserAction?: boolean;
+  userActionReason?: string;
+  errorCategory?: string | null;
+  failureReason?: string | null;
+  error?: string | null;
+  retryable?: boolean;
+  escalation?: LiveWorkerEscalation | null;
+}): RetrySafetyDecision {
+  const s = (run.status || '').trim().toLowerCase();
+
+  // 1. Must be in failed state
+  if (s !== 'failed') {
+    if (s === 'awaiting_review') {
+      return {
+        canRetry: false,
+        reason: '통합 브랜치 검토 및 승인 대기 상태입니다. main 병합 전 검토 및 승인이 필요합니다.',
+      };
+    }
+    if (s === 'running' || s === 'planning' || s === 'pending' || s === 'retrying' || s === 'verifying') {
+      return {
+        canRetry: false,
+        reason: '작업이 현재 진행 중입니다.',
+      };
+    }
+    if (s === 'completed') {
+      return {
+        canRetry: false,
+        reason: '이미 정상 완료된 작업입니다.',
+      };
+    }
+    return {
+      canRetry: false,
+      reason: '실패한 작업만 재시도할 수 있습니다.',
+    };
+  }
+
+  // 2. Policy violations (allowed_files violation)
+  const isPolicyViolation =
+    run.errorCategory === 'policy_violation' ||
+    /정책\s*위반|allowed_files|policy_violation/i.test(run.failureReason || '') ||
+    /정책\s*위반|allowed_files|policy_violation/i.test(run.error || '');
+  if (isPolicyViolation) {
+    return {
+      canRetry: false,
+      reason: '허용된 파일 범위(allowed_files) 외부 수정이 감지되어 자동 재시도가 차단되었습니다. 작업 범위를 검토하거나 승인하세요.',
+    };
+  }
+
+  // 3. Secrets / credential leaks / token disclosure
+  const isSecretsRelated =
+    run.errorCategory === 'secret_violation' ||
+    /비밀|secret|token|credential|api[_-]?key|password|passwd|auth/i.test(run.failureReason || '') ||
+    /비밀|secret|token|credential|api[_-]?key|password|passwd|auth/i.test(run.error || '');
+  if (isSecretsRelated) {
+    return {
+      canRetry: false,
+      reason: '비밀정보 또는 인증 관련 오류가 감지되어 보안을 위해 자동 재시도가 차단되었습니다. 환경 설정과 인증 정보를 확인하세요.',
+    };
+  }
+
+  // 4. Destructive operations (git hard reset, rm -rf, clean -fd, etc.)
+  const isDestructive =
+    run.errorCategory === 'destructive_action' ||
+    /파괴적|destructive|reset\s+--hard|clean\s+-fd|rm\s+-rf|drop\s+table/i.test(run.failureReason || '') ||
+    /파괴적|destructive/i.test(run.error || '');
+  if (isDestructive) {
+    return {
+      canRetry: false,
+      reason: '파괴적 작업 감지로 인해 자동 재시도가 차단되었습니다. 수동 확인 및 조치가 필요합니다.',
+    };
+  }
+
+  // 5. Codex Escalation (requiresCodex: true or escalated status)
+  const isEscalation =
+    run.errorCategory === 'escalated' ||
+    run.errorCategory === 'requirescodex' ||
+    Boolean(run.escalation?.requiresCodex) ||
+    /에스컬레이션|requirescodex|자동\s*복구\s*한도/i.test(run.failureReason || '') ||
+    /에스컬레이션|requirescodex/i.test(run.error || '');
+  if (isEscalation) {
+    return {
+      canRetry: false,
+      reason: run.escalation?.reason || 'Codex 에스컬레이션 상태로 상위 모델 또는 대화형 수동 개입이 필요합니다.',
+    };
+  }
+
+  // 6. Requires user action check
+  if (
+    run.requiresUserAction ||
+    requiresUserAction(run.status, run.escalation, run.errorCategory, run.failureReason || run.error)
+  ) {
+    const actionReason =
+      getUserActionReason(run.status, run.escalation, run.errorCategory, run.failureReason || run.error) ||
+      run.userActionReason ||
+      '사용자 결정 또는 승인이 필요한 상태이므로 자동 재시도할 수 없습니다.';
+    return {
+      canRetry: false,
+      reason: actionReason,
+    };
+  }
+
+  // 7. Explicit retryable flag set to false
+  if (run.retryable === false) {
+    return {
+      canRetry: false,
+      reason: run.failureReason || run.error || '재시도할 수 없는 작업입니다.',
+    };
+  }
+
+  // 8. Safe to retry
+  return {
+    canRetry: true,
+  };
 }
 
 /**

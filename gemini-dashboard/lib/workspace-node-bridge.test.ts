@@ -1224,4 +1224,108 @@ void describe('Workspace Node Bridge (Vite Dev/Server Middleware & App Route Bri
       assert.ok(detail.failureReason?.includes('제한 시간'));
     });
   });
+
+  void describe('14. Safe Retry & Usage Endpoints via Node Bridge', () => {
+    void test('POST /api/runs/:runId/retry invokes safe retry and returns 201 with linkage', async () => {
+      const origRunId = '20260909-BRIDGE-RETRY-01';
+      await fs.promises.writeFile(
+        path.join(testRepoDir, '.agent', 'dashboard-state', 'compact', `${origRunId}.json`),
+        JSON.stringify({
+          runId: origRunId,
+          prompt: '브리지 재시도 테스트 작업',
+          status: 'failed',
+          requiresUserAction: false,
+          errorCategory: 'launcher_error',
+          failureReason: '실행 실패',
+          createdAt: new Date(Date.now() - 30_000).toISOString(),
+          updatedAt: new Date(Date.now() - 30_000).toISOString(),
+        }),
+        'utf8'
+      );
+
+      const req = new Request(`http://localhost:3000/api/runs/${origRunId}/retry`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+
+      const res = await handleWorkspaceBridgeRequest(req, { repoRoot: testRepoDir });
+      assert.strictEqual(res.status, 201);
+      const data = await res.json() as {
+        ok: boolean;
+        runId: string;
+        retryOf: string;
+        retryCount: number;
+        isDuplicate: boolean;
+      };
+
+      assert.strictEqual(data.ok, true);
+      assert.strictEqual(data.retryOf, origRunId);
+      assert.strictEqual(data.retryCount, 1);
+      assert.strictEqual(data.isDuplicate, false);
+      assert.ok(data.runId);
+    });
+
+    void test('POST /api/runs/:runId/retry returns 400 for safety policy violations', async () => {
+      const runId = '20260909-BRIDGE-POLICY-01';
+      await fs.promises.writeFile(
+        path.join(testRepoDir, '.agent', 'dashboard-state', 'compact', `${runId}.json`),
+        JSON.stringify({
+          runId,
+          prompt: '정책 위반 작업',
+          status: 'failed',
+          errorCategory: 'policy_violation',
+          failureReason: 'allowed_files 위반',
+          requiresUserAction: false,
+          createdAt: new Date(Date.now() - 30_000).toISOString(),
+          updatedAt: new Date(Date.now() - 30_000).toISOString(),
+        }),
+        'utf8'
+      );
+
+      const req = new Request(`http://localhost:3000/api/runs/${runId}/retry`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+
+      const res = await handleWorkspaceBridgeRequest(req, { repoRoot: testRepoDir });
+      assert.strictEqual(res.status, 400);
+      const data = await res.json() as { ok: boolean; code: string; error: string };
+      assert.strictEqual(data.ok, false);
+      assert.strictEqual(data.code, 'RETRY_NOT_PERMITTED');
+    });
+
+    void test('GET /api/codex-usage and ?refresh=true via bridge', async () => {
+      const req = new Request('http://localhost:3000/api/codex-usage');
+      const res = await handleWorkspaceBridgeRequest(req, { repoRoot: testRepoDir });
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(res.headers.get('cache-control'), 'no-store, no-cache, must-revalidate');
+
+      const refreshReq = new Request('http://localhost:3000/api/codex-usage?refresh=true');
+      const refreshRes = await handleWorkspaceBridgeRequest(refreshReq, { repoRoot: testRepoDir });
+      assert.strictEqual(refreshRes.status, 200);
+    });
+
+    void test('GET /api/gemini-quota and ?refresh=true via bridge', async () => {
+      const savedDisable = process.env.GEMINI_QUOTA_DISABLE_CLI;
+      process.env.GEMINI_QUOTA_DISABLE_CLI = '1';
+      try {
+        const req = new Request('http://localhost:3000/api/gemini-quota');
+        const res = await handleWorkspaceBridgeRequest(req, { repoRoot: testRepoDir });
+        assert.strictEqual(res.status, 200);
+        assert.strictEqual(res.headers.get('cache-control'), 'no-store, no-cache, must-revalidate');
+
+        const refreshReq = new Request('http://localhost:3000/api/gemini-quota?refresh=true');
+        const refreshRes = await handleWorkspaceBridgeRequest(refreshReq, { repoRoot: testRepoDir });
+        assert.strictEqual(refreshRes.status, 200);
+      } finally {
+        if (savedDisable !== undefined) {
+          process.env.GEMINI_QUOTA_DISABLE_CLI = savedDisable;
+        } else {
+          delete process.env.GEMINI_QUOTA_DISABLE_CLI;
+        }
+      }
+    });
+  });
 });

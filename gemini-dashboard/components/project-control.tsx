@@ -13,6 +13,7 @@ import {
 import { WorkerTerminal } from './worker-terminal';
 import { ProjectWorkGraph } from './project-work-graph';
 import { ProjectEventDetail } from './project-event-detail';
+import { ProjectUsageBar } from './project-usage-bar';
 import type {
   LiveWorkerData,
   CompactRunState,
@@ -87,6 +88,9 @@ export function ProjectControl({
 
   return (
     <div className="flex h-full flex-col bg-background text-foreground">
+      {/* Real-time Usage Bar at top of /projects */}
+      <ProjectUsageBar />
+
       {/* Control Header */}
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/80 bg-card/40 px-6 py-4 backdrop-blur-xs">
         <div className="flex items-center gap-3">
@@ -230,6 +234,9 @@ export function ProjectControl({
                 <ProjectEventDetail
                   node={selectedNode}
                   onClose={() => setInternalSelectedNodeId(undefined)}
+                  currentRunId={selectedRunId || (graph ? graph.runId : undefined)}
+                  onSelectRun={onSelectRun}
+                  onRefresh={onRefresh}
                 />
               </div>
             </div>
