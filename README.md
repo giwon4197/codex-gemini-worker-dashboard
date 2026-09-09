@@ -1,6 +1,6 @@
 # Codex × Gemini Worker Dashboard
 
-> 차세대 Policy Engine, Repository Memory, Context Compiler, 선택적 Codex 호출 설계는 [v2 설계 및 구현 로드맵](docs/V2_ARCHITECTURE.md)을 참고하세요.
+> 차세대 Policy Engine, Repository Memory, Context Compiler, 선택적 Codex 호출 설계는 [v2 설계 및 구현 로드맵](docs/V2_ARCHITECTURE.md)을 참고하세요. 오늘 실행된 작업의 실패 원인과 수정 우선순위는 [실패 원인 분석](docs/FAILURE_ANALYSIS_2026-09-09.md)에 정리되어 있습니다.
 
 Codex가 요구사항을 설계하고 작업 난이도에 맞는 Gemini 모델을 선택한 뒤, Gemini가 구현하고 Codex가 결과를 검증하는 로컬 워크플로입니다. 실행 상태와 토큰 사용량은 웹 대시보드에서 실시간으로 확인할 수 있습니다.
 
