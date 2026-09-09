@@ -392,7 +392,7 @@ void describe('Workspace Store (Idempotency, Path Traversal, & Recovery)', () =>
       const child = spawnSync(toolsResult.tools.pwsh, [
         '-NoProfile',
         '-Command',
-        `Write-Output '${testString}'`,
+        `$OutputEncoding = [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Write-Output '${testString}'`,
       ], {
         cwd: koreanRepoDir,
         encoding: 'utf8',

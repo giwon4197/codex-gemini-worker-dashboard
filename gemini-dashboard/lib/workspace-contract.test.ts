@@ -1,7 +1,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 // @ts-expect-error TS5097 allowed for test runner
-import { normalizeRunStatus, normalizeWorkerStatus, isWorkerActive, requiresUserAction, getUserActionReason, extractTimelineEvents, formatDuration, RUN_STATUS_META, WORKER_STATUS_META } from './workspace-contract.ts';
+import { normalizeRunStatus, normalizeWorkerStatus, isWorkerActive, requiresUserAction, getUserActionReason, extractTimelineEvents, formatDuration, RUN_STATUS_META, WORKER_STATUS_META, validateSessionId } from './workspace-contract.ts';
 
 void describe('Workspace Contract & Pure State Transforms', () => {
   void describe('normalizeRunStatus', () => {
@@ -165,6 +165,30 @@ void describe('Workspace Contract & Pure State Transforms', () => {
       assert.ok(actionEvent);
       assert.strictEqual(actionEvent.status, 'warning');
       assert.ok(actionEvent.title.includes('승인'));
+    });
+
+    void test('returns empty timeline when no actual execution evidence exists (Criterion 8)', () => {
+      const events = extractTimelineEvents({
+        runId: 'empty-test-run',
+        status: 'pending',
+      });
+
+      assert.strictEqual(events.length, 0);
+      assert.ok(!events.some(e => e.title.includes('도구 및 코드 수정 실행')));
+      assert.ok(!events.some(e => e.title.includes('계획 수립')));
+    });
+  });
+
+  void describe('validateSessionId', () => {
+    void test('validates session ID formats correctly', () => {
+      assert.strictEqual(validateSessionId('session-20260909-123456-abcdef12'), true);
+      assert.strictEqual(validateSessionId('sess_123'), true);
+      assert.strictEqual(validateSessionId(''), false);
+      assert.strictEqual(validateSessionId('   '), false);
+      assert.strictEqual(validateSessionId(null), false);
+      assert.strictEqual(validateSessionId('../session'), false);
+      assert.strictEqual(validateSessionId('session/123'), false);
+      assert.strictEqual(validateSessionId('a'.repeat(65)), false);
     });
   });
 

@@ -691,4 +691,134 @@ void describe('Workspace Node Bridge (Vite Dev/Server Middleware & App Route Bri
       assert.strictEqual(registered, true);
     });
   });
+
+  void describe('11. Conversation & Approval Endpoints via Node Bridge', () => {
+    void test('POST /api/conversations handles general chat without spawning any runs or workers', async () => {
+      let spawnerCalled = false;
+      const mockSpawner = () => {
+        spawnerCalled = true;
+        return { pid: 9999, unref: () => {} };
+      };
+
+      const mockCodexRunner = async () => ({
+        stdout: JSON.stringify({ intent: 'chat', reply: '안녕하세요! 반갑습니다.' }),
+        stderr: '',
+        exitCode: 0,
+      });
+
+      const req = new Request('http://localhost:3000/api/conversations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: '아아 들려?' }),
+      });
+
+      const res = await handleWorkspaceBridgeRequest(req, {
+        repoRoot: testRepoDir,
+        spawner: mockSpawner,
+        codexRunner: mockCodexRunner,
+      });
+
+      assert.strictEqual(res.status, 200);
+      const data = (await res.json()) as { ok: boolean; message: { intentType: string; text: string } };
+      assert.strictEqual(data.ok, true);
+      assert.strictEqual(data.message.intentType, 'chat');
+      assert.strictEqual(spawnerCalled, false);
+    });
+
+    void test('POST /api/conversations with code plan returns approval card and approval endpoint spawns exactly once', async () => {
+      const spawnCalls: unknown[] = [];
+      const mockSpawner = () => {
+        spawnCalls.push(1);
+        return { pid: 8888, unref: () => {} };
+      };
+
+      const mockCodexRunner = async () => ({
+        stdout: JSON.stringify({
+          intent: 'action_plan',
+          reply: '버튼 수정 계획입니다.',
+          plan: {
+            title: '버튼 수정',
+            explanation: '버튼 클릭 버그 수정',
+            steps: ['코드 수정', '테스트 실행'],
+          },
+        }),
+        stderr: '',
+        exitCode: 0,
+      });
+
+      // 1. Send modification prompt
+      const convReq = new Request('http://localhost:3000/api/conversations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: '버튼 오류를 수정해' }),
+      });
+
+      const convRes = await handleWorkspaceBridgeRequest(convReq, {
+        repoRoot: testRepoDir,
+        spawner: mockSpawner,
+        codexRunner: mockCodexRunner,
+      });
+
+      assert.strictEqual(convRes.status, 200);
+      const convData = (await convRes.json()) as {
+        ok: boolean;
+        session: { sessionId: string };
+        approval: { approvalId: string; status: string };
+      };
+      assert.strictEqual(convData.ok, true);
+      assert.strictEqual(convData.approval.status, 'pending');
+      assert.strictEqual(spawnCalls.length, 0); // 0 workers before approval!
+
+      const sessionId = convData.session.sessionId;
+      const approvalId = convData.approval.approvalId;
+
+      // 2. Approve plan
+      const apprReq1 = new Request(`http://localhost:3000/api/conversations/${sessionId}/approve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ approvalId }),
+      });
+
+      const apprRes1 = await handleWorkspaceBridgeRequest(apprReq1, {
+        repoRoot: testRepoDir,
+        spawner: mockSpawner,
+        toolOverrides: { pwsh: 'pwsh.exe' },
+      });
+
+      assert.strictEqual(apprRes1.status, 201);
+      const apprData1 = (await apprRes1.json()) as { ok: boolean; runId: string; isDuplicate: boolean };
+      assert.strictEqual(apprData1.ok, true);
+      assert.strictEqual(apprData1.isDuplicate, false);
+      assert.ok(apprData1.runId);
+      assert.strictEqual(spawnCalls.length, 1); // Exactly 1 spawn!
+
+      // 3. Duplicate approval request
+      const apprReq2 = new Request(`http://localhost:3000/api/conversations/${sessionId}/approve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ approvalId }),
+      });
+
+      const apprRes2 = await handleWorkspaceBridgeRequest(apprReq2, {
+        repoRoot: testRepoDir,
+        spawner: mockSpawner,
+        toolOverrides: { pwsh: 'pwsh.exe' },
+      });
+
+      assert.strictEqual(apprRes2.status, 200);
+      const apprData2 = (await apprRes2.json()) as { ok: boolean; runId: string; isDuplicate: boolean };
+      assert.strictEqual(apprData2.ok, true);
+      assert.strictEqual(apprData2.isDuplicate, true);
+      assert.strictEqual(apprData2.runId, apprData1.runId);
+      assert.strictEqual(spawnCalls.length, 1); // STILL exactly 1 spawn!
+
+      // 4. Retrieve session via GET
+      const getReq = new Request(`http://localhost:3000/api/conversations/${sessionId}`, { method: 'GET' });
+      const getRes = await handleWorkspaceBridgeRequest(getReq, { repoRoot: testRepoDir });
+      assert.strictEqual(getRes.status, 200);
+      const getData = (await getRes.json()) as { ok: boolean; session: { sessionId: string; linkedRunIds: string[] } };
+      assert.strictEqual(getData.session.sessionId, sessionId);
+      assert.ok(getData.session.linkedRunIds.includes(apprData1.runId));
+    });
+  });
 });

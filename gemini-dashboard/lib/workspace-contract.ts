@@ -530,45 +530,79 @@ export function extractTimelineEvents(params: {
   const baseTime = params.startedAt || new Date().toISOString();
   const updateTime = params.updatedAt || baseTime;
 
-  // 1. Planning Stage
-  events.push({
-    id: `${params.runId}-stage-plan`,
-    stage: 'plan',
-    title: '계획 수립',
-    description: '작업 요청 분석 및 안전한 실행 계획 수립',
-    timestamp: baseTime,
-    status: 'passed',
-  });
-
-  // 2. Execution Stage
-  const isExecuting =
-    params.status === 'running' ||
-    params.status === 'retrying' ||
-    params.status === 'verifying';
-  const hasExecuted =
-    params.status === 'completed' ||
-    params.status === 'awaiting_review' ||
-    params.status === 'test_failed' ||
-    params.status === 'policy_violation' ||
+  // Evidence verification
+  const hasLogs = Boolean(params.recentLogs && params.recentLogs.length > 0);
+  const hasChangedFiles = Boolean(params.changedFiles && params.changedFiles.length > 0);
+  const hasRetries = Boolean(params.retryHistory && params.retryHistory.length > 0);
+  const hasVerification = Boolean(
+    params.verification?.verifiedAt ||
+    params.verification?.commands?.length ||
+    params.status === 'verifying' ||
+    params.status === 'test_failed'
+  );
+  const hasCompletion = params.status === 'completed' || Boolean(params.finalResponse);
+  const hasEscalation = Boolean(params.escalation?.requiresCodex || params.escalation?.reason);
+  const hasActionRequired = requiresUserAction(params.status, params.escalation);
+  const hasFailure =
     params.status === 'failed' ||
     params.status === 'timed_out' ||
-    params.status === 'escalated';
+    params.status === 'policy_violation' ||
+    Boolean(params.error);
 
-  events.push({
-    id: `${params.runId}-stage-execute`,
-    stage: 'execute',
-    title: '도구 및 코드 수정 실행',
-    description: params.changedFiles?.length
-      ? `${params.changedFiles.length}개 파일 변경 진행됨`
-      : '에이전트 모델 추론 및 파일 작업 진행',
-    timestamp: baseTime,
-    status: isExecuting
-      ? 'in_progress'
-      : hasExecuted
-        ? 'passed'
-        : 'pending',
-    meta: { changedFilesCount: params.changedFiles?.length || 0 },
-  });
+  const hasExecutionEvidence =
+    hasLogs ||
+    hasChangedFiles ||
+    hasRetries ||
+    hasVerification ||
+    hasCompletion ||
+    hasEscalation ||
+    hasActionRequired ||
+    hasFailure;
+
+  // 1. Planning Stage (Only if planning is ongoing or execution has actual evidence)
+  const hasPlanningEvidence = params.status === 'planning' || hasExecutionEvidence;
+  if (hasPlanningEvidence) {
+    events.push({
+      id: `${params.runId}-stage-plan`,
+      stage: 'plan',
+      title: '계획 수립',
+      description: '작업 요청 분석 및 안전한 실행 계획 수립',
+      timestamp: baseTime,
+      status: params.status === 'planning' ? 'in_progress' : 'passed',
+    });
+  }
+
+  // 2. Execution Stage (Only if actual execution evidence exists)
+  if (hasExecutionEvidence) {
+    const isExecuting =
+      params.status === 'running' ||
+      params.status === 'retrying' ||
+      params.status === 'verifying';
+    const hasExecuted =
+      params.status === 'completed' ||
+      params.status === 'awaiting_review' ||
+      params.status === 'test_failed' ||
+      params.status === 'policy_violation' ||
+      params.status === 'failed' ||
+      params.status === 'timed_out' ||
+      params.status === 'escalated';
+
+    events.push({
+      id: `${params.runId}-stage-execute`,
+      stage: 'execute',
+      title: '도구 및 코드 수정 실행',
+      description: params.changedFiles?.length
+        ? `${params.changedFiles.length}개 파일 변경 진행됨`
+        : '에이전트 모델 추론 및 파일 작업 진행',
+      timestamp: baseTime,
+      status: isExecuting
+        ? 'in_progress'
+        : hasExecuted
+          ? 'passed'
+          : 'pending',
+      meta: { changedFilesCount: params.changedFiles?.length || 0 },
+    });
+  }
 
   // 3. Retry Stage (if applicable)
   const retries = params.retryHistory || [];
@@ -587,13 +621,6 @@ export function extractTimelineEvents(params: {
 
   // 4. Verification Stage
   const verification = params.verification;
-  const hasVerification = Boolean(
-    verification?.verifiedAt ||
-    verification?.commands?.length ||
-    params.status === 'verifying' ||
-    params.status === 'test_failed'
-  );
-
   if (hasVerification) {
     const isPass = verification?.commands?.every(c => c.status === 'PASS');
     events.push({
@@ -668,4 +695,101 @@ export function formatDuration(seconds: number): string {
   const h = Math.floor(m / 60);
   const remM = m % 60;
   return `${h}시간 ${remM}분 ${rem}초`;
+}
+
+// ==========================================
+// Codex Conversational Workspace Contracts
+// ==========================================
+
+export type ConversationIntentType = 'chat' | 'status' | 'action_plan';
+
+export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'failed';
+
+export interface PlanDetails {
+  title: string;
+  explanation: string;
+  steps: string[];
+  affectedFiles?: string[];
+}
+
+export interface ConversationApproval {
+  approvalId: string;
+  sessionId: string;
+  status: ApprovalStatus;
+  plan: PlanDetails;
+  idempotencyKey: string;
+  prompt: string;
+  createdAt: string;
+  approvedAt?: string;
+  runId?: string;
+  error?: string;
+}
+
+export interface ConversationMessage {
+  id: string;
+  sender: 'user' | 'codex';
+  text: string;
+  timestamp: string;
+  intentType?: ConversationIntentType;
+  approval?: ConversationApproval;
+  statusSummary?: {
+    totalRuns: number;
+    activeRuns?: number;
+    activeWorkers: number;
+    latestRunStatus?: string;
+    latestRunId?: string;
+  };
+  error?: string;
+}
+
+export interface ConversationSession {
+  sessionId: string;
+  createdAt: string;
+  updatedAt: string;
+  messages: ConversationMessage[];
+  pendingApproval?: ConversationApproval;
+  lastApproval?: ConversationApproval;
+  linkedRunIds: string[];
+}
+
+export function validateSessionId(sessionId: unknown): boolean {
+  if (typeof sessionId !== 'string') return false;
+  const trimmed = sessionId.trim();
+  if (!trimmed || trimmed.length > 64) return false;
+  if (trimmed.includes('..') || trimmed.includes('/') || trimmed.includes('\\') || trimmed.includes('\0')) {
+    return false;
+  }
+  return /^[0-9a-zA-Z_-]+$/.test(trimmed);
+}
+
+export function generateSessionId(): string {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, '0');
+  const d = String(now.getDate()).padStart(2, '0');
+  const hh = String(now.getHours()).padStart(2, '0');
+  const mm = String(now.getMinutes()).padStart(2, '0');
+  const ss = String(now.getSeconds()).padStart(2, '0');
+  const rand = Math.random().toString(36).slice(2, 10);
+  return `session-${y}${m}${d}-${hh}${mm}${ss}-${rand}`;
+}
+
+export function createEmptyConversationSession(sessionId?: string): ConversationSession {
+  const id = sessionId || generateSessionId();
+  const now = new Date().toISOString();
+  return {
+    sessionId: id,
+    createdAt: now,
+    updatedAt: now,
+    messages: [
+      {
+        id: `msg-welcome`,
+        sender: 'codex',
+        text: '안녕하세요! Codex 대화형 워크스페이스입니다. 질문, 상태 문의, 또는 작업 요청을 자연어로 입력하세요. 코드 변경 요청 시 실행 계획을 먼저 수립하여 승인을 요청합니다.',
+        timestamp: now,
+        intentType: 'chat',
+      },
+    ],
+    linkedRunIds: [],
+  };
 }

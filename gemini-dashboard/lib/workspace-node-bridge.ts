@@ -3,13 +3,19 @@ import path from 'node:path';
 import type { Plugin } from 'vite';
 import type { SpawnerFn } from './workspace-store.ts';
 // @ts-expect-error TS5097 allowed for test runner
-import { getAllowedRepoRoot, validateRunId, validateRepository, validatePrompt, spawnRouterRun, listCompactRuns, getRunDetails, getProjectWorkers } from './workspace-store.ts';
+import { validateSessionId, createEmptyConversationSession } from './workspace-contract.ts';
+// @ts-expect-error TS5097 allowed for test runner
+import { getAllowedRepoRoot, validateRunId, validateRepository, validatePrompt, spawnRouterRun, listCompactRuns, getRunDetails, getProjectWorkers, getConversationSession, listConversationSessions, saveConversationSession, approveConversationPlan } from './workspace-store.ts';
 // @ts-expect-error TS5097 allowed for test runner
 import { sanitizeText } from './workspace-sanitize.ts';
+// @ts-expect-error TS5097 allowed for test runner
+import { evaluateCodexConversation } from './codex-conversation.ts';
+import type { CodexRunnerFn } from './codex-conversation.ts';
 
 export interface WorkspaceBridgeOptions {
   repoRoot?: string;
   spawner?: SpawnerFn;
+  codexRunner?: CodexRunnerFn;
   env?: Record<string, string | undefined>;
   toolOverrides?: Partial<Record<'pwsh' | 'codex' | 'rg' | 'agy', string>>;
   maxBodySizeBytes?: number;
@@ -256,12 +262,230 @@ export async function handleWorkspaceBridgeRequest(
     }
   }
 
+  // 6. POST /api/conversations (Codex conversation evaluation)
+  if (pathname === '/api/conversations' && method === 'POST') {
+    let body: {
+      sessionId?: unknown;
+      message?: unknown;
+      repository?: unknown;
+    } = {};
+
+    try {
+      const text = await request.text();
+      if (!text || !text.trim()) {
+        return Response.json(
+          { ok: false, error: '유효한 JSON 요청 본문이 필요합니다.' },
+          { status: 400, headers: JSON_HEADERS }
+        );
+      }
+      body = JSON.parse(text);
+    } catch {
+      return Response.json(
+        { ok: false, error: '유효하지 않은 JSON 요청 본문이 필요합니다.' },
+        { status: 400, headers: JSON_HEADERS }
+      );
+    }
+
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return Response.json(
+        { ok: false, error: '유효한 JSON 요청 본문이 필요합니다.' },
+        { status: 400, headers: JSON_HEADERS }
+      );
+    }
+
+    const repoValidation = validateRepository(body.repository, activeOptions.repoRoot);
+    if (!repoValidation.ok) {
+      return Response.json(
+        { ok: false, error: repoValidation.error || '허용되지 않은 저장소 경로입니다.' },
+        { status: 400, headers: JSON_HEADERS }
+      );
+    }
+
+    const promptValidation = validatePrompt(body.message);
+    if (!promptValidation.ok) {
+      return Response.json(
+        { ok: false, error: promptValidation.error || '메시지 내용을 입력해주세요.' },
+        { status: 400, headers: JSON_HEADERS }
+      );
+    }
+
+    const sessionId =
+      typeof body.sessionId === 'string' && body.sessionId.trim()
+        ? body.sessionId.trim()
+        : undefined;
+
+    if (sessionId && !validateSessionId(sessionId)) {
+      return Response.json(
+        { ok: false, error: '유효하지 않은 대화 세션 식별자입니다.' },
+        { status: 400, headers: JSON_HEADERS }
+      );
+    }
+
+    const result = await evaluateCodexConversation({
+      message: promptValidation.prompt,
+      sessionId,
+      repoRoot: repoValidation.repoRoot,
+      codexRunner: activeOptions.codexRunner,
+      env: activeOptions.env,
+      toolOverrides: activeOptions.toolOverrides,
+    });
+
+    if (!result.ok) {
+      return Response.json(
+        { ok: false, error: result.error || 'Codex 대화 처리에 실패했습니다.' },
+        { status: 500, headers: JSON_HEADERS }
+      );
+    }
+
+    return Response.json(
+      {
+        ok: true,
+        session: result.session,
+        message: result.message,
+        approval: result.approval,
+      },
+      { status: 200, headers: JSON_HEADERS }
+    );
+  }
+
+  // 7. GET /api/conversations (List conversation sessions)
+  if (pathname === '/api/conversations' && method === 'GET') {
+    try {
+      const repoRoot = getAllowedRepoRoot(activeOptions.repoRoot);
+      const sessions = await listConversationSessions(repoRoot);
+      let activeSession = sessions[0];
+      if (!activeSession) {
+        activeSession = createEmptyConversationSession();
+        await saveConversationSession(activeSession, repoRoot);
+        sessions.push(activeSession);
+      }
+      return Response.json(
+        { ok: true, sessions, session: activeSession },
+        { status: 200, headers: JSON_HEADERS }
+      );
+    } catch {
+      return Response.json(
+        { ok: false, error: '대화 목록을 불러오지 못했습니다.' },
+        { status: 500, headers: JSON_HEADERS }
+      );
+    }
+  }
+
+  // 8. POST /api/conversations/:sessionId/approve (Approve pending plan and execute run)
+  const approveMatch = pathname.match(/^\/api\/conversations\/([^/]+)\/approve$/);
+  if (approveMatch && method === 'POST') {
+    let rawSessionId = approveMatch[1];
+    try {
+      rawSessionId = decodeURIComponent(approveMatch[1]);
+    } catch {
+      rawSessionId = approveMatch[1];
+    }
+    if (!validateSessionId(rawSessionId)) {
+      return Response.json(
+        { ok: false, error: '유효하지 않은 대화 세션 식별자입니다.' },
+        { status: 400, headers: JSON_HEADERS }
+      );
+    }
+
+    let body: {
+      approvalId?: unknown;
+      idempotencyKey?: unknown;
+      repository?: unknown;
+    } = {};
+
+    try {
+      const text = await request.text();
+      if (text && text.trim()) {
+        body = JSON.parse(text);
+      }
+    } catch {
+      return Response.json(
+        { ok: false, error: '유효하지 않은 JSON 요청 본문입니다.' },
+        { status: 400, headers: JSON_HEADERS }
+      );
+    }
+
+    const repoValidation = validateRepository(body.repository, activeOptions.repoRoot);
+    if (!repoValidation.ok) {
+      return Response.json(
+        { ok: false, error: repoValidation.error || '허용되지 않은 저장소 경로입니다.' },
+        { status: 400, headers: JSON_HEADERS }
+      );
+    }
+
+    const approvalId =
+      typeof body.approvalId === 'string' && body.approvalId.trim()
+        ? body.approvalId.trim()
+        : undefined;
+    const idempotencyKey =
+      typeof body.idempotencyKey === 'string' && body.idempotencyKey.trim()
+        ? body.idempotencyKey.trim()
+        : undefined;
+
+    const result = await approveConversationPlan({
+      sessionId: rawSessionId,
+      approvalId,
+      idempotencyKey,
+      repoRoot: repoValidation.repoRoot,
+      spawner: activeOptions.spawner,
+      env: activeOptions.env,
+      toolOverrides: activeOptions.toolOverrides,
+    });
+
+    if (!result.ok) {
+      return Response.json(
+        { ok: false, error: result.error || '작업 승인 처리에 실패했습니다.', approval: result.approval },
+        { status: 500, headers: JSON_HEADERS }
+      );
+    }
+
+    return Response.json(
+      {
+        ok: true,
+        runId: result.runId,
+        isDuplicate: result.isDuplicate,
+        approval: result.approval,
+        session: result.session,
+      },
+      { status: result.isDuplicate ? 200 : 201, headers: JSON_HEADERS }
+    );
+  }
+
+  // 9. GET /api/conversations/:sessionId (Get single conversation session)
+  const sessionMatch = pathname.match(/^\/api\/conversations\/([^/]+)$/);
+  if (sessionMatch && method === 'GET') {
+    let rawSessionId = sessionMatch[1];
+    try {
+      rawSessionId = decodeURIComponent(sessionMatch[1]);
+    } catch {
+      rawSessionId = sessionMatch[1];
+    }
+    if (!validateSessionId(rawSessionId)) {
+      return Response.json(
+        { ok: false, error: '유효하지 않은 대화 세션 식별자입니다.' },
+        { status: 400, headers: JSON_HEADERS }
+      );
+    }
+
+    const session = await getConversationSession(rawSessionId, activeOptions.repoRoot);
+    if (!session) {
+      return Response.json(
+        { ok: false, error: '요청한 대화 세션을 찾을 수 없습니다.' },
+        { status: 404, headers: JSON_HEADERS }
+      );
+    }
+
+    return Response.json({ ok: true, session }, { status: 200, headers: JSON_HEADERS });
+  }
+
   // Check for known route prefixes with invalid method
   if (
     pathname === '/api/runs' ||
     pathname.startsWith('/api/runs/') ||
     pathname === '/api/projects' ||
-    pathname.startsWith('/api/projects/')
+    pathname.startsWith('/api/projects/') ||
+    pathname === '/api/conversations' ||
+    pathname.startsWith('/api/conversations/')
   ) {
     if (method !== 'GET' && method !== 'POST') {
       return Response.json(
@@ -298,7 +522,9 @@ export function createWorkspaceBridgeMiddleware(options?: WorkspaceBridgeOptions
       pathname === '/api/runs' ||
       pathname.startsWith('/api/runs/') ||
       pathname === '/api/projects' ||
-      pathname.startsWith('/api/projects/');
+      pathname.startsWith('/api/projects/') ||
+      pathname === '/api/conversations' ||
+      pathname.startsWith('/api/conversations/');
 
     if (!isWorkspaceRoute) {
       return next();

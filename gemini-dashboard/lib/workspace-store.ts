@@ -9,9 +9,11 @@ import type {
   LiveWorkerData,
   TaskProgressSummary,
   RunAliasRecord,
+  ConversationSession,
+  ConversationApproval,
 } from './workspace-contract.ts';
 // @ts-expect-error TS5097 allowed for test runner
-import { normalizeRunStatus, normalizeWorkerStatus, isWorkerActive, requiresUserAction, getUserActionReason, extractTimelineEvents } from './workspace-contract.ts';
+import { normalizeRunStatus, normalizeWorkerStatus, isWorkerActive, requiresUserAction, getUserActionReason, extractTimelineEvents, validateSessionId } from './workspace-contract.ts';
 // @ts-expect-error TS5097 allowed for test runner
 import { sanitizeText, sanitizeWorkerData } from './workspace-sanitize.ts';
 
@@ -464,6 +466,208 @@ export async function getCompactRunState(
     return JSON.parse(raw) as CompactRunState;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Atomically saves a conversation session.
+ */
+export async function saveConversationSession(
+  session: ConversationSession,
+  repoRoot?: string
+): Promise<void> {
+  const root = repoRoot || getAllowedRepoRoot();
+  if (!validateSessionId(session.sessionId)) {
+    throw new Error(`Invalid sessionId: ${session.sessionId}`);
+  }
+  const filePath = path.join(getDashboardStateDir(root), 'conversations', `${session.sessionId}.json`);
+  await atomicWriteJson(filePath, session);
+}
+
+/**
+ * Reads a conversation session by ID.
+ */
+export async function getConversationSession(
+  sessionId: string,
+  repoRoot?: string
+): Promise<ConversationSession | null> {
+  if (!validateSessionId(sessionId)) return null;
+  const root = repoRoot || getAllowedRepoRoot();
+  const filePath = path.join(getDashboardStateDir(root), 'conversations', `${sessionId}.json`);
+
+  try {
+    const raw = await fs.promises.readFile(filePath, 'utf8');
+    return JSON.parse(raw) as ConversationSession;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Lists all conversation sessions sorted by updatedAt descending.
+ */
+export async function listConversationSessions(
+  repoRoot?: string
+): Promise<ConversationSession[]> {
+  const root = repoRoot || getAllowedRepoRoot();
+  const convDir = path.join(getDashboardStateDir(root), 'conversations');
+  const sessions: ConversationSession[] = [];
+
+  try {
+    const files = await fs.promises.readdir(convDir);
+    for (const file of files) {
+      if (!file.endsWith('.json')) continue;
+      const sessionId = file.slice(0, -5);
+      if (!validateSessionId(sessionId)) continue;
+      try {
+        const raw = await fs.promises.readFile(path.join(convDir, file), 'utf8');
+        sessions.push(JSON.parse(raw) as ConversationSession);
+      } catch {
+        // Skip unreadable session
+      }
+    }
+  } catch {
+    // Directory might not exist yet
+  }
+
+  sessions.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+  return sessions;
+}
+
+/**
+ * Approves a pending plan in a conversation session and executes the router run exactly once.
+ * Enforces persistent idempotency across repeated clicks or retries.
+ */
+export async function approveConversationPlan(options: {
+  sessionId: string;
+  approvalId?: string;
+  idempotencyKey?: string;
+  repoRoot?: string;
+  spawner?: SpawnerFn;
+  env?: Record<string, string | undefined>;
+  toolOverrides?: Partial<Record<'pwsh' | 'codex' | 'rg' | 'agy', string>>;
+}): Promise<{
+  ok: boolean;
+  runId?: string;
+  isDuplicate?: boolean;
+  approval?: ConversationApproval;
+  session?: ConversationSession;
+  error?: string;
+}> {
+  const repoValidation = validateRepository(options.repoRoot);
+  if (!repoValidation.ok) {
+    return { ok: false, error: repoValidation.error || '허용되지 않은 저장소 경로입니다.' };
+  }
+  const root = repoValidation.repoRoot;
+
+  if (!validateSessionId(options.sessionId)) {
+    return { ok: false, error: '유효하지 않은 대화 세션 식별자입니다.' };
+  }
+
+  const session = await getConversationSession(options.sessionId, root);
+  if (!session) {
+    return { ok: false, error: '대화 세션을 찾을 수 없습니다.' };
+  }
+
+  // Locate the approval to process
+  let targetApproval: ConversationApproval | undefined;
+  if (session.pendingApproval && (!options.approvalId || session.pendingApproval.approvalId === options.approvalId)) {
+    targetApproval = session.pendingApproval;
+  } else if (options.approvalId) {
+    targetApproval = session.messages.find(m => m.approval?.approvalId === options.approvalId)?.approval;
+    if (!targetApproval && session.lastApproval?.approvalId === options.approvalId) {
+      targetApproval = session.lastApproval;
+    }
+  }
+
+  if (!targetApproval) {
+    return { ok: false, error: '승인 대기 중인 작업 계획을 찾을 수 없습니다.' };
+  }
+
+  // If already approved, return idempotent success without calling spawnRouterRun
+  if (targetApproval.status === 'approved' && targetApproval.runId) {
+    return {
+      ok: true,
+      runId: targetApproval.runId,
+      isDuplicate: true,
+      approval: targetApproval,
+      session,
+    };
+  }
+
+  const key = options.idempotencyKey || targetApproval.idempotencyKey;
+  if (key) {
+    const existing = await getIdempotencyRecord(key, root);
+    if (existing) {
+      targetApproval.status = 'approved';
+      targetApproval.runId = existing.runId;
+      targetApproval.approvedAt = targetApproval.approvedAt || new Date().toISOString();
+      session.pendingApproval = undefined;
+      session.lastApproval = targetApproval;
+      if (!session.linkedRunIds.includes(existing.runId)) {
+        session.linkedRunIds.push(existing.runId);
+      }
+      await saveConversationSession(session, root);
+      return {
+        ok: true,
+        runId: existing.runId,
+        isDuplicate: true,
+        approval: targetApproval,
+        session,
+      };
+    }
+  }
+
+  try {
+    const result = await spawnRouterRun({
+      prompt: targetApproval.prompt,
+      idempotencyKey: key,
+      repoRoot: root,
+      spawner: options.spawner,
+      env: options.env,
+      toolOverrides: options.toolOverrides,
+    });
+
+    targetApproval.status = 'approved';
+    targetApproval.runId = result.runId;
+    targetApproval.approvedAt = new Date().toISOString();
+    session.pendingApproval = undefined;
+    session.lastApproval = targetApproval;
+    if (!session.linkedRunIds.includes(result.runId)) {
+      session.linkedRunIds.push(result.runId);
+    }
+
+    session.messages.push({
+      id: `msg-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
+      sender: 'codex',
+      text: `작업 실행이 승인되었습니다. 백그라운드 라우터에서 Run (${result.runId})을 시작했습니다.`,
+      timestamp: new Date().toISOString(),
+      approval: targetApproval,
+    });
+    session.updatedAt = new Date().toISOString();
+
+    await saveConversationSession(session, root);
+
+    return {
+      ok: true,
+      runId: result.runId,
+      isDuplicate: result.isDuplicate,
+      approval: targetApproval,
+      session,
+    };
+  } catch (err: unknown) {
+    const rawMsg = err instanceof Error ? err.message : String(err);
+    const sanitized = sanitizeText(rawMsg, root);
+    targetApproval.status = 'failed';
+    targetApproval.error = sanitized;
+    session.updatedAt = new Date().toISOString();
+    await saveConversationSession(session, root);
+    return {
+      ok: false,
+      error: sanitized,
+      approval: targetApproval,
+      session,
+    };
   }
 }
 
