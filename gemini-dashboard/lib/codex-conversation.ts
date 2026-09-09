@@ -86,7 +86,7 @@ function resolveCodexExecutable(options: EvaluateConversationOptions): string | 
  */
 export async function defaultCodexRunner(params: CodexRunnerParams): Promise<CodexRunnerResult> {
   return new Promise((resolve, reject) => {
-    const timeoutMs = params.timeoutMs || 15000;
+    const timeoutMs = params.timeoutMs || 120000;
     let timedOut = false;
     let child: ReturnType<typeof spawn>;
 
@@ -96,7 +96,9 @@ export async function defaultCodexRunner(params: CodexRunnerParams): Promise<Cod
         env: params.env || process.env,
         shell: false,
         windowsHide: true,
-        stdio: ['pipe', 'pipe', 'pipe'],
+        // The prompt is supplied as an argument. Keeping stdin as a pipe makes
+        // `codex exec` wait for an additional stdin EOF before it can finish.
+        stdio: ['ignore', 'pipe', 'pipe'],
       });
     } catch (err: unknown) {
       return reject(err);
@@ -339,7 +341,7 @@ export async function evaluateCodexConversation(
         ...process.env,
         ...options.env,
       },
-      timeoutMs: options.timeoutMs || 15000,
+      timeoutMs: options.timeoutMs || 120000,
     });
 
     if (result.exitCode !== 0) {
