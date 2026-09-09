@@ -5,12 +5,15 @@ import path from 'node:path';
 import os from 'node:os';
 // @ts-expect-error TS5097 allowed for test runner
 import { GET as getProjectWorkers } from './route.ts';
+// @ts-expect-error TS5097 allowed for test runner
+import { STALE_PROCESS_MISMATCH_REASON, setGlobalLivenessOptions, resetGlobalLivenessOptions } from '../../../../../lib/process-liveness.ts';
 
 void describe('/api/projects/[projectId]/workers API Route Handlers', () => {
   let testRepoDir: string;
   let savedAllowedRepo: string | undefined;
 
   beforeEach(() => {
+    resetGlobalLivenessOptions();
     savedAllowedRepo = process.env.ALLOWED_REPO_ROOT;
     testRepoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'workers-api-test-'));
     process.env.ALLOWED_REPO_ROOT = testRepoDir;
@@ -21,6 +24,7 @@ void describe('/api/projects/[projectId]/workers API Route Handlers', () => {
   });
 
   afterEach(() => {
+    resetGlobalLivenessOptions();
     if (savedAllowedRepo !== undefined) {
       process.env.ALLOWED_REPO_ROOT = savedAllowedRepo;
     } else {
@@ -199,5 +203,136 @@ void describe('/api/projects/[projectId]/workers API Route Handlers', () => {
     const data = await res.json() as { ok: boolean; error: string };
     assert.strictEqual(data.ok, false);
     assert.ok(data.error.includes('유효하지 않은'));
+  });
+
+  void test('excludes stale worker with dead PID from activeWorkers and places in historyWorkers', async () => {
+    const staleRunId = '20260909-PROJ-STALE-01';
+    const oldTime = new Date(Date.now() - 180_000).toISOString(); // 3 minutes ago
+
+    fs.writeFileSync(
+      path.join(testRepoDir, '.agent', 'dashboard-state', 'compact', `${staleRunId}.json`),
+      JSON.stringify({
+        runId: staleRunId,
+        prompt: '죽은 워커 관제 작업',
+        createdAt: oldTime,
+        updatedAt: oldTime,
+        status: 'running',
+        requiresUserAction: false,
+        tasksCount: 1,
+        activeWorkersCount: 1,
+        completedTasksCount: 0,
+        orchestratorProcessId: 99999999, // dead PID
+      }),
+      'utf8'
+    );
+
+    const req = new Request('http://localhost:3000/api/projects/current/workers');
+    const res = await getProjectWorkers(req, {
+      params: Promise.resolve({ projectId: 'current' }),
+    });
+
+    assert.strictEqual(res.status, 200);
+    const data = await res.json() as {
+      ok: boolean;
+      activeWorkers: Array<{ runId: string; status: string }>;
+      historyWorkers: Array<{ runId: string; status: string; error?: string }>;
+    };
+
+    assert.strictEqual(data.ok, true);
+    // Stale worker must NOT be present in activeWorkers
+    assert.strictEqual(data.activeWorkers.some((w) => w.runId === staleRunId), false);
+
+    // Stale worker must appear in historyWorkers with status failed
+    const historyWorker = data.historyWorkers.find((w) => w.runId === staleRunId);
+    assert.ok(historyWorker);
+    assert.strictEqual(historyWorker.status, 'failed');
+    assert.strictEqual(historyWorker.error, STALE_PROCESS_MISMATCH_REASON);
+  });
+
+  void test('excludes stale worker with reused/unrelated PID from activeWorkers', async () => {
+    const reusedRunId = '20260909-PROJ-REUSED-01';
+    const oldTime = new Date(Date.now() - 180_000).toISOString();
+
+    fs.writeFileSync(
+      path.join(testRepoDir, '.agent', 'dashboard-state', 'compact', `${reusedRunId}.json`),
+      JSON.stringify({
+        runId: reusedRunId,
+        prompt: '재사용 PID 관제 작업',
+        createdAt: oldTime,
+        updatedAt: oldTime,
+        status: 'running',
+        requiresUserAction: false,
+        tasksCount: 1,
+        activeWorkersCount: 1,
+        completedTasksCount: 0,
+        orchestratorProcessId: 5566,
+      }),
+      'utf8'
+    );
+
+    setGlobalLivenessOptions({
+      processInfoResolver: (pid) => ({
+        pid,
+        alive: true,
+        name: 'notepad.exe',
+        command: 'notepad.exe C:\\other.txt',
+        metadataAvailable: true,
+      }),
+    });
+
+    const req = new Request('http://localhost:3000/api/projects/current/workers');
+    const res = await getProjectWorkers(req, {
+      params: Promise.resolve({ projectId: 'current' }),
+    });
+
+    assert.strictEqual(res.status, 200);
+    const data = await res.json() as {
+      ok: boolean;
+      activeWorkers: Array<{ runId: string; status: string }>;
+      historyWorkers: Array<{ runId: string; status: string; error?: string }>;
+    };
+
+    assert.strictEqual(data.ok, true);
+    assert.strictEqual(data.activeWorkers.some((w) => w.runId === reusedRunId), false);
+
+    const historyWorker = data.historyWorkers.find((w) => w.runId === reusedRunId);
+    assert.ok(historyWorker);
+    assert.strictEqual(historyWorker.status, 'failed');
+  });
+
+  void test('retains newly launched run inside grace period in activeWorkers', async () => {
+    const newRunId = '20260909-PROJ-GRACE-01';
+    const recentTime = new Date(Date.now() - 5_000).toISOString(); // 5 seconds ago (< 30s)
+
+    fs.writeFileSync(
+      path.join(testRepoDir, '.agent', 'dashboard-state', 'compact', `${newRunId}.json`),
+      JSON.stringify({
+        runId: newRunId,
+        prompt: '새로 시작된 관제 작업',
+        createdAt: recentTime,
+        updatedAt: recentTime,
+        status: 'running',
+        requiresUserAction: false,
+        tasksCount: 1,
+        activeWorkersCount: 1,
+        completedTasksCount: 0,
+        orchestratorProcessId: 99999999, // dead PID before manifest written
+      }),
+      'utf8'
+    );
+
+    const req = new Request('http://localhost:3000/api/projects/current/workers');
+    const res = await getProjectWorkers(req, {
+      params: Promise.resolve({ projectId: 'current' }),
+    });
+
+    assert.strictEqual(res.status, 200);
+    const data = await res.json() as {
+      ok: boolean;
+      activeWorkers: Array<{ runId: string; status: string }>;
+    };
+
+    assert.strictEqual(data.ok, true);
+    assert.ok(data.activeWorkers.some((w) => w.runId === newRunId && w.status === 'running'));
   });
 });

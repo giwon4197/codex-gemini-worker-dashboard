@@ -7,12 +7,15 @@ import os from 'node:os';
 import { GET as listRuns, POST as createRun } from './route.ts';
 // @ts-expect-error TS5097 allowed for test runner
 import { GET as getRunDetail } from './[runId]/route.ts';
+// @ts-expect-error TS5097 allowed for test runner
+import { STALE_PROCESS_MISMATCH_REASON, setGlobalLivenessOptions, resetGlobalLivenessOptions } from '../../../lib/process-liveness.ts';
 
 void describe('/api/runs API Route Handlers', () => {
   let testRepoDir: string;
   let savedAllowedRepo: string | undefined;
 
   beforeEach(() => {
+    resetGlobalLivenessOptions();
     savedAllowedRepo = process.env.ALLOWED_REPO_ROOT;
     testRepoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'runs-api-test-'));
     process.env.ALLOWED_REPO_ROOT = testRepoDir;
@@ -24,6 +27,7 @@ void describe('/api/runs API Route Handlers', () => {
   });
 
   afterEach(() => {
+    resetGlobalLivenessOptions();
     if (savedAllowedRepo !== undefined) {
       process.env.ALLOWED_REPO_ROOT = savedAllowedRepo;
     } else {
@@ -293,6 +297,211 @@ void describe('/api/runs API Route Handlers', () => {
           delete process.env.ALLOWED_REPO_ROOT;
         }
       }
+    });
+  });
+
+  void describe('Process Evidence Checking & Stale Run Correction (GET /api/runs & GET /api/runs/[runId])', () => {
+    void test('GET /api/runs returns corrected failed state and visible mismatch reason for fake-running compact run', async () => {
+      const staleRunId = '20260909-API-STALE-RUN-01';
+      const oldTime = new Date(Date.now() - 300_000).toISOString(); // 5 minutes ago
+
+      // Write legacy compact state directly to disk as 'running'
+      fs.writeFileSync(
+        path.join(testRepoDir, '.agent', 'dashboard-state', 'compact', `${staleRunId}.json`),
+        JSON.stringify({
+          runId: staleRunId,
+          prompt: '가짜 실행 중인 레거시 작업',
+          createdAt: oldTime,
+          updatedAt: oldTime,
+          status: 'running',
+          requiresUserAction: false,
+          tasksCount: 1,
+          activeWorkersCount: 1,
+          completedTasksCount: 0,
+          orchestratorProcessId: 99999999, // dead PID
+        }),
+        'utf8'
+      );
+
+      const res = await listRuns();
+      assert.strictEqual(res.status, 200);
+      const data = await res.json() as {
+        ok: boolean;
+        runs: Array<{
+          runId: string;
+          status: string;
+          activeWorkersCount: number;
+          error?: string;
+          userActionReason?: string;
+        }>;
+      };
+
+      assert.strictEqual(data.ok, true);
+      const correctedRun = data.runs.find((r) => r.runId === staleRunId);
+      assert.ok(correctedRun);
+      assert.strictEqual(correctedRun.status, 'failed');
+      assert.strictEqual(correctedRun.activeWorkersCount, 0);
+      assert.strictEqual(correctedRun.error, STALE_PROCESS_MISMATCH_REASON);
+      assert.strictEqual(correctedRun.userActionReason, STALE_PROCESS_MISMATCH_REASON);
+
+      // Verify atomically persisted as failed on disk (not deleted)
+      const onDisk = JSON.parse(
+        fs.readFileSync(
+          path.join(testRepoDir, '.agent', 'dashboard-state', 'compact', `${staleRunId}.json`),
+          'utf8'
+        )
+      ) as { status: string; activeWorkersCount: number; error: string };
+      assert.strictEqual(onDisk.status, 'failed');
+      assert.strictEqual(onDisk.activeWorkersCount, 0);
+      assert.strictEqual(onDisk.error, STALE_PROCESS_MISMATCH_REASON);
+    });
+
+    void test('GET /api/runs/[runId] evaluates process liveness and corrects dead PID with no workers to failed', async () => {
+      const staleRunId = '20260909-API-DETAIL-STALE-01';
+      const oldTime = new Date(Date.now() - 300_000).toISOString();
+
+      fs.writeFileSync(
+        path.join(testRepoDir, '.agent', 'dashboard-state', 'compact', `${staleRunId}.json`),
+        JSON.stringify({
+          runId: staleRunId,
+          prompt: '세부 조회 좀비 작업',
+          createdAt: oldTime,
+          updatedAt: oldTime,
+          status: 'running',
+          requiresUserAction: false,
+          tasksCount: 1,
+          activeWorkersCount: 1,
+          completedTasksCount: 0,
+          orchestratorProcessId: 99999999,
+        }),
+        'utf8'
+      );
+
+      const req = new Request(`http://localhost:3000/api/runs/${staleRunId}`);
+      const res = await getRunDetail(req, {
+        params: Promise.resolve({ runId: staleRunId }),
+      });
+
+      assert.strictEqual(res.status, 200);
+      const data = await res.json() as {
+        ok: boolean;
+        run: {
+          runId: string;
+          status: string;
+          activeWorkersCount: number;
+          activeWorkers: unknown[];
+          historyWorkers: Array<{ status: string; error?: string }>;
+          error?: string;
+          userActionReason?: string;
+        };
+      };
+
+      assert.strictEqual(data.ok, true);
+      assert.strictEqual(data.run.status, 'failed');
+      assert.strictEqual(data.run.activeWorkersCount, 0);
+      assert.strictEqual(data.run.activeWorkers.length, 0);
+      assert.strictEqual(data.run.historyWorkers.length, 1);
+      assert.strictEqual(data.run.historyWorkers[0].status, 'failed');
+      assert.strictEqual(data.run.error, STALE_PROCESS_MISMATCH_REASON);
+      assert.strictEqual(data.run.userActionReason, STALE_PROCESS_MISMATCH_REASON);
+    });
+
+    void test('GET /api/runs/[runId] rejects reused/unrelated PID and returns failed with visible mismatch reason', async () => {
+      const reusedRunId = '20260909-API-REUSED-PID-01';
+      const oldTime = new Date(Date.now() - 300_000).toISOString();
+
+      fs.writeFileSync(
+        path.join(testRepoDir, '.agent', 'dashboard-state', 'compact', `${reusedRunId}.json`),
+        JSON.stringify({
+          runId: reusedRunId,
+          prompt: 'PID 재사용 감지 작업',
+          createdAt: oldTime,
+          updatedAt: oldTime,
+          status: 'running',
+          requiresUserAction: false,
+          tasksCount: 1,
+          activeWorkersCount: 1,
+          completedTasksCount: 0,
+          orchestratorProcessId: 3344,
+        }),
+        'utf8'
+      );
+
+      // Configure mock process resolver returning an unrelated process (e.g. calculator)
+      setGlobalLivenessOptions({
+        processInfoResolver: (pid) => ({
+          pid,
+          alive: true,
+          name: 'calculator.exe',
+          command: 'calc.exe',
+          metadataAvailable: true,
+        }),
+      });
+
+      const req = new Request(`http://localhost:3000/api/runs/${reusedRunId}`);
+      const res = await getRunDetail(req, {
+        params: Promise.resolve({ runId: reusedRunId }),
+      });
+
+      assert.strictEqual(res.status, 200);
+      const data = await res.json() as {
+        ok: boolean;
+        run: {
+          status: string;
+          activeWorkersCount: number;
+          activeWorkers: unknown[];
+          error?: string;
+          userActionReason?: string;
+        };
+      };
+
+      assert.strictEqual(data.ok, true);
+      assert.strictEqual(data.run.status, 'failed');
+      assert.strictEqual(data.run.activeWorkersCount, 0);
+      assert.strictEqual(data.run.activeWorkers.length, 0);
+      assert.strictEqual(data.run.error, STALE_PROCESS_MISMATCH_REASON);
+      assert.strictEqual(data.run.userActionReason, STALE_PROCESS_MISMATCH_REASON);
+    });
+
+    void test('GET /api/runs/[runId] keeps newly launched run inside grace period active', async () => {
+      const newRunId = '20260909-API-NEW-GRACE-01';
+      const recentTime = new Date(Date.now() - 5_000).toISOString(); // 5 seconds ago (< 30s grace)
+
+      fs.writeFileSync(
+        path.join(testRepoDir, '.agent', 'dashboard-state', 'compact', `${newRunId}.json`),
+        JSON.stringify({
+          runId: newRunId,
+          prompt: '새로 시작된 작업 (grace 보호)',
+          createdAt: recentTime,
+          updatedAt: recentTime,
+          status: 'running',
+          requiresUserAction: false,
+          tasksCount: 1,
+          activeWorkersCount: 1,
+          completedTasksCount: 0,
+          orchestratorProcessId: 99999999,
+        }),
+        'utf8'
+      );
+
+      const req = new Request(`http://localhost:3000/api/runs/${newRunId}`);
+      const res = await getRunDetail(req, {
+        params: Promise.resolve({ runId: newRunId }),
+      });
+
+      assert.strictEqual(res.status, 200);
+      const data = await res.json() as {
+        ok: boolean;
+        run: {
+          status: string;
+          activeWorkersCount: number;
+          activeWorkers: unknown[];
+        };
+      };
+
+      assert.strictEqual(data.ok, true);
+      assert.strictEqual(data.run.status, 'running');
+      assert.strictEqual(data.run.activeWorkers.length, 1);
     });
   });
 });

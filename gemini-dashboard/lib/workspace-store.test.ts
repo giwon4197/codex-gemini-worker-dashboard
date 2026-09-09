@@ -4,7 +4,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 // @ts-expect-error TS5097 allowed for test runner
-import { validateRunId, validateRepository, validatePrompt, generateRunId, spawnRouterRun, getCompactRunState, saveCompactRunState, listCompactRuns, getProjectWorkers, resolveRequiredTools, getRunDetails, getAliasRecord, findAndLinkActualRun } from './workspace-store.ts';
+import { validateRunId, validateRepository, validatePrompt, generateRunId, spawnRouterRun, getCompactRunState, saveCompactRunState, listCompactRuns, getProjectWorkers, resolveRequiredTools, getRunDetails, getAliasRecord, findAndLinkActualRun, STALE_PROCESS_MISMATCH_REASON } from './workspace-store.ts';
+import type { CompactRunState } from './workspace-contract.ts';
 
 void describe('Workspace Store (Idempotency, Path Traversal, & Recovery)', () => {
   let testTempDir: string;
@@ -552,6 +553,270 @@ void describe('Workspace Store (Idempotency, Path Traversal, & Recovery)', () =>
 
       // Clean up child process
       try { realChild.kill(); } catch {}
+    });
+  });
+
+  void describe('Process Evidence & Stale Compact State Correction (Criterion 1-7)', () => {
+    void test('dead PID plus no worker evidence yields activeWorkers 0 and a preserved failed record', async () => {
+      const runId = '20260909-dead-worker-001';
+      const createdAt = new Date(Date.now() - 120_000).toISOString(); // 2 minutes ago (outside grace)
+
+      await saveCompactRunState(
+        {
+          runId,
+          prompt: '죽은 프로세스 작업',
+          createdAt,
+          updatedAt: createdAt,
+          status: 'running',
+          requiresUserAction: false,
+          tasksCount: 1,
+          activeWorkersCount: 1,
+          completedTasksCount: 0,
+          orchestratorProcessId: 99999999, // dead PID
+        },
+        testTempDir
+      );
+
+      // 1. Calling getRunDetails must correct the state and return failed
+      const detail = await getRunDetails(runId, testTempDir, {
+        processInfoResolver: () => ({ pid: 99999999, alive: false, metadataAvailable: true }),
+      });
+      assert.ok(detail);
+      assert.strictEqual(detail.status, 'failed');
+      assert.strictEqual(detail.activeWorkersCount, 0);
+      assert.strictEqual(detail.activeWorkers.length, 0);
+      assert.strictEqual(detail.historyWorkers.length, 1);
+      assert.strictEqual(detail.historyWorkers[0].status, 'failed');
+      assert.strictEqual(detail.error, STALE_PROCESS_MISMATCH_REASON);
+      assert.strictEqual(detail.userActionReason, STALE_PROCESS_MISMATCH_REASON);
+
+      // 2. Legacy record was preserved (not deleted) and persisted atomically as failed
+      const onDisk = await getCompactRunState(runId, testTempDir);
+      assert.ok(onDisk);
+      assert.strictEqual(onDisk.status, 'failed');
+      assert.strictEqual(onDisk.activeWorkersCount, 0);
+      assert.strictEqual(onDisk.error, STALE_PROCESS_MISMATCH_REASON);
+      assert.strictEqual(onDisk.userActionReason, STALE_PROCESS_MISMATCH_REASON);
+    });
+
+    void test('valid live router PID or real active-worker evidence remains active', async () => {
+      const runId = '20260909-live-evidence-001';
+      const createdAt = new Date(Date.now() - 120_000).toISOString();
+
+      // Case A: Valid live router PID
+      await saveCompactRunState(
+        {
+          runId,
+          prompt: '실제 라우터 작업',
+          createdAt,
+          updatedAt: createdAt,
+          status: 'running',
+          requiresUserAction: false,
+          tasksCount: 1,
+          activeWorkersCount: 1,
+          completedTasksCount: 0,
+          orchestratorProcessId: 5432,
+        },
+        testTempDir
+      );
+
+      const detailWithLivePid = await getRunDetails(runId, testTempDir, {
+        processInfoResolver: (pid) => ({
+          pid,
+          alive: true,
+          command: `pwsh.exe -File ${testTempDir}\\codex-router.ps1 -Request 작업`,
+          metadataAvailable: true,
+        }),
+      });
+      assert.ok(detailWithLivePid);
+      assert.strictEqual(detailWithLivePid.status, 'running');
+      assert.strictEqual(detailWithLivePid.activeWorkers.length, 1);
+
+      // Case B: Dead PID but real active-worker file exists
+      const workerRunId = '20260909-live-worker-002';
+      const workerDir = path.join(testTempDir, '.agent', 'runs', workerRunId, 'workers');
+      fs.mkdirSync(workerDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(workerDir, 'TASK-001.json'),
+        JSON.stringify({
+          runId: workerRunId,
+          taskId: 'TASK-001',
+          status: 'running',
+          startedAt: createdAt,
+          updatedAt: new Date().toISOString(),
+        }),
+        'utf8'
+      );
+
+      await saveCompactRunState(
+        {
+          runId: workerRunId,
+          actualRunId: workerRunId,
+          prompt: '워커 활성 작업',
+          createdAt,
+          updatedAt: createdAt,
+          status: 'running',
+          requiresUserAction: false,
+          tasksCount: 1,
+          activeWorkersCount: 1,
+          completedTasksCount: 0,
+          orchestratorProcessId: 99999999, // dead PID
+        },
+        testTempDir
+      );
+
+      const detailWithWorker = await getRunDetails(workerRunId, testTempDir, {
+        processInfoResolver: () => ({ pid: 99999999, alive: false, metadataAvailable: true }),
+      });
+      assert.ok(detailWithWorker);
+      assert.strictEqual(detailWithWorker.status, 'running');
+      assert.strictEqual(detailWithWorker.activeWorkers.length, 1);
+    });
+
+    void test('reused/unrelated PID is NOT accepted as active', async () => {
+      const runId = '20260909-reused-pid-test';
+      const createdAt = new Date(Date.now() - 120_000).toISOString();
+
+      await saveCompactRunState(
+        {
+          runId,
+          prompt: '재사용 PID 작업',
+          createdAt,
+          updatedAt: createdAt,
+          status: 'running',
+          requiresUserAction: false,
+          tasksCount: 1,
+          activeWorkersCount: 1,
+          completedTasksCount: 0,
+          orchestratorProcessId: 9988,
+        },
+        testTempDir
+      );
+
+      const detail = await getRunDetails(runId, testTempDir, {
+        processInfoResolver: (pid) => ({
+          pid,
+          alive: true,
+          name: 'notepad.exe',
+          command: 'notepad.exe C:\\other.txt',
+          metadataAvailable: true,
+        }),
+      });
+
+      assert.ok(detail);
+      assert.strictEqual(detail.status, 'failed');
+      assert.strictEqual(detail.activeWorkersCount, 0);
+      assert.strictEqual(detail.activeWorkers.length, 0);
+      assert.strictEqual(detail.error, STALE_PROCESS_MISMATCH_REASON);
+    });
+
+    void test('new run inside grace period remains active', async () => {
+      const runId = '20260909-new-grace-test';
+      const createdAt = new Date(Date.now() - 5_000).toISOString(); // 5 seconds ago (< 30s)
+
+      await saveCompactRunState(
+        {
+          runId,
+          prompt: '방금 시작된 작업',
+          createdAt,
+          updatedAt: createdAt,
+          status: 'running',
+          requiresUserAction: false,
+          tasksCount: 1,
+          activeWorkersCount: 1,
+          completedTasksCount: 0,
+          orchestratorProcessId: 99999999, // dead PID before manifest written
+        },
+        testTempDir
+      );
+
+      const detail = await getRunDetails(runId, testTempDir, {
+        processInfoResolver: () => ({ pid: 99999999, alive: false, metadataAvailable: true }),
+      });
+
+      assert.ok(detail);
+      assert.strictEqual(detail.status, 'running');
+      assert.strictEqual(detail.activeWorkers.length, 1);
+    });
+
+    void test('legacy fake-running compact state is corrected on API read and persisted atomically', async () => {
+      const legacyRunId = '20260909-legacy-fake-01';
+      const oldTime = '2026-09-08T10:00:00.000Z'; // long ago
+
+      // Write legacy compact state directly to disk as 'running'
+      fs.writeFileSync(
+        path.join(testTempDir, '.agent', 'dashboard-state', 'compact', `${legacyRunId}.json`),
+        JSON.stringify({
+          runId: legacyRunId,
+          prompt: '레거시 가짜 실행 상태',
+          createdAt: oldTime,
+          updatedAt: oldTime,
+          status: 'running',
+          requiresUserAction: false,
+          tasksCount: 1,
+          activeWorkersCount: 1,
+          completedTasksCount: 0,
+          orchestratorProcessId: 1111,
+        }),
+        'utf8'
+      );
+
+      // Call listCompactRuns
+      const runs = await listCompactRuns(testTempDir, {
+        processInfoResolver: () => ({ pid: 1111, alive: false, metadataAvailable: true }),
+      });
+
+      const found = runs.find((r) => r.runId === legacyRunId);
+      assert.ok(found);
+      assert.strictEqual(found.status, 'failed');
+      assert.strictEqual(found.activeWorkersCount, 0);
+      assert.strictEqual(found.error, STALE_PROCESS_MISMATCH_REASON);
+      assert.strictEqual(found.userActionReason, STALE_PROCESS_MISMATCH_REASON);
+
+      // Check on disk to ensure it was atomically persisted as failed
+      const onDisk = JSON.parse(
+        fs.readFileSync(
+          path.join(testTempDir, '.agent', 'dashboard-state', 'compact', `${legacyRunId}.json`),
+          'utf8'
+        )
+      ) as CompactRunState;
+      assert.strictEqual(onDisk.status, 'failed');
+      assert.strictEqual(onDisk.activeWorkersCount, 0);
+      assert.strictEqual(onDisk.error, STALE_PROCESS_MISMATCH_REASON);
+    });
+
+    void test('getProjectWorkers excludes stale workers from activeWorkers and places in history', async () => {
+      const staleRunId = '20260909-stale-project-01';
+      const oldTime = '2026-09-08T12:00:00.000Z';
+
+      await saveCompactRunState(
+        {
+          runId: staleRunId,
+          prompt: '프로젝트 관제 좀비 작업',
+          createdAt: oldTime,
+          updatedAt: oldTime,
+          status: 'running',
+          requiresUserAction: false,
+          tasksCount: 1,
+          activeWorkersCount: 1,
+          completedTasksCount: 0,
+          orchestratorProcessId: 2222,
+        },
+        testTempDir
+      );
+
+      const { activeWorkers, historyWorkers } = await getProjectWorkers(testTempDir, {
+        processInfoResolver: () => ({ pid: 2222, alive: false, metadataAvailable: true }),
+      });
+
+      // activeWorkers must NOT contain this stale worker
+      assert.strictEqual(activeWorkers.some((w) => w.runId === staleRunId), false);
+
+      // historyWorkers must contain this worker with status failed
+      const staleWorker = historyWorkers.find((w) => w.runId === staleRunId);
+      assert.ok(staleWorker);
+      assert.strictEqual(staleWorker.status, 'failed');
+      assert.strictEqual(staleWorker.error, STALE_PROCESS_MISMATCH_REASON);
     });
   });
 });

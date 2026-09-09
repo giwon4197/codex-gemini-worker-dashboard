@@ -16,6 +16,12 @@ import type {
 import { normalizeRunStatus, normalizeWorkerStatus, isWorkerActive, requiresUserAction, getUserActionReason, extractTimelineEvents, validateSessionId } from './workspace-contract.ts';
 // @ts-expect-error TS5097 allowed for test runner
 import { sanitizeText, sanitizeWorkerData } from './workspace-sanitize.ts';
+// @ts-expect-error TS5097 allowed for test runner
+import { evaluateRunLiveness, STALE_PROCESS_MISMATCH_REASON } from './process-liveness.ts';
+import type { LivenessOptions } from './process-liveness.ts';
+
+export { STALE_PROCESS_MISMATCH_REASON };
+export type { LivenessOptions };
 
 export interface IdempotencyRecord {
   idempotencyKey: string;
@@ -815,7 +821,10 @@ export async function findAndLinkActualRun(
  * so that state is seamlessly recovered across server restarts and page reloads.
  * Merges linked dashboard runs and actual worker runs without duplicates.
  */
-export async function listCompactRuns(repoRoot?: string): Promise<CompactRunState[]> {
+export async function listCompactRuns(
+  repoRoot?: string,
+  livenessOptions?: LivenessOptions
+): Promise<CompactRunState[]> {
   const root = repoRoot || getAllowedRepoRoot();
   const runsMap = new Map<string, CompactRunState>();
   const handledActualRuns = new Set<string>();
@@ -864,7 +873,14 @@ export async function listCompactRuns(repoRoot?: string): Promise<CompactRunStat
           }
         }
 
-        runsMap.set(runId, parsed);
+        // Evaluate liveness for active compact run
+        const evalResult = await evaluateRunLiveness(parsed, root, actualRunId, livenessOptions);
+        if (evalResult.wasCorrected && evalResult.updatedCompact) {
+          await saveCompactRunState(evalResult.updatedCompact, root);
+          runsMap.set(runId, evalResult.updatedCompact);
+        } else {
+          runsMap.set(runId, parsed);
+        }
       } catch {
         // Ignore corrupted file
       }
@@ -919,7 +935,14 @@ export async function listCompactRuns(repoRoot?: string): Promise<CompactRunStat
           orchestratorProcessId: manifest.orchestratorProcessId || existing?.orchestratorProcessId,
         };
 
-        runsMap.set(folder, recovered);
+        // Evaluate liveness for recovered unaliased active run
+        const evalResult = await evaluateRunLiveness(recovered, root, folder, livenessOptions);
+        if (evalResult.wasCorrected && evalResult.updatedCompact) {
+          await saveCompactRunState(evalResult.updatedCompact, root);
+          runsMap.set(folder, evalResult.updatedCompact);
+        } else {
+          runsMap.set(folder, recovered);
+        }
       } catch {
         // Not a valid run folder or unreadable
       }
@@ -1129,7 +1152,8 @@ export async function spawnRouterRun(options: {
  */
 export async function getRunDetails(
   runId: string,
-  repoRoot?: string
+  repoRoot?: string,
+  livenessOptions?: LivenessOptions
 ): Promise<RunDetail | null> {
   if (!validateRunId(runId)) {
     return null;
@@ -1142,7 +1166,7 @@ export async function getRunDetails(
   const effectiveRunId = actualRunId || runId;
 
   const runDir = path.join(root, '.agent', 'runs', effectiveRunId);
-  const compact =
+  let compact =
     (await getCompactRunState(runId, root)) ||
     (actualRunId ? await getCompactRunState(actualRunId, root) : null);
   const alias =
@@ -1171,11 +1195,51 @@ export async function getRunDetails(
     return null;
   }
 
+  let isStaleMismatch = compact?.error === STALE_PROCESS_MISMATCH_REASON;
+  if (compact) {
+    const evalResult = await evaluateRunLiveness(compact, root, actualRunId, livenessOptions);
+    if (evalResult.wasCorrected && evalResult.updatedCompact) {
+      await saveCompactRunState(evalResult.updatedCompact, root);
+      compact = evalResult.updatedCompact;
+      isStaleMismatch = true;
+    }
+  } else if (manifest) {
+    const normManifestStatus = normalizeRunStatus(manifest.status);
+    const isManifestActive =
+      normManifestStatus === 'running' ||
+      normManifestStatus === 'planning' ||
+      normManifestStatus === 'pending';
+
+    if (isManifestActive) {
+      const pseudoCompact: CompactRunState = {
+        runId,
+        actualRunId: effectiveRunId,
+        prompt: alias?.prompt || `작업 (${runId})`,
+        createdAt: manifest.createdAt || new Date().toISOString(),
+        updatedAt: manifest.updatedAt || new Date().toISOString(),
+        status: normManifestStatus,
+        requiresUserAction: false,
+        tasksCount: Array.isArray(manifest.tasks) ? manifest.tasks.length : 1,
+        activeWorkersCount: normManifestStatus === 'running' ? 1 : 0,
+        completedTasksCount: 0,
+        orchestratorProcessId: manifest.orchestratorProcessId,
+      };
+      const evalResult = await evaluateRunLiveness(pseudoCompact, root, actualRunId, livenessOptions);
+      if (evalResult.wasCorrected && evalResult.updatedCompact) {
+        await saveCompactRunState(evalResult.updatedCompact, root);
+        compact = evalResult.updatedCompact;
+        isStaleMismatch = true;
+      }
+    }
+  }
+
   const now = new Date().toISOString();
   const prompt = alias?.prompt || compact?.prompt || `작업 (${runId})`;
   const createdAt = manifest?.createdAt || compact?.createdAt || now;
   const updatedAt = manifest?.updatedAt || compact?.updatedAt || now;
-  const rawStatus = manifest?.status || compact?.status || 'running';
+  const rawStatus = isStaleMismatch
+    ? 'failed'
+    : (manifest?.status || compact?.status || 'running');
   const status = normalizeRunStatus(rawStatus);
 
   const tasks: TaskProgressSummary[] = [];
@@ -1239,11 +1303,12 @@ export async function getRunDetails(
           taskId: tid,
           task: taskName,
           model: 'gemini-3.8-flash',
-          status: status === 'completed' ? 'completed' : 'running',
+          status: status === 'completed' ? 'completed' : status === 'failed' ? 'failed' : 'running',
           startedAt: createdAt,
           updatedAt: updatedAt,
           elapsedSeconds: 0,
           recentLogs: [],
+          error: isStaleMismatch ? STALE_PROCESS_MISMATCH_REASON : undefined,
         };
       }
     }
@@ -1252,8 +1317,12 @@ export async function getRunDetails(
       if (taskName === tid && workerData.task) {
         taskName = workerData.task;
       }
-      // Normalize worker status
-      workerData.status = normalizeWorkerStatus(workerData.status);
+      if (isStaleMismatch) {
+        workerData.status = 'failed';
+        workerData.error = STALE_PROCESS_MISMATCH_REASON;
+      } else {
+        workerData.status = normalizeWorkerStatus(workerData.status);
+      }
       const sanitized = sanitizeWorkerData(workerData, root);
 
       const isActive = isWorkerActive(sanitized.status);
@@ -1291,8 +1360,8 @@ export async function getRunDetails(
         startedAt: sanitized.startedAt,
         updatedAt: sanitized.updatedAt,
         elapsedSeconds: sanitized.elapsedSeconds || 0,
-        requiresUserAction: userAction,
-        userActionReason: actionReason,
+        requiresUserAction: isStaleMismatch ? true : userAction,
+        userActionReason: isStaleMismatch ? STALE_PROCESS_MISMATCH_REASON : actionReason,
         currentStage: taskTimeline[taskTimeline.length - 1]?.stage || 'plan',
         timeline: taskTimeline,
         changedFiles: sanitized.changedFiles,
@@ -1316,8 +1385,10 @@ export async function getRunDetails(
     error: firstWorker?.error,
   });
 
-  const runUserAction = requiresUserAction(status, firstWorker?.escalation);
-  const runActionReason = getUserActionReason(status, firstWorker?.escalation);
+  const runUserAction = isStaleMismatch ? true : requiresUserAction(status, firstWorker?.escalation);
+  const runActionReason = isStaleMismatch
+    ? STALE_PROCESS_MISMATCH_REASON
+    : getUserActionReason(status, firstWorker?.escalation);
 
   // Read agent message / integration review if present
   let agentMessage: string | undefined = firstWorker?.finalResponse || undefined;
@@ -1339,17 +1410,17 @@ export async function getRunDetails(
     requiresUserAction: runUserAction,
     userActionReason: runActionReason,
     tasksCount: tasks.length,
-    activeWorkersCount: activeWorkers.length,
+    activeWorkersCount: isStaleMismatch ? 0 : activeWorkers.length,
     completedTasksCount: historyWorkers.filter(w => w.status === 'completed').length,
     tasks,
-    activeWorkers,
+    activeWorkers: isStaleMismatch ? [] : activeWorkers,
     historyWorkers,
     timeline: overallTimeline,
     agentMessage,
     baseCommit: manifest?.baseCommit || compact?.baseCommit,
     orchestratorProcessId: manifest?.orchestratorProcessId || compact?.orchestratorProcessId,
     integrationBranch: manifest?.integrationBranch,
-    error: compact?.error,
+    error: compact?.error || (isStaleMismatch ? STALE_PROCESS_MISMATCH_REASON : undefined),
   };
 }
 
@@ -1360,10 +1431,11 @@ export async function getRunDetails(
  * Seamlessly tracks real workers across linked runs.
  */
 export async function getProjectWorkers(
-  repoRoot?: string
+  repoRoot?: string,
+  livenessOptions?: LivenessOptions
 ): Promise<{ activeWorkers: LiveWorkerData[]; historyWorkers: LiveWorkerData[] }> {
   const root = repoRoot || getAllowedRepoRoot();
-  const runs = await listCompactRuns(root);
+  const runs = await listCompactRuns(root, livenessOptions);
 
   const activeWorkers: LiveWorkerData[] = [];
   const historyWorkers: LiveWorkerData[] = [];
@@ -1378,7 +1450,7 @@ export async function getProjectWorkers(
 
   // Inspect recent runs (up to 10)
   for (const run of sortedRuns.slice(0, 10)) {
-    const details = await getRunDetails(run.runId, root);
+    const details = await getRunDetails(run.runId, root, livenessOptions);
     if (details) {
       activeWorkers.push(...details.activeWorkers);
       historyWorkers.push(...details.historyWorkers);
