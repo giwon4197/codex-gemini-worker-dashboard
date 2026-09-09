@@ -249,9 +249,14 @@ export async function handleWorkspaceBridgeRequest(
     }
 
     try {
-      const { activeWorkers, historyWorkers } = await getProjectWorkers(activeOptions.repoRoot);
+      const selectedRunId = url.searchParams.get('runId') || undefined;
+      const { activeWorkers, historyWorkers, graph, runs } = await getProjectWorkers(
+        activeOptions.repoRoot,
+        undefined,
+        selectedRunId
+      );
       return Response.json(
-        { ok: true, projectId, activeWorkers, historyWorkers },
+        { ok: true, projectId, activeWorkers, historyWorkers, graph, runs },
         { status: 200, headers: JSON_HEADERS }
       );
     } catch {

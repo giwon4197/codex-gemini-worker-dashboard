@@ -335,4 +335,163 @@ void describe('/api/projects/[projectId]/workers API Route Handlers', () => {
     assert.strictEqual(data.ok, true);
     assert.ok(data.activeWorkers.some((w) => w.runId === newRunId && w.status === 'running'));
   });
+
+  void test('returns additive backward-compatible graph payload reconstructed from durable run files', async () => {
+    const runId = '20260910-PROJ-GRAPH-01';
+    const runFolder = path.join(testRepoDir, '.agent', 'runs', runId);
+    fs.mkdirSync(path.join(runFolder, 'tasks'), { recursive: true });
+    fs.mkdirSync(path.join(runFolder, 'workers'), { recursive: true });
+    fs.mkdirSync(path.join(runFolder, 'events'), { recursive: true });
+    fs.mkdirSync(path.join(runFolder, 'results'), { recursive: true });
+
+    // 1. Task file
+    fs.writeFileSync(
+      path.join(runFolder, 'tasks', 'TASK-001.json'),
+      JSON.stringify({
+        id: 'TASK-001',
+        name: '실시간 그래프 구현',
+        prompt: '그래프 컴포넌트 개발',
+      }),
+      'utf8'
+    );
+
+    // 2. Events NDJSON with structured activity
+    fs.writeFileSync(
+      path.join(runFolder, 'events', 'TASK-001.ndjson'),
+      [
+        JSON.stringify({
+          id: `${runId}:TASK-001:branch`,
+          parentId: `${runId}:plan`,
+          activity: 'LOAD',
+          file: 'lib/workspace-contract.ts',
+          timestamp: '2026-09-10T02:00:10Z',
+          message: '워커 시작',
+        }),
+        JSON.stringify({
+          id: `${runId}:TASK-001:act-1`,
+          parentId: `${runId}:TASK-001:branch`,
+          activity: 'EDIT',
+          file: 'components/project-work-graph.tsx',
+          timestamp: '2026-09-10T02:01:00Z',
+          message: '도구 호출: replace_file_content',
+        }),
+        JSON.stringify({
+          id: `${runId}:TASK-001:act-2`,
+          parentId: `${runId}:TASK-001:act-1`,
+          activity: 'DONE',
+          timestamp: '2026-09-10T02:02:00Z',
+          message: '작업 종료: 상태=completed',
+        }),
+      ].join('\n'),
+      'utf8'
+    );
+
+    // 3. Worker final result
+    fs.writeFileSync(
+      path.join(runFolder, 'results', 'TASK-001-result.json'),
+      JSON.stringify({
+        runId,
+        taskId: 'TASK-001',
+        task: '실시간 그래프 구현',
+        status: 'completed',
+        startedAt: '2026-09-10T02:00:10Z',
+        updatedAt: '2026-09-10T02:02:00Z',
+        elapsedSeconds: 110,
+        changedFiles: [`${testRepoDir}\\components\\project-work-graph.tsx`],
+        verification: {
+          decision: 'PASS',
+          commands: [
+            {
+              command: 'npm test',
+              status: 'PASS',
+              exitCode: 0,
+            },
+          ],
+        },
+      }),
+      'utf8'
+    );
+
+    // 4. Integration json
+    fs.writeFileSync(
+      path.join(runFolder, 'integration.json'),
+      JSON.stringify({
+        id: `${runId}:integration`,
+        branch: `integration/${runId}`,
+        decision: 'AWAITING_CODEX_REVIEW',
+        changedFiles: ['components/project-work-graph.tsx'],
+        tests: [
+          {
+            command: 'npm test',
+            status: 'PASS',
+            exitCode: 0,
+          },
+        ],
+      }),
+      'utf8'
+    );
+
+    // 5. Run manifest
+    fs.writeFileSync(
+      path.join(runFolder, 'run.json'),
+      JSON.stringify({
+        runId,
+        prompt: '실시간 프로젝트 작업 그래프 구현 요청',
+        status: 'awaiting_review',
+        createdAt: '2026-09-10T02:00:00Z',
+        updatedAt: '2026-09-10T02:03:00Z',
+        tasks: ['TASK-001'],
+      }),
+      'utf8'
+    );
+
+    const req = new Request(`http://localhost:3000/api/projects/current/workers?runId=${runId}`);
+    const res = await getProjectWorkers(req, {
+      params: Promise.resolve({ projectId: 'current' }),
+    });
+
+    assert.strictEqual(res.status, 200);
+    const data = await res.json() as {
+      ok: boolean;
+      projectId: string;
+      activeWorkers: unknown[];
+      historyWorkers: Array<{ taskId: string; status: string }>;
+      graph: {
+        runId: string;
+        nodes: Array<{ id: string; type: string; activity?: string; lane: number; files?: string[] }>;
+        edges: Array<{ from: string; to: string; type: string }>;
+        tips: Array<{ id: string; owner: string; status: string }>;
+      };
+    };
+
+    assert.strictEqual(data.ok, true);
+    assert.strictEqual(data.projectId, 'current');
+    assert.ok(Array.isArray(data.activeWorkers), 'Backward compatibility: activeWorkers present');
+    assert.ok(Array.isArray(data.historyWorkers), 'Backward compatibility: historyWorkers present');
+    assert.ok(data.graph, 'Additive: graph is present');
+    assert.strictEqual(data.graph.runId, runId);
+
+    // Verify nodes: Request, Plan, Worker branch, Activities, Integration Merge
+    const types = data.graph.nodes.map(n => n.type);
+    assert.ok(types.includes('request'));
+    assert.ok(types.includes('plan'));
+    assert.ok(types.includes('worker_branch'));
+    assert.ok(types.includes('activity'));
+    assert.ok(types.includes('merge'));
+
+    // Verify Tip is the Integration merge node
+    assert.strictEqual(data.graph.tips.length, 1);
+    assert.strictEqual(data.graph.tips[0].owner, 'Orchestrator');
+    assert.strictEqual(data.graph.tips[0].status, 'awaiting_review');
+
+    // Verify Active vs Terminated Lifecycle: completed worker is in history, NOT in activeWorkers
+    assert.strictEqual(data.activeWorkers.length, 0);
+    assert.strictEqual(data.historyWorkers.length, 1);
+    assert.strictEqual(data.historyWorkers[0].taskId, 'TASK-001');
+
+    // Verify Sanitization: changed files in graph are relative
+    const editNode = data.graph.nodes.find(n => n.activity === 'EDIT');
+    assert.ok(editNode);
+    assert.strictEqual(editNode.files?.[0], 'components/project-work-graph.tsx');
+  });
 });

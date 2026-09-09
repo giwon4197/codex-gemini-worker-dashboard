@@ -273,11 +273,17 @@ $parsedResponse = ""
 $finalResponse = ""
 $errorMessage = ""
 $rawLines = [System.Collections.Generic.List[string]]::new()
+$eventSequence = 0
+$lastEventId = "$workerKey-branch"
 
 function Add-WorkerLog {
   param(
     [string]$Message,
-    [string]$Type = 'info'
+    [string]$Type = 'info',
+    [string]$Activity = '',
+    [string]$File = '',
+    [string]$Command = '',
+    [string]$ParentId = ''
   )
   if ([string]::IsNullOrWhiteSpace($Message)) { return }
   $clean = Redact-Secrets -Text $Message
@@ -291,14 +297,31 @@ function Add-WorkerLog {
   }
   $recentLogs.Add($entry)
   if ($eventPath) {
-    $eventRecord = [pscustomobject]@{
-      timestamp = (Get-Date).ToString('o')
-      runId = if ($OrchestrationRunId) { $OrchestrationRunId } else { $workerRunId }
-      taskId = $workerKey
-      attempt = $Attempt
-      type = $Type
-      message = $clean
+    $script:eventSequence++
+    $currEventId = "$workerKey-evt-$($script:eventSequence)"
+    $effectiveParent = if ($ParentId) {
+      $ParentId
+    } elseif ($script:lastEventId) {
+      $script:lastEventId
+    } else {
+      "$workerKey-branch"
     }
+    $script:lastEventId = $currEventId
+
+    $eventRecord = [ordered]@{
+      id        = $currEventId
+      parentId  = $effectiveParent
+      timestamp = (Get-Date).ToString('o')
+      runId     = if ($OrchestrationRunId) { $OrchestrationRunId } else { $workerRunId }
+      taskId    = $workerKey
+      attempt   = $Attempt
+      type      = $Type
+      message   = $clean
+    }
+    if ($Activity) { $eventRecord['activity'] = $Activity }
+    if ($File)     { $eventRecord['file'] = $File }
+    if ($Command)  { $eventRecord['command'] = $Command }
+
     Add-Content -LiteralPath $eventPath -Value ($eventRecord | ConvertTo-Json -Compress) -Encoding utf8
   }
   while ($recentLogs.Count -gt $maxLogEntries) {
@@ -455,8 +478,40 @@ try {
                 Add-WorkerLog -Message "생성: $deltaSnippet" -Type 'stream'
               }
             } elseif ($su.tool_call) {
-              $toolName = if ($su.tool_call.name) { $su.tool_call.name } else { "도구" }
-              Add-WorkerLog -Message "도구 호출: $toolName" -Type 'tool'
+              $toolName = if ($su.tool_call.name) { [string]$su.tool_call.name } else { "도구" }
+              $toolArgs = $su.tool_call.args
+              $act = ''
+              $targetFile = ''
+              $cmdStr = ''
+
+              if ($toolName -in @('view_file', 'read_file', 'read_url_content')) {
+                $act = 'LOAD'
+                if ($toolArgs) {
+                  $targetFile = if ($toolArgs.AbsolutePath) { [string]$toolArgs.AbsolutePath } elseif ($toolArgs.TargetFile) { [string]$toolArgs.TargetFile } elseif ($toolArgs.Url) { [string]$toolArgs.Url } else { '' }
+                }
+              } elseif ($toolName -in @('grep_search', 'find_by_name', 'search_web')) {
+                $act = 'SEARCH'
+                if ($toolArgs) {
+                  $targetFile = if ($toolArgs.SearchPath) { [string]$toolArgs.SearchPath } elseif ($toolArgs.SearchDirectory) { [string]$toolArgs.SearchDirectory } else { '' }
+                }
+              } elseif ($toolName -in @('replace_file_content', 'edit_file')) {
+                $act = 'EDIT'
+                if ($toolArgs) {
+                  $targetFile = if ($toolArgs.TargetFile) { [string]$toolArgs.TargetFile } else { '' }
+                }
+              } elseif ($toolName -in @('write_to_file', 'save_file')) {
+                $act = 'SAVE'
+                if ($toolArgs) {
+                  $targetFile = if ($toolArgs.TargetFile) { [string]$toolArgs.TargetFile } else { '' }
+                }
+              } elseif ($toolName -in @('run_command', 'execute_command')) {
+                $act = 'RUN'
+                if ($toolArgs) {
+                  $cmdStr = if ($toolArgs.CommandLine) { [string]$toolArgs.CommandLine } else { '' }
+                }
+              }
+
+              Add-WorkerLog -Message "도구 호출: $toolName" -Type 'tool' -Activity $act -File $targetFile -Command $cmdStr
             } elseif ($stepType -eq 'user_input') {
               Add-WorkerLog -Message "사용자 입력 처리 완료" -Type 'step'
             } else {
@@ -547,7 +602,8 @@ if (-not $isSuccess -and [string]::IsNullOrEmpty($errorMessage)) {
   }
 }
 
-Add-WorkerLog -Message "작업 종료: 상태=$finalStatus, 소요시간=${elapsed}초, 종료코드=$exitCode" -Type $(if ($isSuccess) { 'system' } else { 'error' })
+$outcomeAct = if ($isSuccess) { 'DONE' } else { 'FAIL' }
+Add-WorkerLog -Message "작업 종료: 상태=$finalStatus, 소요시간=${elapsed}초, 종료코드=$exitCode" -Type $(if ($isSuccess) { 'system' } else { 'error' }) -Activity $outcomeAct
 
 # 1. Update live-worker.json with final state
 Sync-LiveWorker -Status $finalStatus -FinalResp $parsedResponse -Err $errorMessage

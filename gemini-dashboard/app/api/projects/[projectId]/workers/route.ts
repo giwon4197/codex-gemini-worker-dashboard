@@ -19,9 +19,17 @@ export async function GET(
     }
   }
 
+  let search = '';
+  try {
+    const parsed = new URL(request.url);
+    search = parsed.search;
+  } catch {
+    // Ignore
+  }
+
   const encodedProjectId = encodeURIComponent(projectId);
   const req = new Request(
-    `http://localhost:3000/api/projects/${encodedProjectId}/workers`,
+    `http://localhost:3000/api/projects/${encodedProjectId}/workers${search}`,
     {
       method: 'GET',
       headers: request.headers,

@@ -12,6 +12,8 @@ import type {
   ConversationSession,
   ConversationApproval,
   LaunchMetadata,
+  ProjectWorkGraphData,
+  LiveWorkerVerificationCommand,
 } from './workspace-contract.ts';
 import {
   normalizeRunStatus,
@@ -25,7 +27,9 @@ import {
 // @ts-expect-error TS5097 allowed for test runner
 } from './workspace-contract.ts';
 // @ts-expect-error TS5097 allowed for test runner
-import { sanitizeText, sanitizePath, sanitizeWorkerData } from './workspace-sanitize.ts';
+import { buildProjectWorkGraph } from './project-event-graph.ts';
+// @ts-expect-error TS5097 allowed for test runner
+import { sanitizeText, sanitizePath, sanitizeWorkerData, sanitizeGraphData } from './workspace-sanitize.ts';
 // @ts-expect-error TS5097 allowed for test runner
 import { evaluateRunLiveness, isProcessAlive, STALE_PROCESS_MISMATCH_REASON } from './process-liveness.ts';
 import type { LivenessOptions } from './process-liveness.ts';
@@ -1905,15 +1909,184 @@ export async function getRunDetails(
 }
 
 /**
+ * Reconstructs the complete deterministic Project Work Graph from durable disk files.
+ * Restores genuine parent/child event relationships, activities, files, and tips.
+ */
+export async function getProjectWorkGraph(
+  runId?: string,
+  repoRoot?: string,
+  livenessOptions?: LivenessOptions
+): Promise<ProjectWorkGraphData | null> {
+  const root = repoRoot || getAllowedRepoRoot();
+  let targetRunId = runId;
+
+  // If no runId provided or is 'current', find the most active or newest run
+  if (!targetRunId || targetRunId === 'current') {
+    const runs = await listCompactRuns(root, livenessOptions);
+    const sorted = [...runs].sort((a, b) => {
+      const aActive = a.status === 'running' || a.status === 'planning' ? 1 : 0;
+      const bActive = b.status === 'running' || b.status === 'planning' ? 1 : 0;
+      if (aActive !== bActive) return bActive - aActive;
+      return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+    });
+    if (sorted.length === 0) return null;
+    targetRunId = sorted[0].runId;
+  }
+
+  // Settle run state and resolve actual run ID
+  const settled = await settleRunState(targetRunId, root, livenessOptions);
+  const actualRunId = settled?.actualRunId || (await findAndLinkActualRun(targetRunId, root));
+  const effectiveRunId = actualRunId || targetRunId;
+
+  const runDir = path.join(root, '.agent', 'runs', effectiveRunId);
+  const compact = settled?.compact || (await getCompactRunState(targetRunId, root)) || (actualRunId ? await getCompactRunState(actualRunId, root) : null);
+  const alias = (await getAliasRecord(targetRunId, root)) || (actualRunId ? await getAliasRecord(actualRunId, root) : null);
+
+  let manifest: {
+    runId?: string;
+    prompt?: string;
+    status?: string;
+    createdAt?: string;
+    updatedAt?: string;
+    tasks?: string[];
+    baseCommit?: string;
+    integrationBranch?: string;
+    orchestratorProcessId?: number;
+    integration?: unknown;
+  } | null = null;
+
+  try {
+    const raw = await fs.promises.readFile(path.join(runDir, 'run.json'), 'utf8');
+    manifest = parseJsonFileText<{
+      runId?: string;
+      prompt?: string;
+      status?: string;
+      createdAt?: string;
+      updatedAt?: string;
+      tasks?: string[];
+      baseCommit?: string;
+      integrationBranch?: string;
+      orchestratorProcessId?: number;
+      integration?: unknown;
+    }>(raw);
+  } catch {}
+
+  if (!manifest && !compact) {
+    return null;
+  }
+
+  // Read tasks from tasksDir or workersDir
+  const tasksDir = path.join(runDir, 'tasks');
+  const workersDir = path.join(runDir, 'workers');
+  const eventsDir = path.join(runDir, 'events');
+
+  let taskIds: string[] = manifest?.tasks || [];
+  if (taskIds.length === 0) {
+    try {
+      const taskFiles = await fs.promises.readdir(tasksDir);
+      taskIds = taskFiles.filter(f => f.endsWith('.json')).map(f => f.replace(/\.json$/, ''));
+    } catch {}
+  }
+  if (taskIds.length === 0) {
+    try {
+      const workerFiles = await fs.promises.readdir(workersDir);
+      taskIds = workerFiles.filter(f => f.endsWith('.json')).map(f => f.replace(/\.json$/, ''));
+    } catch {}
+  }
+  if (taskIds.length === 0) {
+    taskIds = ['TASK-001'];
+  }
+
+  const tasks: Array<{ id: string; name?: string; prompt?: string; tier?: string; allowedFiles?: string[]; testCommands?: string[] }> = [];
+  for (const tid of taskIds) {
+    try {
+      const raw = await fs.promises.readFile(path.join(tasksDir, `${tid}.json`), 'utf8');
+      tasks.push(parseJsonFileText(raw));
+    } catch {
+      tasks.push({ id: tid, name: tid });
+    }
+  }
+
+  // Load workers
+  const details = await getRunDetails(targetRunId, root, livenessOptions);
+  const workers: LiveWorkerData[] = details ? [...details.activeWorkers, ...details.historyWorkers] : [];
+
+  // Read events per task
+  const eventsByTask: Record<string, string[]> = {};
+  for (const tid of taskIds) {
+    try {
+      const eventFile = path.join(eventsDir, `${tid}.ndjson`);
+      const raw = await fs.promises.readFile(eventFile, 'utf8');
+      eventsByTask[tid] = raw.split(/\r?\n/).filter(line => line.trim().length > 0);
+    } catch {
+      eventsByTask[tid] = [];
+    }
+  }
+
+  // Read integration if present
+  let integration: {
+    id?: string;
+    parentIds?: string[];
+    branch?: string;
+    decision?: string;
+    changedFiles?: string[];
+    tests?: LiveWorkerVerificationCommand[];
+    diffStat?: string;
+    headCommit?: string;
+    reviewArtifact?: string;
+    startedAt?: string;
+    updatedAt?: string;
+    [key: string]: unknown;
+  } | null = null;
+
+  try {
+    const raw = await fs.promises.readFile(path.join(runDir, 'integration.json'), 'utf8');
+    integration = parseJsonFileText(raw);
+  } catch {
+    if (manifest?.integration) {
+      integration = manifest.integration as typeof integration;
+    }
+  }
+
+  const prompt = alias?.prompt || compact?.prompt || manifest?.prompt || `작업 (${targetRunId})`;
+  const status = details?.status || compact?.status || manifest?.status || 'running';
+  const createdAt = manifest?.createdAt || compact?.createdAt || new Date().toISOString();
+  const updatedAt = manifest?.updatedAt || compact?.updatedAt || createdAt;
+
+  const rawGraph = buildProjectWorkGraph({
+    runId: targetRunId,
+    prompt,
+    status,
+    createdAt,
+    updatedAt,
+    baseCommit: manifest?.baseCommit || compact?.baseCommit,
+    integrationBranch: manifest?.integrationBranch || integration?.branch,
+    tasks,
+    workers,
+    eventsByTask,
+    integration,
+    repoRoot: root,
+  });
+
+  return sanitizeGraphData(rawGraph, root);
+}
+
+/**
  * Returns workers for project control.
  * Strictly separates active workers (planning, running, retrying, verifying)
  * from completed/terminated workers (which immediately drop out of the active terminal area).
- * Seamlessly tracks real workers across linked runs.
+ * Seamlessly tracks real workers across linked runs and optionally provides project work graph.
  */
 export async function getProjectWorkers(
   repoRoot?: string,
-  livenessOptions?: LivenessOptions
-): Promise<{ activeWorkers: LiveWorkerData[]; historyWorkers: LiveWorkerData[] }> {
+  livenessOptions?: LivenessOptions,
+  selectedRunId?: string
+): Promise<{
+  activeWorkers: LiveWorkerData[];
+  historyWorkers: LiveWorkerData[];
+  graph?: ProjectWorkGraphData | null;
+  runs?: CompactRunState[];
+}> {
   const root = repoRoot || getAllowedRepoRoot();
   const runs = await listCompactRuns(root, livenessOptions);
 
@@ -1937,5 +2110,15 @@ export async function getProjectWorkers(
     }
   }
 
-  return { activeWorkers, historyWorkers };
+  let graph: ProjectWorkGraphData | null = null;
+  const targetGraphRunId = selectedRunId || sortedRuns[0]?.runId;
+  if (targetGraphRunId) {
+    try {
+      graph = await getProjectWorkGraph(targetGraphRunId, root, livenessOptions);
+    } catch {
+      // Fallback gracefully
+    }
+  }
+
+  return { activeWorkers, historyWorkers, graph, runs: sortedRuns };
 }

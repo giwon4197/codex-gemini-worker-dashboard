@@ -846,6 +846,21 @@ try {
       $task = $pending.Dequeue(); $safeId = ([string]$task.id) -replace '[^A-Za-z0-9._-]', '-'
       $wt = $worktrees | Where-Object id -eq $task.id | Select-Object -First 1
       $tier = if ($task.tier) { [string]$task.tier } else { 'normal' }
+      $branchEvtPath = Join-Path $runRoot "events\$safeId.ndjson"
+      if (-not (Test-Path -LiteralPath $branchEvtPath)) {
+        $branchRecord = [ordered]@{
+          id        = "$safeId-branch"
+          parentId  = "$runId-plan"
+          timestamp = (Get-Date).ToString('o')
+          runId     = $runId
+          taskId    = $task.id
+          attempt   = 1
+          type      = 'system'
+          activity  = 'LOAD'
+          message   = "워커 브랜치 시작: $($task.name)"
+        }
+        Add-Content -LiteralPath $branchEvtPath -Value ($branchRecord | ConvertTo-Json -Compress) -Encoding utf8
+      }
       $process = Start-WorkerProcess $task $wt $tier $runId $runRoot $baseCommit $Timeout
       $jobRecords += [pscustomobject]@{ Process = $process; Task = $task; SafeId = $safeId; Worktree = $wt; StartedAt = Get-Date; TimedOut = $false; Cancelled = $false; Attempt = 1 }
       $running++
@@ -893,6 +908,26 @@ try {
       $changed = @(Get-ChangedFiles $wt.path $baseCommit)
       $violations = @($changed | Where-Object { -not (Test-AllowedPath $_ @($task.allowed_files)) })
       $tests = if (-not $wasCancelled -and -not $wasTimedOut -and $state.status -eq 'completed' -and $violations.Count -eq 0) { @(Invoke-Verification $wt.path @($task.test_commands)) } else { @() }
+      $branchEvtPath = Join-Path $runRoot "events\$safeId.ndjson"
+      if ($tests -and $tests.Count -gt 0 -and (Test-Path -LiteralPath $branchEvtPath)) {
+        $vSeq = 0
+        foreach ($testCmd in $tests) {
+          $vSeq++
+          $vRec = [ordered]@{
+            id        = "$safeId-verify-$attempt-$vSeq"
+            parentId  = "$safeId-branch"
+            timestamp = (Get-Date).ToString('o')
+            runId     = $runId
+            taskId    = $task.id
+            attempt   = $attempt
+            type      = 'verification'
+            activity  = if ($testCmd.status -eq 'PASS') { 'PASS' } else { 'FAIL' }
+            command   = $testCmd.command
+            message   = "검증 실행: $($testCmd.status) ($($testCmd.command))"
+          }
+          Add-Content -LiteralPath $branchEvtPath -Value ($vRec | ConvertTo-Json -Compress) -Encoding utf8
+        }
+      }
       $failureParts = @($state.error, $state.finalResponse) + @($tests | Where-Object status -eq 'FAIL' | ForEach-Object { $_.output })
       $failureText = $failureParts -join "`n"
       $classification = Get-FailureClassification $failureText
@@ -1031,6 +1066,7 @@ $compressed
       $diffStat = @(& git -C $integrationPath diff --stat "$baseCommit...HEAD") -join "`n"
       $integrationCommits = @(& git -C $integrationPath rev-list --reverse "$baseCommit..HEAD")
       $integration = [pscustomobject]@{
+        id="$runId-integration"; parentIds=@($tasks | ForEach-Object { "$([string]$_.id)-branch" }); startedAt=(Get-Date).ToString('o')
         branch=$integrationBranch; worktree=$integrationPath; baseCommit=$baseCommit; headCommit=(& git -C $integrationPath rev-parse HEAD).Trim()
         decision=$integrationDecision; approvalRequired=$true; mainModified=$false; cherryPicks=$cherryPicks
         tests=$integrationTests; changedFiles=$diffFiles; diffStat=$diffStat; commits=$integrationCommits

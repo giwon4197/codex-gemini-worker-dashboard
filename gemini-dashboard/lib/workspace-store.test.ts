@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 // @ts-expect-error TS5097 allowed for test runner
-import { validateRunId, validateRepository, validatePrompt, generateRunId, spawnRouterRun, getCompactRunState, saveCompactRunState, listCompactRuns, getProjectWorkers, resolveRequiredTools, getRunDetails, getAliasRecord, findAndLinkActualRun, STALE_PROCESS_MISMATCH_REASON } from './workspace-store.ts';
+import { validateRunId, validateRepository, validatePrompt, generateRunId, spawnRouterRun, getCompactRunState, saveCompactRunState, listCompactRuns, getProjectWorkers, resolveRequiredTools, getRunDetails, getAliasRecord, findAndLinkActualRun, STALE_PROCESS_MISMATCH_REASON, getProjectWorkGraph } from './workspace-store.ts';
 import type { CompactRunState } from './workspace-contract.ts';
 
 void describe('Workspace Store (Idempotency, Path Traversal, & Recovery)', () => {
@@ -830,6 +830,217 @@ void describe('Workspace Store (Idempotency, Path Traversal, & Recovery)', () =>
       assert.ok(staleWorker);
       assert.strictEqual(staleWorker.status, 'failed');
       assert.strictEqual(staleWorker.error, STALE_PROCESS_MISMATCH_REASON);
+    });
+  });
+
+  void describe('Project Work Graph & Restart Recovery', () => {
+    void test('reconstructs complete DAG from durable disk artifacts and recovers across restart', async () => {
+      const runId = '20260910-graph-test-01';
+      const runDir = path.join(testTempDir, '.agent', 'runs', runId);
+      fs.mkdirSync(path.join(runDir, 'tasks'), { recursive: true });
+      fs.mkdirSync(path.join(runDir, 'workers'), { recursive: true });
+      fs.mkdirSync(path.join(runDir, 'results'), { recursive: true });
+      fs.mkdirSync(path.join(runDir, 'events'), { recursive: true });
+
+      // 1. run.json manifest
+      fs.writeFileSync(
+        path.join(runDir, 'run.json'),
+        JSON.stringify({
+          runId,
+          prompt: '작업 그래프 테스트 프롬프트',
+          status: 'awaiting_review',
+          createdAt: '2026-09-10T01:00:00.000Z',
+          updatedAt: '2026-09-10T01:10:00.000Z',
+          tasks: ['TASK-001', 'TASK-002'],
+          baseCommit: 'commit-base-123',
+          integrationBranch: 'integration/20260910-graph-test-01',
+        }),
+        'utf8'
+      );
+
+      // 2. Task metadata
+      fs.writeFileSync(
+        path.join(runDir, 'tasks', 'TASK-001.json'),
+        JSON.stringify({
+          id: 'TASK-001',
+          name: 'Task Alpha',
+          prompt: 'Alpha 구현',
+          allowedFiles: ['src/alpha.ts'],
+        }),
+        'utf8'
+      );
+
+      fs.writeFileSync(
+        path.join(runDir, 'tasks', 'TASK-002.json'),
+        JSON.stringify({
+          id: 'TASK-002',
+          name: 'Task Beta',
+          prompt: 'Beta 구현',
+          allowedFiles: ['src/beta.ts'],
+        }),
+        'utf8'
+      );
+
+      // 3. Worker result files
+      fs.writeFileSync(
+        path.join(runDir, 'results', 'TASK-001-result.json'),
+        JSON.stringify({
+          runId,
+          taskId: 'TASK-001',
+          task: 'Task Alpha',
+          status: 'completed',
+          startedAt: '2026-09-10T01:02:00.000Z',
+          completedAt: '2026-09-10T01:05:00.000Z',
+        }),
+        'utf8'
+      );
+
+      fs.writeFileSync(
+        path.join(runDir, 'results', 'TASK-002-result.json'),
+        JSON.stringify({
+          runId,
+          taskId: 'TASK-002',
+          task: 'Task Beta',
+          status: 'completed',
+          startedAt: '2026-09-10T01:02:00.000Z',
+          completedAt: '2026-09-10T01:06:00.000Z',
+        }),
+        'utf8'
+      );
+
+      // 4. Worker NDJSON events
+      const events1 = [
+        JSON.stringify({
+          timestamp: '2026-09-10T01:02:10.000Z',
+          id: 'TASK-001-branch',
+          parentId: `${runId}-plan`,
+          activity: 'LOAD',
+          file: 'src/alpha.ts',
+        }),
+        JSON.stringify({
+          timestamp: '2026-09-10T01:03:00.000Z',
+          id: 'TASK-001-e1',
+          parentId: 'TASK-001-branch',
+          activity: 'EDIT',
+          file: 'src/alpha.ts',
+          diffSnippet: '+export const a = 1;',
+        }),
+        JSON.stringify({
+          timestamp: '2026-09-10T01:04:00.000Z',
+          id: 'TASK-001-e2',
+          parentId: 'TASK-001-e1',
+          activity: 'RUN',
+          command: 'npm test',
+        }),
+        JSON.stringify({
+          timestamp: '2026-09-10T01:04:30.000Z',
+          id: 'TASK-001-e3',
+          parentId: 'TASK-001-e2',
+          activity: 'PASS',
+          command: 'npm test',
+          result: { success: true },
+        }),
+        JSON.stringify({
+          timestamp: '2026-09-10T01:05:00.000Z',
+          id: 'TASK-001-done',
+          parentId: 'TASK-001-e3',
+          activity: 'DONE',
+        }),
+      ].join('\n');
+      fs.writeFileSync(path.join(runDir, 'events', 'TASK-001.ndjson'), events1, 'utf8');
+
+      const events2 = [
+        JSON.stringify({
+          timestamp: '2026-09-10T01:02:15.000Z',
+          id: 'TASK-002-branch',
+          parentId: `${runId}-plan`,
+          activity: 'LOAD',
+          file: 'src/beta.ts',
+        }),
+        JSON.stringify({
+          timestamp: '2026-09-10T01:05:30.000Z',
+          id: 'TASK-002-save',
+          parentId: 'TASK-002-branch',
+          activity: 'SAVE',
+          file: 'src/beta.ts',
+        }),
+        JSON.stringify({
+          timestamp: '2026-09-10T01:06:00.000Z',
+          id: 'TASK-002-done',
+          parentId: 'TASK-002-save',
+          activity: 'DONE',
+        }),
+      ].join('\n');
+      fs.writeFileSync(path.join(runDir, 'events', 'TASK-002.ndjson'), events2, 'utf8');
+
+      // 5. integration.json
+      fs.writeFileSync(
+        path.join(runDir, 'integration.json'),
+        JSON.stringify({
+          id: `${runId}-integration`,
+          parentIds: ['TASK-001-done', 'TASK-002-done'],
+          branch: 'integration/20260910-graph-test-01',
+          decision: 'awaiting_review',
+          tests: [
+            {
+              command: 'npm test',
+              exitCode: 0,
+              output: 'all tests passed',
+            },
+          ],
+        }),
+        'utf8'
+      );
+
+      // Reconstruct graph via getProjectWorkGraph
+      const graph = await getProjectWorkGraph(runId, testTempDir);
+      assert.ok(graph, 'Graph should be non-null');
+      assert.strictEqual(graph.runId, runId);
+      assert.strictEqual(graph.prompt, '작업 그래프 테스트 프롬프트');
+
+      // Verify node types and ownership
+      const requestNode = graph.nodes.find((n) => n.type === 'request');
+      assert.ok(requestNode, 'Should have request node');
+      assert.strictEqual(requestNode.owner, 'Codex');
+
+      const planNode = graph.nodes.find((n) => n.type === 'plan');
+      assert.ok(planNode, 'Should have plan node');
+      assert.strictEqual(planNode.owner, 'Codex');
+      assert.ok(planNode.parentIds, 'Plan node must have parentIds');
+      assert.ok(planNode.parentIds.includes(requestNode.id));
+
+      const integrationNode = graph.nodes.find((n) => n.type === 'merge');
+      assert.ok(integrationNode, 'Should have integration node');
+      assert.strictEqual(integrationNode.owner, 'Orchestrator');
+      assert.strictEqual(integrationNode.status, 'awaiting_review');
+      assert.ok(integrationNode.parentIds, 'Integration node must have parentIds');
+      assert.ok(integrationNode.parentIds.includes('TASK-001-done'));
+      assert.ok(integrationNode.parentIds.includes('TASK-002-done'));
+
+      // Check activity nodes
+      const editNode = graph.nodes.find((n) => n.id === 'TASK-001-e1');
+      assert.ok(editNode);
+      assert.strictEqual(editNode.activity, 'EDIT');
+      assert.strictEqual(editNode.file, 'src/alpha.ts');
+
+      const passNode = graph.nodes.find((n) => n.id === 'TASK-001-e3');
+      assert.ok(passNode);
+      assert.strictEqual(passNode.activity, 'PASS');
+      assert.strictEqual(passNode.command, 'npm test');
+
+      // Check tips
+      assert.ok(graph.tips.length > 0, 'Graph tips should be populated');
+      for (const tip of graph.tips) {
+        assert.ok(tip.owner, 'Tip must have an owner');
+        assert.ok(tip.status, 'Tip must have a status');
+      }
+
+      // Test additive return from getProjectWorkers with restart recovery
+      const projectWorkersRes = await getProjectWorkers(testTempDir, undefined, runId);
+      assert.ok(projectWorkersRes.graph);
+      assert.strictEqual(projectWorkersRes.graph.runId, runId);
+      assert.strictEqual(projectWorkersRes.historyWorkers.length, 2);
+      assert.strictEqual(projectWorkersRes.activeWorkers.length, 0);
     });
   });
 });

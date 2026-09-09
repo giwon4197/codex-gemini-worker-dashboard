@@ -11,7 +11,7 @@
     "start": "wrangler dev --config dist/server/wrangler.json",
     "lint": "oxlint --ignore-pattern \"components/ui/**\" --ignore-pattern \"hooks/**\" --ignore-pattern \"vite.config.ts\"",
     "format": "oxfmt",
-    "test": "node --test lib/codex-usage.test.ts lib/daily-token-stats.test.ts lib/gemini-quota.test.ts app/api/gemini-quota/route.test.ts lib/workspace-contract.test.ts lib/workspace-sanitize.test.ts lib/workspace-store.test.ts lib/codex-conversation.test.ts lib/workspace-node-bridge.test.ts app/api/runs/route.test.ts \"app/api/projects/[[]projectId[]]/workers/route.test.ts\""
+    "test": "node --test lib/codex-usage.test.ts lib/daily-token-stats.test.ts lib/gemini-quota.test.ts app/api/gemini-quota/route.test.ts lib/workspace-contract.test.ts lib/workspace-sanitize.test.ts lib/workspace-store.test.ts lib/codex-conversation.test.ts lib/workspace-node-bridge.test.ts app/api/runs/route.test.ts \"app/api/projects/[[]projectId[]]/workers/route.test.ts\" lib/project-event-graph.test.ts"
   },
   "dependencies": {
     "react": "19.2.6",

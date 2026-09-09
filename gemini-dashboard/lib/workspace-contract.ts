@@ -853,3 +853,24 @@ export function createEmptyConversationSession(sessionId?: string): Conversation
     linkedRunIds: [],
   };
 }
+
+export type {
+  GraphNodeOwner,
+  ActivityType,
+  GraphNodeType,
+  ProjectGraphNode,
+  ProjectGraphEdge,
+  ProjectWorkGraphData,
+  RawWorkerEventRecord,
+  ParsedWorkerActivity,
+  BuildProjectGraphOptions,
+} from './project-event-graph.ts';
+export {
+  SUPPORTED_ACTIVITIES,
+  parseWorkerNDJSONLine,
+  formatActivityLabel,
+  buildProjectWorkGraph,
+  sortGraphNodesNewestFirst,
+  sortGraphNodesOldestFirst,
+// @ts-expect-error TS5097 allowed for test runner
+} from './project-event-graph.ts';

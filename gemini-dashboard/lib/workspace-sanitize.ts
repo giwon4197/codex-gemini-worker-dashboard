@@ -2,6 +2,8 @@ import type {
   LiveWorkerData,
   LiveWorkerLog,
   LiveWorkerVerificationCommand,
+  ProjectWorkGraphData,
+  ProjectGraphNode,
 } from './workspace-contract.ts';
 
 // Regex patterns for detecting and redacting sensitive data
@@ -187,5 +189,74 @@ export function sanitizeWorkerData(
       ? sanitizeText(worker.finalResponse, repoRoot)
       : null,
     error: worker.error ? sanitizeText(worker.error, repoRoot) : null,
+  };
+}
+
+/**
+ * Recursively sanitizes arbitrary objects or values, masking secrets and home directories.
+ */
+export function sanitizeUnknown(value: unknown, repoRoot?: string): unknown {
+  if (typeof value === 'string') {
+    return sanitizeText(value, repoRoot);
+  }
+  if (Array.isArray(value)) {
+    return value.map(v => sanitizeUnknown(v, repoRoot));
+  }
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[k] = sanitizeUnknown(v, repoRoot);
+    }
+    return out;
+  }
+  return value;
+}
+
+/**
+ * Sanitizes a single ProjectGraphNode.
+ */
+export function sanitizeGraphNode(node: ProjectGraphNode, repoRoot?: string): ProjectGraphNode {
+  return {
+    ...node,
+    label: sanitizeText(node.label, repoRoot),
+    detailTitle: node.detailTitle ? sanitizeText(node.detailTitle, repoRoot) : undefined,
+    instruction: node.instruction ? sanitizeText(node.instruction, repoRoot) : undefined,
+    file: node.file ? sanitizePath(node.file, repoRoot) : undefined,
+    files: node.files ? node.files.map(f => sanitizePath(f, repoRoot)) : undefined,
+    command: node.command ? sanitizeCommand(node.command, repoRoot) : undefined,
+    error: node.error ? sanitizeText(node.error, repoRoot) : null,
+    rawOutput: node.rawOutput ? node.rawOutput.map(line => sanitizeText(line, repoRoot)) : undefined,
+    verificationCommands: node.verificationCommands
+      ? node.verificationCommands.map(cmd => ({
+          ...cmd,
+          command: sanitizeCommand(cmd.command, repoRoot),
+          output: cmd.output ? sanitizeText(cmd.output, repoRoot) : undefined,
+        }))
+      : undefined,
+    retryHistory: node.retryHistory
+      ? node.retryHistory.map(r => ({
+          ...r,
+          failureLog: r.failureLog ? sanitizeText(r.failureLog, repoRoot) : undefined,
+        }))
+      : undefined,
+    escalation: node.escalation
+      ? {
+          ...node.escalation,
+          reason: node.escalation.reason ? sanitizeText(node.escalation.reason, repoRoot) : undefined,
+        }
+      : null,
+    metadata: node.metadata ? (sanitizeUnknown(node.metadata, repoRoot) as Record<string, unknown>) : undefined,
+  };
+}
+
+/**
+ * Sanitizes the complete ProjectWorkGraphData before API or UI exposure.
+ */
+export function sanitizeGraphData(graph: ProjectWorkGraphData, repoRoot?: string): ProjectWorkGraphData {
+  return {
+    ...graph,
+    prompt: sanitizeText(graph.prompt, repoRoot),
+    nodes: graph.nodes.map(n => sanitizeGraphNode(n, repoRoot)),
+    tips: graph.tips.map(t => sanitizeGraphNode(t, repoRoot)),
   };
 }
