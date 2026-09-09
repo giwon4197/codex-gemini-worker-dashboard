@@ -266,7 +266,10 @@ export function resolveRequiredTools(options?: ToolResolutionOptions): ToolResol
  * Defaults to process.env.ALLOWED_REPO_ROOT if set.
  * Otherwise walks up from process.cwd() or looks for .agent/.git directory.
  */
-export function getAllowedRepoRoot(): string {
+export function getAllowedRepoRoot(preferredRoot?: string): string {
+  if (preferredRoot) {
+    return path.resolve(preferredRoot);
+  }
   if (process.env.ALLOWED_REPO_ROOT) {
     return path.resolve(process.env.ALLOWED_REPO_ROOT);
   }
@@ -868,6 +871,9 @@ export async function spawnRouterRun(options: {
     ...options.env,
     PATH: tools.augmentedPath,
     PYTHONIOENCODING: 'utf-8',
+    POWERSHELL_CLI_CONSOLE_ENCODING: 'utf-8',
+    LANG: 'ko_KR.UTF-8',
+    LC_ALL: 'ko_KR.UTF-8',
   };
 
   let childPid: number | undefined;

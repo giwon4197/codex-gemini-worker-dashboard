@@ -400,6 +400,7 @@ void describe('Workspace Store (Idempotency, Path Traversal, & Recovery)', () =>
           ...process.env,
           PATH: toolsResult.tools.augmentedPath,
           PYTHONIOENCODING: 'utf-8',
+          POWERSHELL_CLI_CONSOLE_ENCODING: 'utf-8',
         },
       });
 
