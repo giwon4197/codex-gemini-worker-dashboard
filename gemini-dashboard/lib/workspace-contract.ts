@@ -156,6 +156,24 @@ export interface CompactRunState {
   baseCommit?: string;
   orchestratorProcessId?: number;
   error?: string | null;
+  failureLogPath?: string;
+  failureReason?: string;
+  exitCode?: number | null;
+  errorCategory?: string;
+  errorDisplayName?: string;
+  retryable?: boolean;
+}
+
+export interface LaunchMetadata {
+  dashboardRunId: string;
+  orchestratorProcessId?: number | null;
+  startedAt: string;
+  endedAt?: string | null;
+  status: 'running' | 'completed' | 'failed';
+  exitCode?: number | null;
+  actualRunId?: string | null;
+  error?: string | null;
+  logPath?: string;
 }
 
 export interface RunAliasRecord {
@@ -465,12 +483,47 @@ export function isWorkerActive(status?: string | null): boolean {
 }
 
 /**
+ * Identifies whether an error represents an orchestrator / launcher failure
+ * (e.g. bootstrap, PowerShell initialization, missing tools, early exit, manifest timeout).
+ * Criterion 6: 실행기 오류는 requiresUserAction=false, 표시명 '실행기 오류', 재시도 가능으로 분류.
+ */
+export function isLauncherError(
+  reason?: string | null,
+  errorCategory?: string | null
+): boolean {
+  if (errorCategory === 'launcher_error') return true;
+  if (!reason) return false;
+  const r = reason.toLowerCase();
+  return (
+    r.includes('실행기 오류') ||
+    r.includes('bootstrap') ||
+    r.includes('powershell') ||
+    r.includes('매니페스트') ||
+    r.includes('manifest') ||
+    r.includes('조기 종료') ||
+    r.includes('도구') ||
+    r.includes('pwsh') ||
+    r.includes('launcher') ||
+    r.includes('환경') ||
+    r.includes('environment')
+  );
+}
+
+/**
  * Identifies whether a run or worker state requires explicit user or Codex action.
+ * Criterion 6: bootstrap/PowerShell/환경/조기 종료/manifest 미생성 같은 실행기 오류는
+ * requiresUserAction=false로 분류한다.
+ * awaiting_review, 정책 위반, 실제 검토/escalation처럼 승인·검토가 필요한 상태만 true로 남긴다.
  */
 export function requiresUserAction(
   status?: string | null,
-  escalation?: LiveWorkerEscalation | null
+  escalation?: LiveWorkerEscalation | null,
+  errorCategory?: string | null,
+  errorReason?: string | null
 ): boolean {
+  if (errorCategory === 'launcher_error' || isLauncherError(errorReason, errorCategory)) {
+    return false;
+  }
   if (escalation?.requiresCodex) return true;
   if (!status) return false;
   const s = status.trim().toLowerCase();
@@ -488,8 +541,13 @@ export function requiresUserAction(
  */
 export function getUserActionReason(
   status?: string | null,
-  escalation?: LiveWorkerEscalation | null
+  escalation?: LiveWorkerEscalation | null,
+  errorCategory?: string | null,
+  errorReason?: string | null
 ): string | undefined {
+  if (errorCategory === 'launcher_error' || isLauncherError(errorReason, errorCategory)) {
+    return undefined;
+  }
   if (escalation?.requiresCodex && escalation?.reason) {
     return escalation.reason;
   }
@@ -512,6 +570,9 @@ export function getUserActionReason(
 
 /**
  * Pure function to extract a chronological list of timeline events from worker logs and metadata.
+ * Criterion 5: 실제 run manifest, plan, worker/tool 로그, changedFiles 같은 실행 증거가 없으면
+ * 계획 수립 및 도구·코드 수정 타임라인을 만들지 않는다.
+ * 단순 failed 상태나 실행기 오류 자체는 실행 증거로 간주하지 않는다.
  */
 export function extractTimelineEvents(params: {
   runId: string;
@@ -525,12 +586,13 @@ export function extractTimelineEvents(params: {
   changedFiles?: string[];
   finalResponse?: string | null;
   error?: string | null;
+  errorCategory?: string | null;
 }): TimelineEvent[] {
   const events: TimelineEvent[] = [];
   const baseTime = params.startedAt || new Date().toISOString();
   const updateTime = params.updatedAt || baseTime;
 
-  // Evidence verification
+  // Genuine execution evidence checks
   const hasLogs = Boolean(params.recentLogs && params.recentLogs.length > 0);
   const hasChangedFiles = Boolean(params.changedFiles && params.changedFiles.length > 0);
   const hasRetries = Boolean(params.retryHistory && params.retryHistory.length > 0);
@@ -542,24 +604,22 @@ export function extractTimelineEvents(params: {
   );
   const hasCompletion = params.status === 'completed' || Boolean(params.finalResponse);
   const hasEscalation = Boolean(params.escalation?.requiresCodex || params.escalation?.reason);
-  const hasActionRequired = requiresUserAction(params.status, params.escalation);
-  const hasFailure =
-    params.status === 'failed' ||
-    params.status === 'timed_out' ||
-    params.status === 'policy_violation' ||
-    Boolean(params.error);
 
+  // Pure execution evidence: simple 'failed' or launcher error is explicitly NOT execution evidence
   const hasExecutionEvidence =
     hasLogs ||
     hasChangedFiles ||
     hasRetries ||
     hasVerification ||
     hasCompletion ||
-    hasEscalation ||
-    hasActionRequired ||
-    hasFailure;
+    hasEscalation;
 
-  // 1. Planning Stage (Only if planning is ongoing or execution has actual evidence)
+  // If status is failed, cancelled, or pending without any genuine execution evidence, return empty timeline
+  if (!hasExecutionEvidence && (params.status === 'failed' || params.status === 'cancelled' || params.status === 'pending')) {
+    return [];
+  }
+
+  // 1. Planning Stage (Only if planning is ongoing or genuine execution has evidence)
   const hasPlanningEvidence = params.status === 'planning' || hasExecutionEvidence;
   if (hasPlanningEvidence) {
     events.push({

@@ -94,6 +94,20 @@ void describe('Process Liveness & Stale Evidence Check (process-liveness.ts)', (
         ),
         true
       );
+
+      assert.strictEqual(
+        isProcessRelatedToRun(
+          {
+            pid: 1234,
+            alive: true,
+            command: 'pwsh.exe -File C:\\repo\\gemini-dashboard\\scripts\\router-bootstrap.ps1 -InputFile C:\\repo\\.agent\\dashboard-state\\input\\run-1.json',
+            metadataAvailable: true,
+          },
+          run,
+          'C:\\repo'
+        ),
+        true
+      );
     });
 
     void test('rejects unrelated processes as PID reuse', () => {

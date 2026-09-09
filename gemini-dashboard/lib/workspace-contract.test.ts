@@ -1,7 +1,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 // @ts-expect-error TS5097 allowed for test runner
-import { normalizeRunStatus, normalizeWorkerStatus, isWorkerActive, requiresUserAction, getUserActionReason, extractTimelineEvents, formatDuration, RUN_STATUS_META, WORKER_STATUS_META, validateSessionId } from './workspace-contract.ts';
+import { normalizeRunStatus, normalizeWorkerStatus, isWorkerActive, requiresUserAction, getUserActionReason, extractTimelineEvents, formatDuration, RUN_STATUS_META, WORKER_STATUS_META, validateSessionId, isLauncherError } from './workspace-contract.ts';
 
 void describe('Workspace Contract & Pure State Transforms', () => {
   void describe('normalizeRunStatus', () => {
@@ -220,6 +220,43 @@ void describe('Workspace Contract & Pure State Transforms', () => {
       for (const key of keys) {
         assert.ok(WORKER_STATUS_META[key as keyof typeof WORKER_STATUS_META].label);
       }
+    });
+  });
+
+  void describe('Launcher Error Contract & Pure Transforms (Criteria 4 & 5)', () => {
+    void test('isLauncherError identifies launcher failure patterns and error category', () => {
+      assert.strictEqual(isLauncherError('실행기 프로세스가 비정상 종료되었습니다 (종료 코드: 1).', 'launcher_error'), true);
+      assert.strictEqual(isLauncherError(undefined, 'launcher_error'), true);
+      assert.strictEqual(isLauncherError('오케스트레이터 실행 제한 시간 내에 작업 매니페스트가 생성되지 않았습니다.'), true);
+      assert.strictEqual(isLauncherError('필수 실행 도구 또는 PowerShell 7을 찾을 수 없습니다: pwsh'), true);
+      assert.strictEqual(isLauncherError('워커 단위 테스트 실패'), false);
+      assert.strictEqual(isLauncherError(undefined, undefined), false);
+    });
+
+    void test('requiresUserAction returns false for launcher errors', () => {
+      assert.strictEqual(requiresUserAction('failed', null, 'launcher_error', '실행기 오류'), false);
+      assert.strictEqual(requiresUserAction('policy_violation', null, 'launcher_error', '실행기 오류'), false);
+      assert.strictEqual(requiresUserAction('test_failed', null, undefined, '오케스트레이터 실행 제한 시간 내에 작업 매니페스트가 생성되지 않았습니다.'), false);
+      // Regular actionable states still require user action
+      assert.strictEqual(requiresUserAction('policy_violation', null, undefined), true);
+      assert.strictEqual(requiresUserAction('test_failed', null, undefined), true);
+      assert.strictEqual(requiresUserAction('awaiting_review'), true);
+    });
+
+    void test('getUserActionReason returns undefined for launcher errors', () => {
+      assert.strictEqual(getUserActionReason('failed', null, 'launcher_error', '실행기 오류'), undefined);
+      assert.strictEqual(getUserActionReason('failed', null, undefined, '오케스트레이터 실행 제한 시간 내에 작업 매니페스트가 생성되지 않았습니다.'), undefined);
+      assert.ok(getUserActionReason('awaiting_review')?.includes('통합 브랜치'));
+    });
+
+    void test('extractTimelineEvents suppresses timeline for launcher error runs without evidence', () => {
+      const events = extractTimelineEvents({
+        runId: 'launcher-failed-run',
+        status: 'failed',
+        errorCategory: 'launcher_error',
+        error: '실행기 프로세스가 비정상 종료되었습니다 (종료 코드: 1).',
+      });
+      assert.strictEqual(events.length, 0);
     });
   });
 });

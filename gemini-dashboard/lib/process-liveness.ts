@@ -222,7 +222,8 @@ export function isProcessRelatedToRun(
     if (
       cmd.includes('codex-router') ||
       cmd.includes('codex-route') ||
-      cmd.includes('run-parallel-workers')
+      cmd.includes('run-parallel-workers') ||
+      cmd.includes('router-bootstrap')
     ) {
       return true;
     }
@@ -232,7 +233,9 @@ export function isProcessRelatedToRun(
         cmd.includes('-request') ||
         cmd.includes('-repository') ||
         cmd.includes('codex') ||
-        cmd.includes('router')
+        cmd.includes('router') ||
+        cmd.includes('bootstrap') ||
+        cmd.includes('-inputfile')
       ) {
         return true;
       }

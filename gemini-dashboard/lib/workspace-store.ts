@@ -11,17 +11,27 @@ import type {
   RunAliasRecord,
   ConversationSession,
   ConversationApproval,
+  LaunchMetadata,
+} from './workspace-contract.ts';
+import {
+  normalizeRunStatus,
+  normalizeWorkerStatus,
+  isWorkerActive,
+  requiresUserAction,
+  getUserActionReason,
+  extractTimelineEvents,
+  validateSessionId,
+  isLauncherError,
+// @ts-expect-error TS5097 allowed for test runner
 } from './workspace-contract.ts';
 // @ts-expect-error TS5097 allowed for test runner
-import { normalizeRunStatus, normalizeWorkerStatus, isWorkerActive, requiresUserAction, getUserActionReason, extractTimelineEvents, validateSessionId } from './workspace-contract.ts';
+import { sanitizeText, sanitizePath, sanitizeWorkerData } from './workspace-sanitize.ts';
 // @ts-expect-error TS5097 allowed for test runner
-import { sanitizeText, sanitizeWorkerData } from './workspace-sanitize.ts';
-// @ts-expect-error TS5097 allowed for test runner
-import { evaluateRunLiveness, STALE_PROCESS_MISMATCH_REASON } from './process-liveness.ts';
+import { evaluateRunLiveness, isProcessAlive, STALE_PROCESS_MISMATCH_REASON } from './process-liveness.ts';
 import type { LivenessOptions } from './process-liveness.ts';
 
 export { STALE_PROCESS_MISMATCH_REASON };
-export type { LivenessOptions };
+export type { LivenessOptions, LaunchMetadata };
 
 export interface IdempotencyRecord {
   idempotencyKey: string;
@@ -408,6 +418,10 @@ function getDashboardStateDir(repoRoot: string): string {
   return path.join(repoRoot, '.agent', 'dashboard-state');
 }
 
+function parseJsonFileText<T>(raw: string): T {
+  return JSON.parse(raw.replace(/^\uFEFF/, '')) as T;
+}
+
 /**
  * Fetches an existing idempotency record if present.
  */
@@ -422,7 +436,7 @@ export async function getIdempotencyRecord(
 
   try {
     const raw = await fs.promises.readFile(filePath, 'utf8');
-    return JSON.parse(raw) as IdempotencyRecord;
+    return parseJsonFileText<IdempotencyRecord>(raw);
   } catch {
     return null;
   }
@@ -469,10 +483,294 @@ export async function getCompactRunState(
 
   try {
     const raw = await fs.promises.readFile(filePath, 'utf8');
-    return JSON.parse(raw) as CompactRunState;
+    return parseJsonFileText<CompactRunState>(raw);
   } catch {
     return null;
   }
+}
+
+export const DEFAULT_MANIFEST_TIMEOUT_MS = 30_000;
+
+/**
+ * Resolves the persistent log path for a dashboardRunId.
+ */
+export function getRunLogPath(runId: string, repoRoot?: string): string {
+  const root = repoRoot || getAllowedRepoRoot();
+  return path.join(getDashboardStateDir(root), 'logs', `${runId}.log`);
+}
+
+/**
+ * Reads the persistent log file for a run if present.
+ */
+export async function getRunLogContent(runId: string, repoRoot?: string): Promise<string | null> {
+  const root = repoRoot || getAllowedRepoRoot();
+  const logFile = getRunLogPath(runId, root);
+  try {
+    return await fs.promises.readFile(logFile, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Retrieves launch metadata from disk.
+ * Supports both .agent/dashboard-state/meta/<runId>.json (Criterion 2)
+ * and .agent/dashboard-state/launches/<runId>.meta.json.
+ */
+export async function getLaunchMetadata(
+  runId: string,
+  repoRoot?: string
+): Promise<LaunchMetadata | null> {
+  if (!validateRunId(runId)) return null;
+  const root = repoRoot || getAllowedRepoRoot();
+  const metaPath = path.join(getDashboardStateDir(root), 'meta', `${runId}.json`);
+  const launchesPath = path.join(getDashboardStateDir(root), 'launches', `${runId}.meta.json`);
+
+  for (const candidate of [metaPath, launchesPath]) {
+    try {
+      if (fs.existsSync(candidate)) {
+        const raw = await fs.promises.readFile(candidate, 'utf8');
+        return parseJsonFileText<LaunchMetadata>(raw);
+      }
+    } catch {
+      // Try next
+    }
+  }
+  return null;
+}
+
+/**
+ * Atomically saves launch metadata to disk.
+ */
+export async function saveLaunchMetadata(
+  meta: LaunchMetadata,
+  repoRoot?: string
+): Promise<void> {
+  if (!validateRunId(meta.dashboardRunId)) return;
+  const root = repoRoot || getAllowedRepoRoot();
+  const metaPath = path.join(getDashboardStateDir(root), 'meta', `${meta.dashboardRunId}.json`);
+  const launchesPath = path.join(getDashboardStateDir(root), 'launches', `${meta.dashboardRunId}.meta.json`);
+  await atomicWriteJson(metaPath, meta);
+  try {
+    await atomicWriteJson(launchesPath, meta);
+  } catch {}
+}
+
+/**
+ * Sanitizes raw stderr and process termination details, stripping secrets,
+ * user home directories, absolute repository paths, command statement syntax,
+ * and PowerShell internal stack/position message dumps (Criterion 3, 7).
+ */
+export function extractSanitizedFailureReason(
+  logText?: string | null,
+  metaError?: string | null,
+  repoRoot?: string,
+  exitCode?: number | null
+): string {
+  const root = repoRoot || getAllowedRepoRoot();
+  const rawCandidate = ((metaError || '') + '\n' + (logText || '')).trim();
+
+  if (rawCandidate) {
+    const lines = rawCandidate.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    const cleanedLines: string[] = [];
+
+    for (const line of lines) {
+      if (/^\[?BOOTSTRAP_(?:START|EXIT)\]?/i.test(line)) continue;
+      if (/^(?:At |위치 |\+|PositionMessage|CategoryInfo|FullyQualifiedErrorId)/i.test(line)) continue;
+      if (/^(?:NativeCommandError|RemoteException)/i.test(line)) continue;
+
+      let msg = line
+        .replace(/^\[?BOOTSTRAP_ERROR\]?:\s*/i, '')
+        .replace(/^Error:\s*/i, '')
+        .replace(/^throw\s*['"]?/i, '')
+        .replace(/['"]?$/i, '')
+        .trim();
+
+      if (msg) {
+        msg = sanitizeText(msg, root);
+        cleanedLines.push(msg);
+      }
+    }
+
+    if (cleanedLines.length > 0) {
+      const unique = Array.from(new Set(cleanedLines));
+      const summary = unique.slice(0, 2).join('; ');
+      if (summary.trim().length > 0) {
+        return summary.trim().slice(0, 500);
+      }
+    }
+  }
+
+  if (typeof exitCode === 'number' && exitCode !== 0) {
+    return `실행기 프로세스가 비정상 종료되었습니다 (종료 코드: ${exitCode}).`;
+  }
+
+  return '오케스트레이터 실행 제한 시간 내에 작업 매니페스트가 생성되지 않았습니다.';
+}
+
+/**
+ * Settles and watches the state of a run against disk launch metadata,
+ * stdout log stream, and .agent/runs manifest (Criterion 3, 4).
+ * Race-safe and recoverable across server restarts.
+ */
+export async function settleRunState(
+  runId: string,
+  repoRoot?: string,
+  options?: LivenessOptions & { manifestTimeoutMs?: number }
+): Promise<{ compact: CompactRunState; actualRunId?: string | null; settled: boolean } | null> {
+  const root = repoRoot || getAllowedRepoRoot();
+  if (!validateRunId(runId)) return null;
+
+  const compact = await getCompactRunState(runId, root);
+  if (!compact) return null;
+
+  const logPath = getRunLogPath(runId, root);
+  const relativeLogPath = sanitizePath(logPath, root);
+
+  // 1. Check if linked to actualRunId
+  let actualRunId: string | null | undefined = compact.actualRunId;
+  if (!actualRunId) {
+    actualRunId = await findAndLinkActualRun(runId, root);
+  }
+
+  if (actualRunId && validateRunId(actualRunId)) {
+    const manifestPath = path.join(root, '.agent', 'runs', actualRunId, 'run.json');
+    if (fs.existsSync(manifestPath)) {
+      try {
+        const raw = await fs.promises.readFile(manifestPath, 'utf8');
+        const manifest = parseJsonFileText<{
+          status?: string;
+          baseCommit?: string;
+          integrationBranch?: string;
+          tasks?: string[];
+        }>(raw);
+
+        const normStatus = normalizeRunStatus(manifest.status);
+        let changed = false;
+        if (compact.status !== normStatus) {
+          compact.status = normStatus;
+          changed = true;
+        }
+        if (manifest.integrationBranch && compact.integrationBranch !== manifest.integrationBranch) {
+          compact.integrationBranch = manifest.integrationBranch;
+          changed = true;
+        }
+        if (manifest.baseCommit && compact.baseCommit !== manifest.baseCommit) {
+          compact.baseCommit = manifest.baseCommit;
+          changed = true;
+        }
+        const taskCount = Array.isArray(manifest.tasks) ? manifest.tasks.length : 1;
+        if (compact.tasksCount !== taskCount) {
+          compact.tasksCount = taskCount;
+          changed = true;
+        }
+        const userAction = requiresUserAction(normStatus, null, compact.errorCategory, compact.failureReason);
+        if (compact.requiresUserAction !== userAction) {
+          compact.requiresUserAction = userAction;
+          compact.userActionReason = getUserActionReason(normStatus, null, compact.errorCategory, compact.failureReason);
+          changed = true;
+        }
+        if (compact.actualRunId !== actualRunId) {
+          compact.actualRunId = actualRunId;
+          changed = true;
+        }
+        if (changed) {
+          compact.updatedAt = new Date().toISOString();
+          await saveCompactRunState(compact, root);
+        }
+        return { compact, actualRunId, settled: true };
+      } catch {
+        // Fall through
+      }
+    }
+  }
+
+  // If status is already terminal failed/completed/cancelled, no further settlement needed
+  if (compact.status === 'failed' || compact.status === 'completed' || compact.status === 'cancelled') {
+    return { compact, actualRunId: compact.actualRunId, settled: true };
+  }
+
+  // 2. Check launch metadata and process liveness
+  const meta = await getLaunchMetadata(runId, root);
+  const logExists = fs.existsSync(logPath);
+
+  // If there is NO launch metadata and NO log file, this run was NOT started by the dashboard launcher
+  // (e.g. it's a legacy or test-mocked compact run). Do NOT prematurely fail it here;
+  // let evaluateRunLiveness handle process liveness / stale PID detection.
+  if (!meta && !logExists) {
+    return { compact, actualRunId: compact.actualRunId, settled: false };
+  }
+
+  const pid = compact.orchestratorProcessId ?? meta?.orchestratorProcessId;
+  let isAlive = false;
+  if (typeof pid === 'number' && pid > 0) {
+    if (options?.processInfoResolver) {
+      const pInfo = await options.processInfoResolver(pid, options.platform);
+      isAlive = Boolean(pInfo.alive);
+    } else if (options?.isAlive) {
+      isAlive = Boolean(options.isAlive(pid));
+    } else {
+      isAlive = isProcessAlive(pid);
+    }
+  }
+
+  const hasMetaExited = meta?.exitCode !== null && meta?.exitCode !== undefined;
+
+  const nowMs =
+    options?.now instanceof Date
+      ? options.now.getTime()
+      : typeof options?.now === 'number'
+      ? options.now
+      : Date.now();
+  const createdAtMs = compact.createdAt ? new Date(compact.createdAt).getTime() : 0;
+  const ageMs = nowMs - createdAtMs;
+  const timeoutMs = options?.manifestTimeoutMs ?? DEFAULT_MANIFEST_TIMEOUT_MS;
+  const gracePeriodMs = options?.gracePeriodMs ?? 5000;
+  const isTimedOut = ageMs >= timeoutMs;
+
+  const isProcessTerminated = hasMetaExited || (!isAlive && (hasMetaExited || ageMs > gracePeriodMs));
+  const hasManifestEvidence = Boolean(actualRunId && fs.existsSync(path.join(root, '.agent', 'runs', actualRunId, 'run.json')));
+
+  if (!hasManifestEvidence && (isProcessTerminated || isTimedOut)) {
+    let logText: string | null = null;
+    try {
+      if (fs.existsSync(logPath)) {
+        logText = await fs.promises.readFile(logPath, 'utf8');
+      }
+    } catch {}
+
+    const exitCode = meta?.exitCode ?? (isAlive ? null : 1);
+    const sanitizedReason = extractSanitizedFailureReason(logText, meta?.error, root, exitCode);
+
+    compact.status = 'failed';
+    compact.error = sanitizedReason;
+    compact.failureReason = sanitizedReason;
+    compact.errorCategory = 'launcher_error';
+    compact.errorDisplayName = '실행기 오류';
+    compact.retryable = true;
+    compact.requiresUserAction = false;
+    compact.userActionReason = undefined;
+    compact.exitCode = exitCode;
+    compact.failureLogPath = relativeLogPath;
+    compact.activeWorkersCount = 0;
+    compact.tasksCount = 0;
+    compact.updatedAt = new Date(nowMs).toISOString();
+
+    await saveCompactRunState(compact, root);
+
+    // Update launch metadata atomically
+    if (meta) {
+      meta.status = 'failed';
+      meta.exitCode = exitCode;
+      meta.endedAt = meta.endedAt || new Date(nowMs).toISOString();
+      meta.error = sanitizedReason;
+      await saveLaunchMetadata(meta, root);
+    }
+
+    return { compact, actualRunId: null, settled: true };
+  }
+
+  return { compact, actualRunId: null, settled: false };
 }
 
 /**
@@ -503,7 +801,7 @@ export async function getConversationSession(
 
   try {
     const raw = await fs.promises.readFile(filePath, 'utf8');
-    return JSON.parse(raw) as ConversationSession;
+    return parseJsonFileText<ConversationSession>(raw);
   } catch {
     return null;
   }
@@ -527,7 +825,7 @@ export async function listConversationSessions(
       if (!validateSessionId(sessionId)) continue;
       try {
         const raw = await fs.promises.readFile(path.join(convDir, file), 'utf8');
-        sessions.push(JSON.parse(raw) as ConversationSession);
+        sessions.push(parseJsonFileText<ConversationSession>(raw));
       } catch {
         // Skip unreadable session
       }
@@ -704,7 +1002,7 @@ export async function getAliasRecord(
   const aliasPath = path.join(getDashboardStateDir(root), 'aliases', `${runId}.json`);
   try {
     const raw = await fs.promises.readFile(aliasPath, 'utf8');
-    return JSON.parse(raw) as RunAliasRecord;
+    return parseJsonFileText<RunAliasRecord>(raw);
   } catch {
     return null;
   }
@@ -747,7 +1045,63 @@ export async function findAndLinkActualRun(
     }
   }
 
-  // 4. Scan .agent/runs/ for candidate runs matching process ID or time window
+  // 4. Check stdout protocol in log file (Criterion 3)
+  const logPath = getRunLogPath(runId, root);
+  try {
+    if (fs.existsSync(logPath)) {
+      const logContent = await fs.promises.readFile(logPath, 'utf8');
+      const stdoutMatch = logContent.match(/^Run:\s+([0-9a-zA-Z_-]+)/m) ||
+        logContent.match(/(?:ROUTER_ACTUAL_RUN_ID|actualRunId)[:=\s]+([0-9a-zA-Z_-]+)/i);
+      if (stdoutMatch && stdoutMatch[1]) {
+        const candidateId = stdoutMatch[1].trim();
+        if (validateRunId(candidateId)) {
+          const candManifest = path.join(root, '.agent', 'runs', candidateId, 'run.json');
+          if (fs.existsSync(candManifest)) {
+            const aliasRecord: RunAliasRecord = {
+              dashboardRunId: runId,
+              actualRunId: candidateId,
+              orchestratorProcessId: compact.orchestratorProcessId,
+              createdAt: compact.createdAt,
+              linkedAt: new Date().toISOString(),
+              prompt: compact.prompt,
+            };
+            await saveAliasRecord(aliasRecord, root, runId);
+            await saveAliasRecord(aliasRecord, root, candidateId);
+
+            compact.actualRunId = candidateId;
+            compact.updatedAt = new Date().toISOString();
+            await saveCompactRunState(compact, root);
+            return candidateId;
+          }
+        }
+      }
+    }
+  } catch {}
+
+  // 5. Check launch metadata
+  const meta = await getLaunchMetadata(runId, root);
+  if (meta?.actualRunId && validateRunId(meta.actualRunId)) {
+    const candManifest = path.join(root, '.agent', 'runs', meta.actualRunId, 'run.json');
+    if (fs.existsSync(candManifest)) {
+      const aliasRecord: RunAliasRecord = {
+        dashboardRunId: runId,
+        actualRunId: meta.actualRunId,
+        orchestratorProcessId: compact.orchestratorProcessId ?? meta.orchestratorProcessId ?? undefined,
+        createdAt: compact.createdAt,
+        linkedAt: new Date().toISOString(),
+        prompt: compact.prompt,
+      };
+      await saveAliasRecord(aliasRecord, root, runId);
+      await saveAliasRecord(aliasRecord, root, meta.actualRunId);
+
+      compact.actualRunId = meta.actualRunId;
+      compact.updatedAt = new Date().toISOString();
+      await saveCompactRunState(compact, root);
+      return meta.actualRunId;
+    }
+  }
+
+  // 6. Scan .agent/runs/ for candidate runs matching process ID or time window
   const runsDir = path.join(root, '.agent', 'runs');
   try {
     const entries = await fs.promises.readdir(runsDir);
@@ -758,12 +1112,12 @@ export async function findAndLinkActualRun(
       const manifestPath = path.join(runsDir, folder, 'run.json');
       try {
         const raw = await fs.promises.readFile(manifestPath, 'utf8');
-        const manifest = JSON.parse(raw) as {
+        const manifest = parseJsonFileText<{
           runId?: string;
           orchestratorProcessId?: number;
           createdAt?: string;
           repository?: string;
-        };
+        }>(raw);
 
         // Match primarily on orchestratorProcessId (child.pid)
         if (
@@ -839,7 +1193,15 @@ export async function listCompactRuns(
       if (!validateRunId(runId)) continue;
       try {
         const raw = await fs.promises.readFile(path.join(compactDir, file), 'utf8');
-        const parsed = JSON.parse(raw) as CompactRunState;
+        let parsed = parseJsonFileText<CompactRunState>(raw);
+
+        // Try to settle/link run if in running or planning state
+        if (parsed.status === 'running' || parsed.status === 'planning') {
+          const settled = await settleRunState(runId, root, livenessOptions);
+          if (settled?.compact) {
+            parsed = settled.compact;
+          }
+        }
 
         // Try to link to actual run if not linked yet
         const actualRunId = parsed.actualRunId || (await findAndLinkActualRun(runId, root));
@@ -851,18 +1213,18 @@ export async function listCompactRuns(
           const actualManifestPath = path.join(root, '.agent', 'runs', actualRunId, 'run.json');
           try {
             const mRaw = await fs.promises.readFile(actualManifestPath, 'utf8');
-            const m = JSON.parse(mRaw) as {
+            const m = parseJsonFileText<{
               status?: string;
               updatedAt?: string;
               tasks?: string[];
               baseCommit?: string;
               orchestratorProcessId?: number;
-            };
+            }>(mRaw);
             if (m.status) {
               const norm = normalizeRunStatus(m.status);
               parsed.status = norm;
-              parsed.requiresUserAction = requiresUserAction(norm);
-              parsed.userActionReason = getUserActionReason(norm);
+              parsed.requiresUserAction = requiresUserAction(norm, null, parsed.errorCategory, parsed.failureReason);
+              parsed.userActionReason = getUserActionReason(norm, null, parsed.errorCategory, parsed.failureReason);
             }
             if (m.updatedAt) parsed.updatedAt = m.updatedAt;
             if (Array.isArray(m.tasks)) parsed.tasksCount = m.tasks.length;
@@ -905,7 +1267,7 @@ export async function listCompactRuns(
       const manifestPath = path.join(runsDir, folder, 'run.json');
       try {
         const raw = await fs.promises.readFile(manifestPath, 'utf8');
-        const manifest = JSON.parse(raw) as {
+        const manifest = parseJsonFileText<{
           runId?: string;
           status?: string;
           createdAt?: string;
@@ -913,7 +1275,7 @@ export async function listCompactRuns(
           tasks?: string[];
           baseCommit?: string;
           orchestratorProcessId?: number;
-        };
+        }>(raw);
 
         const existing = runsMap.get(folder);
         const normStatus = normalizeRunStatus(manifest.status);
@@ -974,6 +1336,8 @@ export async function spawnRouterRun(options: {
   spawner?: SpawnerFn;
   env?: Record<string, string | undefined>;
   toolOverrides?: Partial<Record<'pwsh' | 'codex' | 'rg' | 'agy', string>>;
+  routerScript?: string;
+  manifestTimeoutMs?: number;
 }): Promise<{ runId: string; isDuplicate: boolean; status: string; actualRunId?: string }> {
   const root = options.repoRoot || getAllowedRepoRoot();
 
@@ -1004,23 +1368,42 @@ export async function spawnRouterRun(options: {
     overrides: options.toolOverrides,
   });
 
+  const stateDir = getDashboardStateDir(root);
+  const launchesDir = path.join(stateDir, 'launches');
+  const logsDir = path.join(stateDir, 'logs');
+  const metaDir = path.join(stateDir, 'meta');
+  await fs.promises.mkdir(launchesDir, { recursive: true });
+  await fs.promises.mkdir(logsDir, { recursive: true });
+  await fs.promises.mkdir(metaDir, { recursive: true });
+
+  const inputPath = path.join(launchesDir, `${runId}.input.json`);
+  const logPath = path.join(logsDir, `${runId}.log`);
+  const metaPath = path.join(metaDir, `${runId}.json`);
+  const relativeLogPath = sanitizePath(logPath, root);
+
   if (!toolResult.ok || !toolResult.tools) {
     const sanitizedReason = sanitizeText(
       `필수 실행 도구 또는 PowerShell 7을 찾을 수 없습니다: ${toolResult.missing?.join(', ')}`,
       root
     );
+    // Criterion 6: 실행기 오류는 requiresUserAction=false, 표시명 실행기 오류, 재시도 가능으로 분류
     const failedCompact: CompactRunState = {
       runId,
       prompt: validatedPrompt.prompt,
       createdAt: now,
       updatedAt: now,
       status: 'failed',
-      requiresUserAction: true,
-      userActionReason: sanitizedReason,
-      tasksCount: 1,
+      requiresUserAction: false,
+      userActionReason: undefined,
+      errorCategory: 'launcher_error',
+      errorDisplayName: '실행기 오류',
+      retryable: true,
+      tasksCount: 0,
       activeWorkersCount: 0,
       completedTasksCount: 0,
       error: sanitizedReason,
+      failureReason: sanitizedReason,
+      failureLogPath: relativeLogPath,
     };
     await saveCompactRunState(failedCompact, root);
     if (options.idempotencyKey) {
@@ -1042,7 +1425,49 @@ export async function spawnRouterRun(options: {
 
   const tools = toolResult.tools;
 
-  // Atomically save initial compact state
+  // Fixed router script path inside repository root
+  const routerScript = options.routerScript
+    ? path.resolve(root, options.routerScript)
+    : path.join(root, 'codex-router.ps1');
+
+  // Fixed bootstrap script path inside repository root (Criterion 1)
+  const bootstrapScript = path.join(root, 'gemini-dashboard', 'scripts', 'router-bootstrap.ps1');
+
+  // Self-seed bootstrap script if running in temporary test repository
+  if (!fs.existsSync(bootstrapScript)) {
+    const candidateSource = path.join(getAllowedRepoRoot(), 'gemini-dashboard', 'scripts', 'router-bootstrap.ps1');
+    if (fs.existsSync(candidateSource) && candidateSource.toLowerCase() !== bootstrapScript.toLowerCase()) {
+      await fs.promises.mkdir(path.dirname(bootstrapScript), { recursive: true });
+      await fs.promises.copyFile(candidateSource, bootstrapScript);
+    }
+  }
+
+  // Write safe JSON input file (Criterion 1: data passing, no shell string interpolation)
+  await atomicWriteJson(inputPath, {
+    dashboardRunId: runId,
+    prompt: validatedPrompt.prompt,
+    repoRoot: root,
+    routerScript,
+    logPath,
+    metaPath,
+    createdAt: now,
+  });
+
+  // Write initial launch metadata
+  const initialMeta: LaunchMetadata = {
+    dashboardRunId: runId,
+    orchestratorProcessId: null,
+    startedAt: now,
+    status: 'running',
+    exitCode: null,
+    endedAt: null,
+    actualRunId: null,
+    error: null,
+    logPath: relativeLogPath,
+  };
+  await saveLaunchMetadata(initialMeta, root);
+
+  // Atomically save initial compact state (Criterion 5: no fake tasksCount before manifest)
   const initialCompact: CompactRunState = {
     runId,
     prompt: validatedPrompt.prompt,
@@ -1050,9 +1475,10 @@ export async function spawnRouterRun(options: {
     updatedAt: now,
     status: 'running',
     requiresUserAction: false,
-    tasksCount: 1,
+    tasksCount: 0,
     activeWorkersCount: 1,
     completedTasksCount: 0,
+    failureLogPath: relativeLogPath,
   };
   await saveCompactRunState(initialCompact, root);
 
@@ -1070,26 +1496,21 @@ export async function spawnRouterRun(options: {
     );
   }
 
-  // Fixed router script path inside repository root
-  const routerScript = path.join(root, 'codex-router.ps1');
-
   // Use injected spawner or default spawn
   const spawnFn: SpawnerFn = options.spawner || ((cmd, args, opts) => spawn(cmd, args, opts));
 
-  // Use resolved PowerShell 7 executable (never legacy powershell.exe on Windows to prevent Korean path mojibake)
+  // Use resolved PowerShell 7 executable
   const executable = tools.pwsh;
 
-  // Strict argument array without shell: true
+  // Strict argument array using bootstrap script and input file (Criterion 1)
   const safeArgs = [
     '-NoProfile',
     '-ExecutionPolicy',
     'Bypass',
     '-File',
-    routerScript,
-    '-Request',
-    validatedPrompt.prompt,
-    '-Repository',
-    root,
+    bootstrapScript,
+    '-InputFile',
+    inputPath,
   ];
 
   // Pass augmented PATH and UTF-8 environment variables safely
@@ -1103,11 +1524,17 @@ export async function spawnRouterRun(options: {
     LC_ALL: 'ko_KR.UTF-8',
   };
 
+  // Open persistent log file descriptor for direct stdout/stderr redirection (Criterion 2)
+  const stdoutFd = fs.openSync(logPath, 'a');
+  const stderrFd = fs.openSync(logPath, 'a');
   let childPid: number | undefined;
   try {
     const child = spawnFn(executable, safeArgs, {
-      detached: true,
-      stdio: 'ignore',
+      // On Windows, detached console creation can terminate pwsh before the
+      // script starts when stdout/stderr are redirected to inherited handles.
+      // `unref()` is sufficient for the long-lived dashboard server.
+      detached: process.platform !== 'win32',
+      stdio: ['ignore', stdoutFd, stderrFd],
       windowsHide: true,
       cwd: root,
       env: childEnv,
@@ -1118,19 +1545,34 @@ export async function spawnRouterRun(options: {
     if (child && typeof child.pid === 'number') {
       childPid = child.pid;
     }
-  } catch {
-    // If process launch failed, mark compact state as failed
+  } catch (spawnErr: unknown) {
     initialCompact.status = 'failed';
     initialCompact.updatedAt = new Date().toISOString();
-    initialCompact.error = '워커 프로세스 시작에 실패했습니다.';
+    initialCompact.errorCategory = 'launcher_error';
+    initialCompact.errorDisplayName = '실행기 오류';
+    initialCompact.retryable = true;
+    initialCompact.requiresUserAction = false;
+    const rawMsg = spawnErr instanceof Error ? spawnErr.message : String(spawnErr);
+    const sanitized = extractSanitizedFailureReason(rawMsg, rawMsg, root, 1);
+    initialCompact.error = sanitized;
+    initialCompact.failureReason = sanitized;
+    initialCompact.activeWorkersCount = 0;
     await saveCompactRunState(initialCompact, root);
-    throw new Error('워커 프로세스 시작에 실패했습니다.');
+    throw new Error(sanitized);
+  } finally {
+    try {
+      fs.closeSync(stdoutFd);
+      fs.closeSync(stderrFd);
+    } catch {}
   }
 
   // Save child PID and initial alias record
   if (childPid !== undefined) {
     initialCompact.orchestratorProcessId = childPid;
     await saveCompactRunState(initialCompact, root);
+
+    initialMeta.orchestratorProcessId = childPid;
+    await saveLaunchMetadata(initialMeta, root);
 
     await saveAliasRecord(
       {
@@ -1153,7 +1595,7 @@ export async function spawnRouterRun(options: {
 export async function getRunDetails(
   runId: string,
   repoRoot?: string,
-  livenessOptions?: LivenessOptions
+  livenessOptions?: LivenessOptions & { manifestTimeoutMs?: number }
 ): Promise<RunDetail | null> {
   if (!validateRunId(runId)) {
     return null;
@@ -1161,14 +1603,23 @@ export async function getRunDetails(
 
   const root = repoRoot || getAllowedRepoRoot();
 
-  // 1. Resolve actual worker run ID if linked or newly created
-  const actualRunId = await findAndLinkActualRun(runId, root);
+  // 1. Settle run state against disk metadata and log protocol (Criterion 3, 4)
+  const settledResult = await settleRunState(runId, root, livenessOptions);
+  let compact =
+    settledResult?.compact ||
+    (await getCompactRunState(runId, root));
+
+  // Resolve actual worker run ID if linked or newly created
+  let actualRunId: string | null | undefined = settledResult?.actualRunId || compact?.actualRunId;
+  if (!actualRunId) {
+    actualRunId = await findAndLinkActualRun(runId, root);
+  }
+  if (!compact && actualRunId) {
+    compact = await getCompactRunState(actualRunId, root);
+  }
   const effectiveRunId = actualRunId || runId;
 
   const runDir = path.join(root, '.agent', 'runs', effectiveRunId);
-  let compact =
-    (await getCompactRunState(runId, root)) ||
-    (actualRunId ? await getCompactRunState(actualRunId, root) : null);
   const alias =
     (await getAliasRecord(runId, root)) ||
     (actualRunId ? await getAliasRecord(actualRunId, root) : null);
@@ -1186,7 +1637,16 @@ export async function getRunDetails(
 
   try {
     const raw = await fs.promises.readFile(path.join(runDir, 'run.json'), 'utf8');
-    manifest = JSON.parse(raw);
+    manifest = parseJsonFileText<{
+      runId?: string;
+      status?: string;
+      createdAt?: string;
+      updatedAt?: string;
+      tasks?: string[];
+      baseCommit?: string;
+      integrationBranch?: string;
+      orchestratorProcessId?: number;
+    }>(raw);
   } catch {
     // Run manifest might not exist yet if just launched
   }
@@ -1268,7 +1728,9 @@ export async function getRunDetails(
       // Ignore
     }
   }
-  if (taskIds.length === 0) {
+  // Suppress virtual TASK-001 on initial launcher failures (Criterion 5)
+  const isLauncher = compact?.errorCategory === 'launcher_error' || isLauncherError(compact?.failureReason || compact?.error);
+  if (taskIds.length === 0 && !isLauncher && (status === 'running' || isStaleMismatch)) {
     taskIds = ['TASK-001'];
   }
 
@@ -1277,7 +1739,7 @@ export async function getRunDetails(
     try {
       const taskFile = path.join(tasksDir, `${tid}.json`);
       const taskRaw = await fs.promises.readFile(taskFile, 'utf8');
-      const parsedTask = JSON.parse(taskRaw) as { name?: string };
+      const parsedTask = parseJsonFileText<{ name?: string }>(taskRaw);
       if (parsedTask.name) taskName = parsedTask.name;
     } catch {
       // Ignore
@@ -1289,13 +1751,13 @@ export async function getRunDetails(
     try {
       const resFile = path.join(resultsDir, `${tid}-result.json`);
       const resRaw = await fs.promises.readFile(resFile, 'utf8');
-      workerData = JSON.parse(resRaw) as LiveWorkerData;
+      workerData = parseJsonFileText<LiveWorkerData>(resRaw);
     } catch {
       // Check workers dir (live worker state)
       try {
         const workerFile = path.join(workersDir, `${tid}.json`);
         const wRaw = await fs.promises.readFile(workerFile, 'utf8');
-        workerData = JSON.parse(wRaw) as LiveWorkerData;
+        workerData = parseJsonFileText<LiveWorkerData>(wRaw);
       } catch {
         // Fallback default worker data
         workerData = {
@@ -1344,10 +1806,11 @@ export async function getRunDetails(
         changedFiles: sanitized.changedFiles,
         finalResponse: sanitized.finalResponse,
         error: sanitized.error,
+        errorCategory: compact?.errorCategory,
       });
 
-      const userAction = requiresUserAction(sanitized.status, sanitized.escalation);
-      const actionReason = getUserActionReason(sanitized.status, sanitized.escalation);
+      const userAction = requiresUserAction(sanitized.status, sanitized.escalation, compact?.errorCategory, sanitized.error);
+      const actionReason = getUserActionReason(sanitized.status, sanitized.escalation, compact?.errorCategory, sanitized.error);
 
       tasks.push({
         runId: effectiveRunId,
@@ -1371,24 +1834,35 @@ export async function getRunDetails(
     }
   }
 
-  // Combined timeline
+  // Combined timeline (Criterion 5: only if real worker/execution evidence exists)
   const firstWorker = activeWorkers[0] || historyWorkers[0];
-  const overallTimeline = extractTimelineEvents({
-    runId: effectiveRunId,
-    status,
-    startedAt: createdAt,
-    updatedAt: updatedAt,
-    verification: firstWorker?.verification,
-    escalation: firstWorker?.escalation,
-    changedFiles: firstWorker?.changedFiles,
-    finalResponse: firstWorker?.finalResponse,
-    error: firstWorker?.error,
-  });
+  const overallTimeline = firstWorker
+    ? extractTimelineEvents({
+        runId: effectiveRunId,
+        status,
+        startedAt: createdAt,
+        updatedAt: updatedAt,
+        recentLogs: firstWorker.recentLogs,
+        retryHistory: firstWorker.retryHistory,
+        verification: firstWorker.verification,
+        escalation: firstWorker.escalation,
+        changedFiles: firstWorker.changedFiles,
+        finalResponse: firstWorker.finalResponse,
+        error: firstWorker.error,
+        errorCategory: compact?.errorCategory,
+      })
+    : [];
 
-  const runUserAction = isStaleMismatch ? true : requiresUserAction(status, firstWorker?.escalation);
-  const runActionReason = isStaleMismatch
+  const runUserAction = isLauncher
+    ? false
+    : isStaleMismatch
+    ? true
+    : requiresUserAction(status, firstWorker?.escalation, compact?.errorCategory, compact?.failureReason);
+  const runActionReason = isLauncher
+    ? undefined
+    : isStaleMismatch
     ? STALE_PROCESS_MISMATCH_REASON
-    : getUserActionReason(status, firstWorker?.escalation);
+    : getUserActionReason(status, firstWorker?.escalation, compact?.errorCategory, compact?.failureReason);
 
   // Read agent message / integration review if present
   let agentMessage: string | undefined = firstWorker?.finalResponse || undefined;
@@ -1410,10 +1884,10 @@ export async function getRunDetails(
     requiresUserAction: runUserAction,
     userActionReason: runActionReason,
     tasksCount: tasks.length,
-    activeWorkersCount: isStaleMismatch ? 0 : activeWorkers.length,
+    activeWorkersCount: isStaleMismatch || status === 'failed' ? 0 : activeWorkers.length,
     completedTasksCount: historyWorkers.filter(w => w.status === 'completed').length,
     tasks,
-    activeWorkers: isStaleMismatch ? [] : activeWorkers,
+    activeWorkers: isStaleMismatch || status === 'failed' ? [] : activeWorkers,
     historyWorkers,
     timeline: overallTimeline,
     agentMessage,
@@ -1421,6 +1895,12 @@ export async function getRunDetails(
     orchestratorProcessId: manifest?.orchestratorProcessId || compact?.orchestratorProcessId,
     integrationBranch: manifest?.integrationBranch,
     error: compact?.error || (isStaleMismatch ? STALE_PROCESS_MISMATCH_REASON : undefined),
+    failureLogPath: compact?.failureLogPath || (status === 'failed' ? sanitizePath(getRunLogPath(runId, root), root) : undefined),
+    failureReason: compact?.failureReason || compact?.error || undefined,
+    exitCode: compact?.exitCode,
+    errorCategory: compact?.errorCategory,
+    errorDisplayName: compact?.errorDisplayName || (isLauncher ? '실행기 오류' : undefined),
+    retryable: compact?.retryable !== undefined ? compact.retryable : (isLauncher ? true : undefined),
   };
 }
 

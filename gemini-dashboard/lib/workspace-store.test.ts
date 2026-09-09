@@ -121,13 +121,17 @@ void describe('Workspace Store (Idempotency, Path Traversal, & Recovery)', () =>
       assert.ok(first.runId);
       assert.strictEqual(spawnCalls.length, 1);
 
-      // Verify command and argument safety: NO shell string concat!
+      // Verify command and argument safety: bootstrap script with safe -InputFile JSON path (Criterion 1)
       const call = spawnCalls[0];
-      assert.ok(call.command.includes('powershell') || call.command.includes('pwsh'));
+      assert.ok(call.command.toLowerCase().includes('powershell') || call.command.toLowerCase().includes('pwsh'));
       assert.ok(Array.isArray(call.args));
-      assert.ok(call.args.includes('-Request'));
-      assert.ok(call.args.includes(prompt));
-      assert.ok(call.args.includes('-Repository'));
+      assert.ok(call.args.includes('-InputFile'));
+      const inputIdx = call.args.indexOf('-InputFile');
+      const inputPath = call.args[inputIdx + 1];
+      assert.ok(inputPath && fs.existsSync(inputPath));
+      const inputData = JSON.parse(fs.readFileSync(inputPath, 'utf8')) as { prompt: string; repoRoot: string };
+      assert.strictEqual(inputData.prompt, prompt);
+      assert.strictEqual(path.resolve(inputData.repoRoot), path.resolve(testTempDir));
 
       // 2nd duplicate submission with SAME idempotency key
       const second = await spawnRouterRun({
@@ -320,12 +324,15 @@ void describe('Workspace Store (Idempotency, Path Traversal, & Recovery)', () =>
       const compact = await getCompactRunState(thrownError.runId, testTempDir);
       assert.ok(compact);
       assert.strictEqual(compact.status, 'failed');
-      assert.strictEqual(compact.requiresUserAction, true);
-      assert.ok(compact.userActionReason);
-      assert.ok(compact.userActionReason.includes('필수 실행 도구'));
+      assert.strictEqual(compact.requiresUserAction, false);
+      assert.strictEqual(compact.errorCategory, 'launcher_error');
+      assert.strictEqual(compact.errorDisplayName, '실행기 오류');
+      assert.strictEqual(compact.retryable, true);
+      assert.ok(compact.failureReason);
+      assert.ok(compact.failureReason.includes('필수 실행 도구'));
 
       // Confirm sanitization: error does not expose raw root path
-      assert.ok(!compact.userActionReason.includes(testTempDir));
+      assert.ok(!compact.failureReason.includes(testTempDir));
     });
   });
 
@@ -375,10 +382,16 @@ void describe('Workspace Store (Idempotency, Path Traversal, & Recovery)', () =>
       assert.strictEqual(compact.prompt, '한글 경로 테스트 작업');
       assert.strictEqual(compact.orchestratorProcessId, 4321);
 
-      // Verify spawn call passed PowerShell 7 (pwsh) and Korean repo path
+      // Verify spawn call passed PowerShell 7 (pwsh) and Korean repo path via -InputFile
       const call = spawnCalls[0];
       assert.ok(call.command.toLowerCase().includes('pwsh'));
-      assert.ok(call.args.includes(koreanRepoDir));
+      assert.ok(call.args.includes('-InputFile'));
+      const inputIdx = call.args.indexOf('-InputFile');
+      const inputPath = call.args[inputIdx + 1];
+      assert.ok(inputPath && fs.existsSync(inputPath));
+      const inputData = JSON.parse(fs.readFileSync(inputPath, 'utf8')) as { prompt: string; repoRoot: string };
+      assert.strictEqual(inputData.prompt, '한글 경로 테스트 작업');
+      assert.strictEqual(path.resolve(inputData.repoRoot), path.resolve(koreanRepoDir));
     });
 
     void test('real child process spawned in Korean path outputs UTF-8 without mojibake', async () => {

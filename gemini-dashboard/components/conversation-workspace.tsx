@@ -501,11 +501,15 @@ export function ConversationWorkspace({
             <div className="flex items-center justify-between border-b border-border/60 p-3.5 bg-card/30">
               <div className="flex items-center gap-2">
                 <span className="text-xs font-semibold text-white">작업 Run 상태</span>
-                {activeStatusMeta && (
+                {currentRun.errorCategory === 'launcher_error' ? (
+                  <span className="rounded-full border px-2 py-0.5 text-[10px] font-medium bg-rose-500/20 text-rose-300 border-rose-400/50">
+                    {currentRun.errorDisplayName || '실행기 오류'}
+                  </span>
+                ) : activeStatusMeta ? (
                   <span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${activeStatusMeta.badgeClass}`}>
                     {activeStatusMeta.label}
                   </span>
-                )}
+                ) : null}
               </div>
               <button
                 type="button"
@@ -534,10 +538,58 @@ export function ConversationWorkspace({
                     </span>
                     <span>{new Date(currentRun.createdAt).toLocaleTimeString('ko-KR', { hour12: false })}</span>
                   </div>
+                  {currentRun.failureLogPath && (
+                    <div className="flex justify-between items-center text-slate-400">
+                      <span>로그:</span>
+                      <span className="font-mono text-slate-200 truncate max-w-[170px]" title={currentRun.failureLogPath}>
+                        {currentRun.failureLogPath}
+                      </span>
+                    </div>
+                  )}
+                  {typeof currentRun.exitCode === 'number' && (
+                    <div className="flex justify-between items-center text-slate-400">
+                      <span>종료 코드:</span>
+                      <span className="font-mono text-slate-200">{currentRun.exitCode}</span>
+                    </div>
+                  )}
                   <div className="pt-2 border-t border-border/40 text-[11px] text-slate-300">
                     <span className="text-slate-500">요청:</span> {currentRun.prompt}
                   </div>
                 </div>
+
+                {/* Launcher Error Alert (Criterion 6 & 7) */}
+                {(currentRun.errorCategory === 'launcher_error' || (!currentRun.requiresUserAction && (currentRun.status === 'failed' || Boolean(currentRun.failureReason)))) && (
+                  <div
+                    role="alert"
+                    className="rounded-lg border border-rose-500/60 bg-rose-500/10 p-3 text-rose-200 text-xs space-y-2"
+                  >
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-1.5 font-semibold text-rose-300">
+                        <AlertCircle className="h-4 w-4 text-rose-400 shrink-0" aria-hidden="true" />
+                        <span>{currentRun.errorDisplayName || '실행기 오류'}</span>
+                      </div>
+                      {typeof currentRun.exitCode === 'number' && (
+                        <span className="font-mono text-[10px] bg-rose-950/60 text-rose-300 px-1.5 py-0.5 rounded border border-rose-500/30">
+                          종료 코드: {currentRun.exitCode}
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-[11px] leading-relaxed text-rose-100/90">
+                      {currentRun.failureReason || currentRun.error || '실행기 초기화 또는 프로세스 조기 종료로 인해 실행에 실패했습니다.'}
+                    </p>
+                    {currentRun.retryable && (
+                      <p className="text-[10px] text-rose-300/80">
+                        재시도 가능: 일시적 환경 또는 프로세스 문제인 경우 다시 시도할 수 있습니다.
+                      </p>
+                    )}
+                    {currentRun.failureLogPath && (
+                      <div className="text-[10px] text-slate-300 pt-1 border-t border-rose-500/20">
+                        <span className="text-slate-400">실패 로그:</span>{' '}
+                        <code className="font-mono text-slate-200">{currentRun.failureLogPath}</code>
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 {/* User Action Required Alert */}
                 {currentRun.requiresUserAction && (

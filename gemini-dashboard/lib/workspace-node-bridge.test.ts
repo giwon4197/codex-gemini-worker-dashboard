@@ -9,7 +9,7 @@ import type { SpawnOptions } from 'node:child_process';
 // @ts-expect-error TS5097 allowed for test runner
 import { handleWorkspaceBridgeRequest, createWorkspaceBridgeMiddleware, workspaceBridgePlugin, resetWorkspaceBridgeOptions } from './workspace-node-bridge.ts';
 // @ts-expect-error TS5097 allowed for test runner
-import { getCompactRunState, getAliasRecord } from './workspace-store.ts';
+import { getCompactRunState, getAliasRecord, resolveRequiredTools, saveConversationSession, getRunDetails, spawnRouterRun } from './workspace-store.ts';
 
 void describe('Workspace Node Bridge (Vite Dev/Server Middleware & App Route Bridge)', () => {
   let testRepoDir: string;
@@ -128,25 +128,29 @@ void describe('Workspace Node Bridge (Vite Dev/Server Middleware & App Route Bri
       assert.strictEqual(data.status, 'running');
       assert.ok(data.runId);
 
-      // Verify spawn arguments and options strictly
+      // Verify spawn arguments and options strictly (Criteria 1 & 2)
       assert.strictEqual(spawnCalls.length, 1);
       const call = spawnCalls[0];
       assert.ok(call.command.toLowerCase().includes('pwsh'));
-      assert.deepStrictEqual(call.args.slice(0, 4), [
-        '-NoProfile',
-        '-ExecutionPolicy',
-        'Bypass',
-        '-File',
-      ]);
-      assert.strictEqual(path.resolve(call.args[4]), path.resolve(testRepoDir, 'codex-router.ps1'));
-      assert.strictEqual(call.args[5], '-Request');
-      assert.strictEqual(call.args[6], prompt);
-      assert.strictEqual(call.args[7], '-Repository');
-      assert.strictEqual(path.resolve(call.args[8]), path.resolve(testRepoDir));
+      assert.ok(call.args.includes('-InputFile'));
+      assert.ok(call.args.includes('-File'));
+      const fileIdx = call.args.indexOf('-File');
+      assert.strictEqual(path.resolve(call.args[fileIdx + 1]), path.resolve(testRepoDir, 'gemini-dashboard', 'scripts', 'router-bootstrap.ps1'));
+      const inputIdx = call.args.indexOf('-InputFile');
+      const inputPath = call.args[inputIdx + 1];
+      assert.ok(inputPath && fs.existsSync(inputPath));
+      const inputData = JSON.parse(fs.readFileSync(inputPath, 'utf8')) as { prompt: string; repoRoot: string; routerScript: string };
+      assert.strictEqual(inputData.prompt, prompt);
+      assert.strictEqual(path.resolve(inputData.repoRoot), path.resolve(testRepoDir));
+      assert.strictEqual(path.resolve(inputData.routerScript), path.resolve(testRepoDir, 'codex-router.ps1'));
 
-      // Verify detached and stdio options
-      assert.strictEqual(call.options.detached, true);
-      assert.strictEqual(call.options.stdio, 'ignore');
+      // Windows keeps redirected PowerShell handles reliable only when it is not
+      // placed in a detached process group. Other platforms remain detached.
+      assert.strictEqual(call.options.detached, process.platform !== 'win32');
+      assert.ok(Array.isArray(call.options.stdio));
+      assert.strictEqual(call.options.stdio[0], 'ignore');
+      assert.strictEqual(typeof call.options.stdio[1], 'number');
+      assert.strictEqual(typeof call.options.stdio[2], 'number');
       assert.strictEqual(call.options.windowsHide, true);
       assert.strictEqual(path.resolve(call.options.cwd as string), path.resolve(testRepoDir));
 
@@ -819,6 +823,405 @@ void describe('Workspace Node Bridge (Vite Dev/Server Middleware & App Route Bri
       const getData = (await getRes.json()) as { ok: boolean; session: { sessionId: string; linkedRunIds: string[] } };
       assert.strictEqual(getData.session.sessionId, sessionId);
       assert.ok(getData.session.linkedRunIds.includes(apprData1.runId));
+    });
+  });
+
+  void describe('12. Real PowerShell 7 Integration in Korean Space Path with Approval API (Criterion 8)', () => {
+    let koreanSpaceRepo: string;
+    let server: http.Server | undefined;
+    let serverUrl: string;
+    let prevAllowed12: string | undefined;
+
+    beforeEach(async () => {
+      prevAllowed12 = process.env.ALLOWED_REPO_ROOT;
+      const toolRes = resolveRequiredTools();
+      if (!toolRes.ok || !toolRes.tools?.pwsh) {
+        return;
+      }
+
+      koreanSpaceRepo = fs.mkdtempSync(path.join(os.tmpdir(), '한글 공백 저장소 테스트-'));
+      process.env.ALLOWED_REPO_ROOT = koreanSpaceRepo;
+      // Create required subdirectories
+      fs.mkdirSync(path.join(koreanSpaceRepo, '.agent', 'runs'), { recursive: true });
+      fs.mkdirSync(path.join(koreanSpaceRepo, '.agent', 'dashboard-state', 'compact'), { recursive: true });
+      fs.mkdirSync(path.join(koreanSpaceRepo, '.agent', 'dashboard-state', 'conversations'), { recursive: true });
+      fs.mkdirSync(path.join(koreanSpaceRepo, '.agent', 'dashboard-state', 'logs'), { recursive: true });
+      fs.mkdirSync(path.join(koreanSpaceRepo, '.agent', 'dashboard-state', 'meta'), { recursive: true });
+      fs.mkdirSync(path.join(koreanSpaceRepo, 'gemini-dashboard', 'scripts'), { recursive: true });
+
+      // Locate bootstrap script
+      const candidates = [
+        path.resolve(process.cwd(), 'scripts', 'router-bootstrap.ps1'),
+        path.resolve(process.cwd(), 'gemini-dashboard', 'scripts', 'router-bootstrap.ps1'),
+      ];
+      const bootstrapSrc = candidates.find(c => fs.existsSync(c));
+      const bootstrapDest = path.join(koreanSpaceRepo, 'gemini-dashboard', 'scripts', 'router-bootstrap.ps1');
+      if (bootstrapSrc) {
+        fs.copyFileSync(bootstrapSrc, bootstrapDest);
+      }
+
+      // Create fixture codex-router.ps1 that writes minimal awaiting_review manifest and exits 0
+      const routerScriptContent = [
+        'param([string]$Request, [string]$Repository, [string]$InputFile)',
+        '$actualRunId = "20260909-integ-actual-001"',
+        'Write-Output "BOOTSTRAP_ROUTER_START: Request=$Request"',
+        'Write-Output "Run: $actualRunId"',
+        '$runDir = Join-Path $Repository ".agent/runs/$actualRunId"',
+        '$workersDir = Join-Path $runDir "workers"',
+        'New-Item -ItemType Directory -Force -Path $workersDir | Out-Null',
+        '$manifest = @{ runId = $actualRunId; status = "awaiting_review"; createdAt = (Get-Date).ToString("o"); updatedAt = (Get-Date).ToString("o"); tasks = @("TASK-001"); integrationBranch = "integration/$actualRunId" }',
+        '$manifestJson = $manifest | ConvertTo-Json -Compress',
+        '[System.IO.File]::WriteAllText((Join-Path $runDir "run.json"), $manifestJson, [System.Text.Encoding]::UTF8)',
+        '$worker = @{ runId = $actualRunId; taskId = "TASK-001"; task = "작업 검증"; status = "awaiting_review"; model = "gemini-3.8-flash"; startedAt = (Get-Date).ToString("o"); updatedAt = (Get-Date).ToString("o") }',
+        '$workerJson = $worker | ConvertTo-Json -Compress',
+        '[System.IO.File]::WriteAllText((Join-Path $workersDir "TASK-001.json"), $workerJson, [System.Text.Encoding]::UTF8)',
+        'Write-Output "BOOTSTRAP_ROUTER_DONE: Run=$actualRunId awaiting_review"',
+        'exit 0',
+      ].join('\r\n');
+      fs.writeFileSync(path.join(koreanSpaceRepo, 'codex-router.ps1'), routerScriptContent, 'utf8');
+
+      // Start real localhost HTTP server
+      server = http.createServer((req, res) => {
+        const mw = createWorkspaceBridgeMiddleware({
+          repoRoot: koreanSpaceRepo,
+        });
+        mw(req, res, () => {
+          res.writeHead(404);
+          res.end();
+        });
+      });
+
+      await new Promise<void>((resolve) => {
+        if (!server) return resolve();
+        server.listen(0, '127.0.0.1', () => {
+          const addr = server!.address() as AddressInfo;
+          serverUrl = `http://127.0.0.1:${addr.port}`;
+          resolve();
+        });
+      });
+    });
+
+    afterEach(async () => {
+      if (prevAllowed12 !== undefined) {
+        process.env.ALLOWED_REPO_ROOT = prevAllowed12;
+      } else {
+        delete process.env.ALLOWED_REPO_ROOT;
+      }
+      if (server) {
+        await new Promise<void>((resolve) => {
+          server!.close(() => resolve());
+        });
+        server = undefined;
+      }
+    if (koreanSpaceRepo) {
+        try {
+          fs.rmSync(koreanSpaceRepo, { recursive: true, force: true });
+        } catch {}
+      }
+    });
+
+    void test('real pwsh executes bootstrap and router in Korean space path, stopping at awaiting_review', async () => {
+      const toolRes = resolveRequiredTools();
+      if (!toolRes.ok || !toolRes.tools?.pwsh) {
+        return; // Skip if PowerShell 7 is unavailable in test environment
+      }
+
+      // 1. Create a conversation session with pending approval
+      const sessionId = 'session-korean-space-001';
+      const approvalId = 'appr-integ-001';
+      const prompt = '한글과 공백 경로에서 안전한 라우터 실행 검증';
+
+      await saveConversationSession(
+        {
+          sessionId,
+          messages: [
+            {
+              id: 'msg-001',
+              sender: 'user',
+              text: prompt,
+              timestamp: new Date().toISOString(),
+            },
+            {
+              id: 'msg-002',
+              sender: 'codex',
+              text: '계획을 검토하고 승인해주세요.',
+              timestamp: new Date().toISOString(),
+              approval: {
+                approvalId,
+                sessionId,
+                prompt,
+                status: 'pending',
+                plan: {
+                  title: '라우터 통합 실행 검증',
+                  explanation: '한글과 공백 경로에서 실제 실행 연결을 검증합니다.',
+                  steps: ['라우터 실행', 'Run 상태 연결 확인'],
+                },
+                idempotencyKey: 'integ-approval-001',
+                createdAt: new Date().toISOString(),
+              },
+            },
+          ],
+          pendingApproval: {
+            approvalId,
+            sessionId,
+            prompt,
+            status: 'pending',
+            plan: {
+              title: '라우터 통합 실행 검증',
+              explanation: '한글과 공백 경로에서 실제 실행 연결을 검증합니다.',
+              steps: ['라우터 실행', 'Run 상태 연결 확인'],
+            },
+            idempotencyKey: 'integ-approval-001',
+            createdAt: new Date().toISOString(),
+          },
+          linkedRunIds: [],
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        },
+        koreanSpaceRepo
+      );
+
+      // 2. Call POST /api/conversations/<sessionId>/approve via real localhost HTTP
+      const approveRes = await fetch(`${serverUrl}/api/conversations/${sessionId}/approve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ approvalId }),
+      });
+
+      assert.strictEqual(approveRes.status, 201);
+      const approveData = (await approveRes.json()) as {
+        ok: boolean;
+        runId: string;
+        isDuplicate: boolean;
+        approval?: { status: string; runId?: string };
+      };
+
+      assert.strictEqual(approveData.ok, true);
+      assert.strictEqual(approveData.isDuplicate, false);
+      const dashboardRunId = approveData.runId;
+      assert.ok(dashboardRunId);
+
+      // 3. Poll getRunDetails until the real pwsh process completes and settles (up to 10s)
+      let settled = false;
+      let lastBody: unknown = null;
+      const startTime = Date.now();
+      while (Date.now() - startTime < 10000) {
+        const detailRes = await fetch(`${serverUrl}/api/runs/${dashboardRunId}`);
+        if (detailRes.status === 200) {
+          const body = (await detailRes.json()) as { ok: boolean; run: { status: string; actualRunId?: string } };
+          lastBody = body;
+          if (body.run?.status === 'awaiting_review') {
+            settled = true;
+            break;
+          }
+        }
+        await new Promise((r) => setTimeout(r, 250));
+      }
+
+      if (!settled) {
+        const logFile = path.join(koreanSpaceRepo, '.agent', 'dashboard-state', 'logs', `${dashboardRunId}.log`);
+        const logContent = fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8') : '<no log>';
+        const metaFile = path.join(koreanSpaceRepo, '.agent', 'dashboard-state', 'meta', `${dashboardRunId}.json`);
+        const metaContent = fs.existsSync(metaFile) ? fs.readFileSync(metaFile, 'utf8') : '<no meta>';
+        console.error('DEBUG Section 12 failure:', { lastBody, logContent, metaContent });
+      }
+
+      assert.strictEqual(settled, true, 'PowerShell router execution did not settle to awaiting_review within 10s');
+
+      // 4. Verify run details and artifacts
+      const finalDetail = await getRunDetails(dashboardRunId, koreanSpaceRepo);
+      assert.ok(finalDetail);
+      assert.strictEqual(finalDetail.status, 'awaiting_review');
+      assert.strictEqual(finalDetail.actualRunId, '20260909-integ-actual-001');
+      assert.strictEqual(finalDetail.requiresUserAction, true);
+      assert.strictEqual(finalDetail.integrationBranch, 'integration/20260909-integ-actual-001');
+
+      // 5. Verify log file contains stdout protocol and UTF-8 characters
+      const logFile = path.join(koreanSpaceRepo, '.agent', 'dashboard-state', 'logs', `${dashboardRunId}.log`);
+      assert.ok(fs.existsSync(logFile), 'Log file must exist on disk');
+      const logContent = fs.readFileSync(logFile, 'utf8');
+      assert.ok(logContent.includes('Run: 20260909-integ-actual-001'), 'Log must contain Run: <actualRunId>');
+      assert.ok(logContent.includes('BOOTSTRAP_ROUTER_START'), 'Log must contain bootstrap marker');
+
+      // 6. Verify launch metadata has exitCode 0
+      const metaFile = path.join(koreanSpaceRepo, '.agent', 'dashboard-state', 'meta', `${dashboardRunId}.json`);
+      assert.ok(fs.existsSync(metaFile), 'Meta file must exist on disk');
+      const metaContent = JSON.parse(fs.readFileSync(metaFile, 'utf8').replace(/^\uFEFF/, '')) as { exitCode: number | null };
+      assert.strictEqual(metaContent.exitCode, 0);
+    });
+  });
+
+  void describe('13. Launcher Error (exit 1 & timeout) Fixtures & Non-disclosure (Criterion 9)', () => {
+    let failRepo: string;
+    let prevAllowed13: string | undefined;
+
+    beforeEach(() => {
+      prevAllowed13 = process.env.ALLOWED_REPO_ROOT;
+      failRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'fail-fixture-repo-'));
+      process.env.ALLOWED_REPO_ROOT = failRepo;
+      fs.mkdirSync(path.join(failRepo, '.agent', 'runs'), { recursive: true });
+      fs.mkdirSync(path.join(failRepo, '.agent', 'dashboard-state', 'compact'), { recursive: true });
+      fs.mkdirSync(path.join(failRepo, '.agent', 'dashboard-state', 'logs'), { recursive: true });
+      fs.mkdirSync(path.join(failRepo, '.agent', 'dashboard-state', 'meta'), { recursive: true });
+      fs.mkdirSync(path.join(failRepo, 'gemini-dashboard', 'scripts'), { recursive: true });
+
+      const candidates = [
+        path.resolve(process.cwd(), 'scripts', 'router-bootstrap.ps1'),
+        path.resolve(process.cwd(), 'gemini-dashboard', 'scripts', 'router-bootstrap.ps1'),
+      ];
+      const bootstrapSrc = candidates.find(c => fs.existsSync(c));
+      const bootstrapDest = path.join(failRepo, 'gemini-dashboard', 'scripts', 'router-bootstrap.ps1');
+      if (bootstrapSrc) {
+        fs.copyFileSync(bootstrapSrc, bootstrapDest);
+      }
+    });
+
+    afterEach(() => {
+      if (prevAllowed13 !== undefined) {
+        process.env.ALLOWED_REPO_ROOT = prevAllowed13;
+      } else {
+        delete process.env.ALLOWED_REPO_ROOT;
+      }
+      try {
+        fs.rmSync(failRepo, { recursive: true, force: true });
+      } catch {}
+    });
+
+    void test('abnormal exit (exit 1) settles immediately to launcher_error without fake tasks or timeline', async () => {
+      // Create router script that fails with exit 1 and Korean error
+      const routerScript = [
+        'param([string]$Request, [string]$Repository, [string]$InputFile)',
+        '[Console]::Error.WriteLine("치명적 실행기 오류: 파라미터 유효성 검증 실패 (코드 1001)")',
+        'exit 1',
+      ].join('\r\n');
+      fs.writeFileSync(path.join(failRepo, 'codex-router.ps1'), routerScript, 'utf8');
+
+      // Spawn run
+      const spawnResult = await spawnRouterRun({
+        prompt: '비정상 종료 테스트 작업',
+        repoRoot: failRepo,
+      });
+      assert.ok(spawnResult.runId);
+      const runId = spawnResult.runId;
+
+      // Poll until bootstrap writes exitCode 1 to metadata (up to 5s)
+      const metaPath = path.join(failRepo, '.agent', 'dashboard-state', 'meta', `${runId}.json`);
+      const start = Date.now();
+      while (Date.now() - start < 5000) {
+        if (fs.existsSync(metaPath)) {
+          try {
+            const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8')) as { exitCode: number | null };
+            if (meta.exitCode !== null) break;
+          } catch {}
+        }
+        await new Promise((r) => setTimeout(r, 100));
+      }
+
+      // Query via HTTP request simulation
+      const req = new Request(`http://localhost:3000/api/runs/${runId}`, { method: 'GET' });
+      const res = await handleWorkspaceBridgeRequest(req, { repoRoot: failRepo });
+      assert.strictEqual(res.status, 200);
+
+      const data = (await res.json()) as {
+        ok: boolean;
+        run: {
+          status: string;
+          errorCategory?: string;
+          errorDisplayName?: string;
+          retryable?: boolean;
+          requiresUserAction?: boolean;
+          tasksCount: number;
+          tasks: unknown[];
+          activeWorkers: unknown[];
+          timeline: unknown[];
+          changedFiles?: unknown;
+          failureLogPath?: string;
+          failureReason?: string;
+        };
+      };
+
+      assert.strictEqual(data.ok, true);
+      const r = data.run;
+      assert.strictEqual(r.status, 'failed');
+      assert.strictEqual(r.errorCategory, 'launcher_error');
+      assert.strictEqual(r.errorDisplayName, '실행기 오류');
+      assert.strictEqual(r.retryable, true);
+      assert.strictEqual(r.requiresUserAction, false);
+
+      // Criterion 5 & 9: No virtual tasks, no changed files, no timeline
+      assert.strictEqual(r.tasksCount, 0);
+      assert.strictEqual(r.tasks.length, 0);
+      assert.strictEqual(r.activeWorkers.length, 0);
+      assert.strictEqual(r.timeline.length, 0);
+      assert.strictEqual(r.changedFiles, undefined);
+
+      // Relative log path without absolute repo leakage
+      assert.ok(r.failureLogPath);
+      assert.ok(!path.isAbsolute(r.failureLogPath));
+      assert.ok(r.failureLogPath.startsWith('.agent'));
+
+      // Sanitized failure reason: contains error info but NO raw stack dumps or userprofile
+      assert.ok(r.failureReason);
+      assert.ok(r.failureReason.includes('비정상 종료') || r.failureReason.includes('파라미터 유효성 검증 실패'));
+      assert.ok(!r.failureReason.includes(failRepo));
+    });
+
+    void test('manifest timeout settles to launcher_error without fake tasks', async () => {
+      const runId = '20260909-timeout-001';
+      const prompt = '타임아웃 검증 작업';
+      const now = new Date(Date.now() - 60000).toISOString();
+
+      // Save a compact state as running without an actual manifest
+      await fs.promises.writeFile(
+        path.join(failRepo, '.agent', 'dashboard-state', 'compact', `${runId}.json`),
+        JSON.stringify({
+          runId,
+          prompt,
+          status: 'running',
+          createdAt: now,
+          updatedAt: now,
+          requiresUserAction: false,
+          tasksCount: 0,
+          activeWorkersCount: 1,
+          completedTasksCount: 0,
+          orchestratorProcessId: 1111,
+        }),
+        'utf8'
+      );
+
+      // Write launch metadata as still running (exitCode: null)
+      await fs.promises.writeFile(
+        path.join(failRepo, '.agent', 'dashboard-state', 'meta', `${runId}.json`),
+        JSON.stringify({
+          dashboardRunId: runId,
+          orchestratorProcessId: 1111,
+          startedAt: now,
+          status: 'running',
+          exitCode: null,
+        }),
+        'utf8'
+      );
+
+      // Query getRunDetails with manifestTimeoutMs: 50 (expired)
+      const detail = await getRunDetails(runId, failRepo, {
+        manifestTimeoutMs: 50,
+        processInfoResolver: () => ({
+          pid: 1111,
+          alive: true,
+          command: 'pwsh.exe',
+          metadataAvailable: true,
+        }),
+      });
+
+      assert.ok(detail);
+      assert.strictEqual(detail.status, 'failed');
+      assert.strictEqual(detail.errorCategory, 'launcher_error');
+      assert.strictEqual(detail.errorDisplayName, '실행기 오류');
+      assert.strictEqual(detail.retryable, true);
+      assert.strictEqual(detail.requiresUserAction, false);
+      assert.strictEqual(detail.tasks.length, 0);
+      assert.strictEqual(detail.timeline.length, 0);
+      assert.ok(detail.failureReason?.includes('제한 시간'));
     });
   });
 });
