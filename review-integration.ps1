@@ -9,20 +9,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-
-function Redact-Text([string]$text) {
-  if ([string]::IsNullOrEmpty($text)) { return $text }
-  $result = $text
-  $result = [regex]::Replace($result, '(?i)(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{16,}', '[REDACTED_TOKEN]')
-  $result = [regex]::Replace($result, '(?i)github_pat_[A-Za-z0-9_]{20,}', '[REDACTED_TOKEN]')
-  $result = [regex]::Replace($result, 'AIza[0-9A-Za-z-_]{35}', '[REDACTED_API_KEY]')
-  $result = [regex]::Replace($result, '(?i)Bearer\s+[A-Za-z0-9\-._~+/]+=*', 'Bearer [REDACTED]')
-  $result = [regex]::Replace($result, '(?i)Authorization:\s*[^\r\n]+', 'Authorization: [REDACTED]')
-  $result = [regex]::Replace($result, 'https?://[^/@\s\r\n]+(?::[^/@\s\r\n]+)?@', 'https://[REDACTED_CREDENTIALS]@')
-  $result = [regex]::Replace($result, '([?&](?:token|access_token|secret|password|api_key|apiKey)=)[^&\s\r\n]+', '$1[REDACTED]')
-  $result = [regex]::Replace($result, '-----BEGIN [A-Z ]+ PRIVATE KEY-----[\s\S]*?-----END [A-Z ]+ PRIVATE KEY-----', '[REDACTED_PRIVATE_KEY]')
-  return $result
-}
+. (Join-Path $PSScriptRoot 'bounded-process-runner.ps1')
 
 function Write-AtomicJson([string]$Path, $Data) {
   $parent = Split-Path -Parent $Path
@@ -59,32 +46,8 @@ function Test-AllowedPath([string]$Path, $AllowedPatterns) {
   return $false
 }
 
-function Invoke-Verification([string]$Worktree, $Commands) {
-  $results = @()
-  Push-Location $Worktree
-  try {
-    foreach ($commandValue in @($Commands)) {
-      $command = [string]$commandValue
-      $started = Get-Date
-      $output = if ($IsWindows -or ($env:OS -like '*Windows*')) {
-        @(& cmd.exe /d /s /c $command 2>&1 | ForEach-Object { $_.ToString() })
-      } else {
-        @(& /bin/sh -c $command 2>&1 | ForEach-Object { $_.ToString() })
-      }
-      $exitCode = $LASTEXITCODE
-      $joined = ($output | ForEach-Object { Redact-Text $_ }) -join "`n"
-      $results += [pscustomobject]@{
-        command = Redact-Text $command
-        exitCode = $exitCode
-        durationSeconds = [math]::Round(((Get-Date) - $started).TotalSeconds, 2)
-        output = $joined.Substring(0, [math]::Min(12000, $joined.Length))
-        status = if ($exitCode -eq 0) { 'PASS' } else { 'FAIL' }
-      }
-    }
-  } finally {
-    Pop-Location
-  }
-  return $results
+function Invoke-Verification([string]$Worktree, $Commands, [int]$DefaultTimeoutSeconds = 120) {
+  return @(Invoke-BoundedVerification -Worktree $Worktree -Commands $Commands -DefaultTimeoutSeconds $DefaultTimeoutSeconds)
 }
 
 $repoRoot = (& git -C $Repository rev-parse --show-toplevel 2>$null)
@@ -139,7 +102,7 @@ function Record-Diagnostic([string]$Category, [string]$Reason, [hashtable]$Detai
   [IO.File]::WriteAllText($diagMdPath, ($mdLines -join "`n"), [Text.Encoding]::UTF8)
 
   $m = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
-  $terminalStatus = if ($Category -in @('policy_violation', 'changes_requested', 'codex_review_failed', 'divergence_detected', 'push_rejected', 'merge_conflict', 'missing_upstream')) { 'escalated' } else { 'failed' }
+  $terminalStatus = if ($Category -in @('policy_violation', 'changes_requested', 'codex_review_failed', 'stale_review', 'divergence_detected', 'push_rejected', 'merge_conflict', 'missing_upstream')) { 'escalated' } else { 'failed' }
   Set-ObjectProperty $m 'status' $terminalStatus
   Set-ObjectProperty $m 'errorCategory' $Category
   Set-ObjectProperty $m 'failureReason' $redactedReason
@@ -222,15 +185,17 @@ if (-not $review) {
     $review = [pscustomobject]@{
       verdict = 'PASS'
       summary = 'Verification review passed via SkipCodexReview'
+      candidateCommit = $candidateCommit
       findings = @()
     }
     Write-AtomicJson $reviewJsonPath $review
   } elseif (Get-Command codex.exe -ErrorAction SilentlyContinue) {
     $reviewPrompt = @"
-Review only the committed diff from base commit $baseCommit through HEAD.
+Review only the committed diff from base commit $baseCommit through candidate commit $candidateCommit (HEAD).
+Candidate commit under review: $candidateCommit.
 Focus on correctness, regressions, security, test gaps, documentation/API mismatches, and contract violations.
 Do not edit files or merge branches. Run relevant read-only tests when useful.
-Return verdict REQUEST_FIX when any actionable finding exists; otherwise return PASS. Use repository-relative file paths.
+Return verdict REQUEST_FIX when any actionable finding exists; otherwise return PASS. Set candidateCommit to '$candidateCommit'. Use repository-relative file paths.
 "@
     $worktreeForReview = if ($manifest.integration.worktree -and (Test-Path -LiteralPath $manifest.integration.worktree)) {
       $manifest.integration.worktree
@@ -257,8 +222,37 @@ if (-not $review -or -not $review.verdict) {
   exit 1
 }
 
+# Validate schema properties
+$hasReqFields = ($review.PSObject.Properties.Name -contains 'verdict' -and
+                 $review.PSObject.Properties.Name -contains 'summary' -and
+                 $review.PSObject.Properties.Name -contains 'findings' -and
+                 $review.PSObject.Properties.Name -contains 'candidateCommit')
+if (-not $hasReqFields) {
+  Record-Diagnostic 'codex_review_failed' 'Codex 리뷰 결과가 필수 스키마 필드(verdict, summary, findings, candidateCommit)를 모두 포함하지 않습니다.'
+  exit 1
+}
+
+# Validate candidateCommit binding - reject missing or stale reviews
+if ([string]::IsNullOrWhiteSpace($review.candidateCommit) -or ($review.candidateCommit.Trim() -ne $candidateCommit)) {
+  Record-Diagnostic 'stale_review' "Codex review is stale or candidateCommit does not match resolved candidate. Expected: '$candidateCommit', Review has: '$($review.candidateCommit)'." @{
+    expectedCandidateCommit = $candidateCommit
+    reviewCandidateCommit   = [string]$review.candidateCommit
+  }
+  exit 1
+}
+
 # Write review markdown
-$lines = @("# Codex Review: $RunId", '', "- Verdict: $($review.verdict)", '', $review.summary, '', '## Findings', '')
+$lines = @(
+  "# Codex Review: $RunId",
+  '',
+  "- Verdict: $($review.verdict)",
+  "- Candidate commit: $candidateCommit",
+  '',
+  $review.summary,
+  '',
+  '## Findings',
+  ''
+)
 if (@($review.findings).Count -eq 0) { $lines += '- No actionable findings.' }
 else { foreach ($finding in @($review.findings)) { $lines += "- [$($finding.severity)] $($finding.title) — $($finding.file):$($finding.line)`n  $($finding.body)" } }
 [IO.File]::WriteAllText($reviewPath, ($lines -join "`n"), [Text.Encoding]::UTF8)
@@ -362,6 +356,7 @@ if (-not $shouldDeliver) {
   Set-ObjectProperty $manifest 'codexReview' ([pscustomobject]@{
     status = 'completed'
     verdict = $review.verdict
+    candidateCommit = $candidateCommit
     findingsCount = @($review.findings).Count
     artifact = $reviewPath
     jsonArtifact = $reviewJsonPath
@@ -478,19 +473,26 @@ if ($localTargetCommit -ne $baseCommit) {
 }
 
 # Candidate commit verification
-$allVerifyCommands = [System.Collections.Generic.List[string]]::new()
+$allVerifyCommands = [System.Collections.Generic.List[object]]::new()
+function Add-VerifyCommand($item) {
+  if ($null -eq $item) { return }
+  $itemCmd = if ($item -is [string]) { $item.Trim() } elseif ($item.PSObject.Properties.Name -contains 'command') { [string]$item.command } else { [string]$item }
+  if ([string]::IsNullOrWhiteSpace($itemCmd)) { return }
+  foreach ($existing in $allVerifyCommands) {
+    $existingCmd = if ($existing -is [string]) { $existing.Trim() } elseif ($existing.PSObject.Properties.Name -contains 'command') { [string]$existing.command } else { [string]$existing }
+    if ($existingCmd -eq $itemCmd) { return }
+  }
+  [void]$allVerifyCommands.Add($item)
+}
+
 if ($manifest.integrationTestCommands) {
   foreach ($cmd in @($manifest.integrationTestCommands)) {
-    if (-not [string]::IsNullOrWhiteSpace($cmd) -and -not $allVerifyCommands.Contains($cmd)) {
-      [void]$allVerifyCommands.Add($cmd)
-    }
+    Add-VerifyCommand $cmd
   }
 }
 if ($manifest.integration -and $manifest.integration.tests) {
   foreach ($t in @($manifest.integration.tests)) {
-    if ($t.command -and -not $allVerifyCommands.Contains($t.command)) {
-      [void]$allVerifyCommands.Add($t.command)
-    }
+    Add-VerifyCommand $t
   }
 }
 if (Test-Path -LiteralPath $tasksDir) {
@@ -498,9 +500,7 @@ if (Test-Path -LiteralPath $tasksDir) {
     try {
       $tObj = Get-Content -Raw -LiteralPath $tFile.FullName | ConvertFrom-Json
       foreach ($cmd in @($tObj.testCommands)) {
-        if (-not [string]::IsNullOrWhiteSpace($cmd) -and -not $allVerifyCommands.Contains($cmd)) {
-          [void]$allVerifyCommands.Add($cmd)
-        }
+        Add-VerifyCommand $cmd
       }
     } catch {}
   }
@@ -525,12 +525,15 @@ if (-not $alreadyCandidateVerified) {
   }
   try {
     $candResults = @(Invoke-Verification $testWorktree $allVerifyCommands)
-    $candFails = @($candResults | Where-Object status -eq 'FAIL')
+    $candFails = @($candResults | Where-Object { $_.status -in @('FAIL', 'TIMED_OUT') })
     if ($candFails.Count -gt 0) {
-      Record-Diagnostic 'verification_failed' "Candidate commit verification failed: $($candFails[0].command) (exit $($candFails[0].exitCode))" @{
-        failedCommand = $candFails[0].command
-        exitCode = $candFails[0].exitCode
-        output = $candFails[0].output
+      $failedItem = $candFails[0]
+      Record-Diagnostic 'verification_failed' "Candidate commit verification failed: $($failedItem.command) (status $($failedItem.status), exit $($failedItem.exitCode))" @{
+        failedCommand = $failedItem.command
+        status        = $failedItem.status
+        exitCode      = $failedItem.exitCode
+        output        = $failedItem.output
+        timedOut      = $failedItem.timedOut
       }
       exit 1
     }
@@ -589,12 +592,15 @@ $alreadyMainVerified = ($manifest.delivery -and $manifest.delivery.mainVerifiedC
 
 if (-not $alreadyMainVerified) {
   $postResults = @(Invoke-Verification $repoRoot $allVerifyCommands)
-  $postFails = @($postResults | Where-Object status -eq 'FAIL')
+  $postFails = @($postResults | Where-Object { $_.status -in @('FAIL', 'TIMED_OUT') })
   if ($postFails.Count -gt 0) {
-    Record-Diagnostic 'verification_failed' "Post-integration verification failed on target branch '$TargetBranch': $($postFails[0].command) (exit $($postFails[0].exitCode))" @{
-      failedCommand = $postFails[0].command
-      exitCode = $postFails[0].exitCode
-      output = $postFails[0].output
+    $failedItem = $postFails[0]
+    Record-Diagnostic 'verification_failed' "Post-integration verification failed on target branch '$TargetBranch': $($failedItem.command) (status $($failedItem.status), exit $($failedItem.exitCode))" @{
+      failedCommand = $failedItem.command
+      status        = $failedItem.status
+      exitCode      = $failedItem.exitCode
+      output        = $failedItem.output
+      timedOut      = $failedItem.timedOut
     }
     exit 1
   }
@@ -633,6 +639,7 @@ Set-ObjectProperty $manifest 'status' 'completed'
 Set-ObjectProperty $manifest 'codexReview' ([pscustomobject]@{
   status = 'completed'
   verdict = $review.verdict
+  candidateCommit = $candidateCommit
   findingsCount = @($review.findings).Count
   artifact = $reviewPath
   jsonArtifact = $reviewJsonPath

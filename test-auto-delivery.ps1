@@ -66,7 +66,7 @@ function New-IsolatedTestRepo([string]$RootPath) {
   }
 }
 
-function Setup-MockRun([string]$LocalRepo, [string]$RunId, [string]$BaseCommit, [string]$IntegrationBranch, [string[]]$AllowedFiles, [string[]]$TestCommands, [string]$Verdict = 'PASS', [hashtable]$Extra = @{}) {
+function Setup-MockRun([string]$LocalRepo, [string]$RunId, [string]$BaseCommit, [string]$IntegrationBranch, [string[]]$AllowedFiles, $TestCommands, [string]$Verdict = 'PASS', [hashtable]$Extra = @{}) {
   $runRoot = Join-Path $LocalRepo ".agent\runs\$RunId"
   @((Join-Path $runRoot 'tasks'), (Join-Path $runRoot 'results')) | ForEach-Object {
     if (-not (Test-Path -LiteralPath $_)) {
@@ -80,7 +80,7 @@ function Setup-MockRun([string]$LocalRepo, [string]$RunId, [string]$BaseCommit, 
     allowedFiles = $AllowedFiles
     testCommands = $TestCommands
   }
-  [IO.File]::WriteAllText((Join-Path $runRoot 'tasks\TASK-001.json'), ($taskObj | ConvertTo-Json), [Text.Encoding]::UTF8)
+  [IO.File]::WriteAllText((Join-Path $runRoot 'tasks\TASK-001.json'), ($taskObj | ConvertTo-Json -Depth 8), [Text.Encoding]::UTF8)
 
   $resultObj = [pscustomobject]@{
     runId = $RunId
@@ -99,17 +99,22 @@ function Setup-MockRun([string]$LocalRepo, [string]$RunId, [string]$BaseCommit, 
   }
   [IO.File]::WriteAllText((Join-Path $runRoot 'results\TASK-001-result.json'), ($resultObj | ConvertTo-Json), [Text.Encoding]::UTF8)
 
+  $candCommit = (& git -C $LocalRepo rev-parse "refs/heads/$IntegrationBranch" 2>$null)
+  if ($candCommit) { $candCommit = $candCommit.Trim() }
+
+  $reviewCandidate = if ($Extra.ContainsKey('ReviewCandidateCommit')) { $Extra['ReviewCandidateCommit'] } else { $candCommit }
   $reviewObj = [pscustomobject]@{
     verdict = $Verdict
     summary = if ($Verdict -eq 'PASS') { 'Review passed cleanly' } else { 'Review requested fixes' }
+    candidateCommit = $reviewCandidate
     findings = if ($Verdict -eq 'PASS') { @() } else {
       @([pscustomobject]@{ severity = 'P1'; title = 'Fix required'; file = 'file.txt'; line = 1; body = 'Fix required' })
     }
   }
+  if ($Extra.OmitCandidateCommitInReview) {
+    $reviewObj.PSObject.Properties.Remove('candidateCommit')
+  }
   [IO.File]::WriteAllText((Join-Path $runRoot 'codex-review.json'), ($reviewObj | ConvertTo-Json), [Text.Encoding]::UTF8)
-
-  $candCommit = (& git -C $LocalRepo rev-parse "refs/heads/$IntegrationBranch" 2>$null)
-  if ($candCommit) { $candCommit = $candCommit.Trim() }
 
   $manifest = [pscustomobject]@{
     runId = $RunId
@@ -171,6 +176,11 @@ try {
   Assert-Test "Manifest status is completed" ($updatedManifest1.status -eq 'completed') "Got $($updatedManifest1.status)"
   Assert-Test "Manifest records delivery object" ($updatedManifest1.delivery -and $updatedManifest1.delivery.status -eq 'completed') "Got $($updatedManifest1.delivery.status)"
   Assert-Test "Delivery diagnostic artifact is NOT created on success" (-not (Test-Path -LiteralPath (Join-Path $case1.LocalDir '.agent\runs\run-001\delivery-diagnostic.json')))
+  Assert-Test "Codex review artifact binds exact candidate commit in manifest" ($updatedManifest1.codexReview -and $updatedManifest1.codexReview.candidateCommit -eq $candCommit1)
+  $reviewMd1 = Get-Content -Raw -LiteralPath (Join-Path $case1.LocalDir '.agent\runs\run-001\codex-review.md')
+  Assert-Test "Codex review markdown records candidate commit" ($reviewMd1 -match "- Candidate commit: $candCommit1")
+  $reviewJson1 = Get-Content -Raw -LiteralPath (Join-Path $case1.LocalDir '.agent\runs\run-001\codex-review.json') | ConvertFrom-Json
+  Assert-Test "Codex review JSON records candidate commit" ($reviewJson1.candidateCommit -eq $candCommit1)
 
   # 2. Merge Conflict Test
   Write-Host "`n2. Merge Conflict: Conflicting branch change stops delivery and creates diagnostic" -ForegroundColor Yellow
@@ -200,6 +210,8 @@ try {
   Assert-Test "Delivery fails with non-zero exit code on conflict" ($exit2 -ne 0)
   $mainAfter2 = (& git -C $case2.LocalDir rev-parse refs/heads/main).Trim()
   Assert-Test "Main branch was NOT overwritten" ($mainAfter2 -eq $mainBefore2)
+  $remoteMainAfter2 = (& git -C $case2.LocalDir rev-parse refs/remotes/origin/main).Trim()
+  Assert-Test "Remote origin/main was NOT overwritten on conflict" ($remoteMainAfter2 -eq $mainBefore2)
   $updatedManifest2 = Get-Content -Raw -LiteralPath (Join-Path $case2.LocalDir '.agent\runs\run-002\run.json') | ConvertFrom-Json
   Assert-Test "Manifest status is escalated" ($updatedManifest2.status -eq 'escalated') "Got $($updatedManifest2.status)"
   $diagPath2 = Join-Path $case2.LocalDir '.agent\runs\run-002\delivery-diagnostic.json'
@@ -239,6 +251,8 @@ try {
   Assert-Test "Delivery fails when remote has diverged" ($exit3 -ne 0)
   $remoteActualCommit3 = (& git -C $otherCloneDir rev-parse refs/remotes/origin/main).Trim()
   Assert-Test "Remote work was NOT overwritten" ($remoteActualCommit3 -eq $remoteExpectedCommit3)
+  $localMainCurrent3 = (& git -C $case3.LocalDir rev-parse refs/heads/main).Trim()
+  Assert-Test "Local main remains at baseCommit on divergence" ($localMainCurrent3 -eq $baseCommit3)
   $updatedManifest3 = Get-Content -Raw -LiteralPath (Join-Path $case3.LocalDir '.agent\runs\run-003\run.json') | ConvertFrom-Json
   Assert-Test "Manifest records divergence escalation" ($updatedManifest3.status -eq 'escalated' -and $updatedManifest3.errorCategory -eq 'divergence_detected')
 
@@ -264,6 +278,8 @@ try {
   Assert-Test "Delivery fails when verification command fails" ($exit4 -ne 0)
   $mainCurrent4 = (& git -C $case4.LocalDir rev-parse refs/heads/main).Trim()
   Assert-Test "Main branch remains at baseCommit" ($mainCurrent4 -eq $baseCommit4)
+  $remoteMainCurrent4 = (& git -C $case4.LocalDir rev-parse refs/remotes/origin/main).Trim()
+  Assert-Test "Remote origin/main remains at baseCommit on verification failure" ($remoteMainCurrent4 -eq $baseCommit4)
   $updatedManifest4 = Get-Content -Raw -LiteralPath (Join-Path $case4.LocalDir '.agent\runs\run-004\run.json') | ConvertFrom-Json
   Assert-Test "Manifest status is failed" ($updatedManifest4.status -eq 'failed')
   Assert-Test "Diagnostic artifact created for failed verification" (Test-Path -LiteralPath (Join-Path $case4.LocalDir '.agent\runs\run-004\delivery-diagnostic.json'))
@@ -286,6 +302,10 @@ try {
   $exit5a = $LASTEXITCODE
 
   Assert-Test "REQUEST_FIX verdict causes non-zero exit code" ($exit5a -ne 0)
+  $mainCurrent5a = (& git -C $case5a.LocalDir rev-parse refs/heads/main).Trim()
+  Assert-Test "Local main remains at baseCommit for REQUEST_FIX" ($mainCurrent5a -eq $baseCommit5a)
+  $remoteMain5a = (& git -C $case5a.LocalDir rev-parse refs/remotes/origin/main).Trim()
+  Assert-Test "Remote main remains at baseCommit for REQUEST_FIX" ($remoteMain5a -eq $baseCommit5a)
   $updatedManifest5a = Get-Content -Raw -LiteralPath (Join-Path $case5a.LocalDir '.agent\runs\run-005a\run.json') | ConvertFrom-Json
   Assert-Test "Status is escalated for REQUEST_FIX" ($updatedManifest5a.status -eq 'escalated')
   Assert-Test "Diagnostic records changes_requested" ($updatedManifest5a.errorCategory -eq 'changes_requested')
@@ -308,6 +328,10 @@ try {
   $exit5b = $LASTEXITCODE
 
   Assert-Test "Policy violation causes non-zero exit code" ($exit5b -ne 0)
+  $mainCurrent5b = (& git -C $case5b.LocalDir rev-parse refs/heads/main).Trim()
+  Assert-Test "Local main remains at baseCommit on policy violation" ($mainCurrent5b -eq $baseCommit5b)
+  $remoteMain5b = (& git -C $case5b.LocalDir rev-parse refs/remotes/origin/main).Trim()
+  Assert-Test "Remote main remains at baseCommit on policy violation" ($remoteMain5b -eq $baseCommit5b)
   $updatedManifest5b = Get-Content -Raw -LiteralPath (Join-Path $case5b.LocalDir '.agent\runs\run-005b\run.json') | ConvertFrom-Json
   Assert-Test "Status is escalated for policy_violation" ($updatedManifest5b.status -eq 'escalated')
   Assert-Test "Diagnostic records policy_violation" ($updatedManifest5b.errorCategory -eq 'policy_violation')
@@ -340,6 +364,8 @@ try {
   $exit6 = $LASTEXITCODE
 
   Assert-Test "Push rejection returns non-zero exit code" ($exit6 -ne 0)
+  $remoteMainCurrent6 = (& git -C $case6.LocalDir rev-parse refs/remotes/origin/main).Trim()
+  Assert-Test "Remote origin/main remains at baseCommit on push rejection" ($remoteMainCurrent6 -eq $baseCommit6)
   $updatedManifest6 = Get-Content -Raw -LiteralPath (Join-Path $case6.LocalDir '.agent\runs\run-006\run.json') | ConvertFrom-Json
   Assert-Test "Manifest status is escalated on push rejection" ($updatedManifest6.status -eq 'escalated')
   Assert-Test "Diagnostic records push_rejected" ($updatedManifest6.errorCategory -eq 'push_rejected')
@@ -450,6 +476,141 @@ try {
   $mainCurrent10b = (& git -C $case10.LocalDir rev-parse refs/heads/main).Trim()
   $candCommit10 = (& git -C $case10.LocalDir rev-parse refs/heads/$integBranch10).Trim()
   Assert-Test "Main branch is merged with candidate commit" ($mainCurrent10b -eq $candCommit10)
+
+  # 11. Stale / Mismatched Review Rejection
+  Write-Host "`n11. Stale Review Rejection: PASS for stale or mismatched commit is rejected" -ForegroundColor Yellow
+  # 11A: PASS with wrong candidateCommit
+  $case11aDir = Join-Path $testTempRoot 'case11a-stale-review'
+  $case11a = New-IsolatedTestRepo $case11aDir
+  $baseCommit11a = (& git -C $case11a.LocalDir rev-parse HEAD).Trim()
+  $integBranch11a = 'integration/run-011a'
+  & git -C $case11a.LocalDir switch -c $integBranch11a $baseCommit11a 2>$null | Out-Null
+  [IO.File]::WriteAllText((Join-Path $case11a.LocalDir 'feature11a.txt'), 'Feature 11a', [Text.Encoding]::UTF8)
+  & git -C $case11a.LocalDir add feature11a.txt
+  & git -C $case11a.LocalDir commit -m "feature 11a" 2>$null | Out-Null
+  & git -C $case11a.LocalDir switch main 2>$null | Out-Null
+
+  # Setup mock run with review that claims candidateCommit is baseCommit (stale)
+  $manifest11a = Setup-MockRun $case11a.LocalDir 'run-011a' $baseCommit11a $integBranch11a @('feature11a.txt') @('pwsh -NoProfile -Command exit 0') 'PASS' @{
+    ReviewCandidateCommit = $baseCommit11a
+  }
+
+  $out11a = @(& pwsh -NoProfile -File $reviewScript -RunId 'run-011a' -Repository $case11a.LocalDir -AutoDeliver 2>&1)
+  $exit11a = $LASTEXITCODE
+
+  Assert-Test "Stale review with wrong candidateCommit fails with non-zero exit code" ($exit11a -ne 0)
+  $updatedManifest11a = Get-Content -Raw -LiteralPath (Join-Path $case11a.LocalDir '.agent\runs\run-011a\run.json') | ConvertFrom-Json
+  Assert-Test "Manifest status is escalated for stale review" ($updatedManifest11a.status -eq 'escalated')
+  Assert-Test "Diagnostic records stale_review category" ($updatedManifest11a.errorCategory -eq 'stale_review')
+  $mainCurrent11a = (& git -C $case11a.LocalDir rev-parse refs/heads/main).Trim()
+  Assert-Test "Local main remains at baseCommit on stale review" ($mainCurrent11a -eq $baseCommit11a)
+  $remoteMain11a = (& git -C $case11a.LocalDir rev-parse refs/remotes/origin/main).Trim()
+  Assert-Test "Remote main remains at baseCommit on stale review" ($remoteMain11a -eq $baseCommit11a)
+
+  # 11B: Review missing candidateCommit field completely
+  $case11bDir = Join-Path $testTempRoot 'case11b-missing-commit'
+  $case11b = New-IsolatedTestRepo $case11bDir
+  $baseCommit11b = (& git -C $case11b.LocalDir rev-parse HEAD).Trim()
+  $integBranch11b = 'integration/run-011b'
+  & git -C $case11b.LocalDir switch -c $integBranch11b $baseCommit11b 2>$null | Out-Null
+  [IO.File]::WriteAllText((Join-Path $case11b.LocalDir 'feature11b.txt'), 'Feature 11b', [Text.Encoding]::UTF8)
+  & git -C $case11b.LocalDir add feature11b.txt
+  & git -C $case11b.LocalDir commit -m "feature 11b" 2>$null | Out-Null
+  & git -C $case11b.LocalDir switch main 2>$null | Out-Null
+
+  $manifest11b = Setup-MockRun $case11b.LocalDir 'run-011b' $baseCommit11b $integBranch11b @('feature11b.txt') @('pwsh -NoProfile -Command exit 0') 'PASS' @{
+    OmitCandidateCommitInReview = $true
+  }
+
+  $out11b = @(& pwsh -NoProfile -File $reviewScript -RunId 'run-011b' -Repository $case11b.LocalDir -AutoDeliver 2>&1)
+  $exit11b = $LASTEXITCODE
+
+  Assert-Test "Review missing candidateCommit field fails" ($exit11b -ne 0)
+  $updatedManifest11b = Get-Content -Raw -LiteralPath (Join-Path $case11b.LocalDir '.agent\runs\run-011b\run.json') | ConvertFrom-Json
+  Assert-Test "Manifest is escalated on missing candidateCommit" ($updatedManifest11b.status -eq 'escalated')
+  $mainCurrent11b = (& git -C $case11b.LocalDir rev-parse refs/heads/main).Trim()
+  Assert-Test "Local main remains unchanged on missing candidateCommit" ($mainCurrent11b -eq $baseCommit11b)
+  $remoteMain11b = (& git -C $case11b.LocalDir rev-parse refs/remotes/origin/main).Trim()
+  Assert-Test "Remote main remains unchanged on missing candidateCommit" ($remoteMain11b -eq $baseCommit11b)
+
+  # 12. Candidate Verification Timeout & Descendant Process Cleanup
+  Write-Host "`n12. Candidate Verification Timeout: Command timeout cleans up process tree and preserves main" -ForegroundColor Yellow
+  $case12Dir = Join-Path $testTempRoot 'case12-timeout'
+  $case12 = New-IsolatedTestRepo $case12Dir
+  $baseCommit12 = (& git -C $case12.LocalDir rev-parse HEAD).Trim()
+
+  $integBranch12 = 'integration/run-012'
+  & git -C $case12.LocalDir switch -c $integBranch12 $baseCommit12 2>$null | Out-Null
+  [IO.File]::WriteAllText((Join-Path $case12.LocalDir 'timeout.txt'), 'Timeout test', [Text.Encoding]::UTF8)
+  & git -C $case12.LocalDir add timeout.txt
+  & git -C $case12.LocalDir commit -m "timeout commit" 2>$null | Out-Null
+  & git -C $case12.LocalDir switch main 2>$null | Out-Null
+
+  $timeoutCmd = [pscustomobject]@{
+    command = 'pwsh -NoProfile -Command Start-Sleep -Seconds 60'
+    timeoutSeconds = 2
+  }
+  $manifest12 = Setup-MockRun $case12.LocalDir 'run-012' $baseCommit12 $integBranch12 @('timeout.txt') @($timeoutCmd) 'PASS'
+
+  $sw12 = [System.Diagnostics.Stopwatch]::StartNew()
+  $out12 = @(& pwsh -NoProfile -File $reviewScript -RunId 'run-012' -Repository $case12.LocalDir -AutoDeliver -SkipCodexReview 2>&1)
+  $exit12 = $LASTEXITCODE
+  $sw12.Stop()
+
+  Assert-Test "Timed out verification causes delivery failure" ($exit12 -ne 0)
+  Assert-Test "Execution bounded by timeout (~2-6s, not 60s)" ($sw12.Elapsed.TotalSeconds -lt 15) "Elapsed: $($sw12.Elapsed.TotalSeconds)s"
+  $updatedManifest12 = Get-Content -Raw -LiteralPath (Join-Path $case12.LocalDir '.agent\runs\run-012\run.json') | ConvertFrom-Json
+  Assert-Test "Manifest status is failed for verification timeout" ($updatedManifest12.status -eq 'failed')
+  Assert-Test "Diagnostic artifact recorded for timeout" (Test-Path -LiteralPath (Join-Path $case12.LocalDir '.agent\runs\run-012\delivery-diagnostic.json'))
+  $diagObj12 = Get-Content -Raw -LiteralPath (Join-Path $case12.LocalDir '.agent\runs\run-012\delivery-diagnostic.json') | ConvertFrom-Json
+  Assert-Test "Diagnostic details indicate timedOut" ($diagObj12.details.timedOut -eq $true)
+  $mainCurrent12 = (& git -C $case12.LocalDir rev-parse refs/heads/main).Trim()
+  Assert-Test "Local main remains at baseCommit on timeout" ($mainCurrent12 -eq $baseCommit12)
+  $remoteMain12 = (& git -C $case12.LocalDir rev-parse refs/remotes/origin/main).Trim()
+  Assert-Test "Remote main remains at baseCommit on timeout" ($remoteMain12 -eq $baseCommit12)
+
+  # 13. Idempotent Retry and Recovery After Failure
+  Write-Host "`n13. Idempotent Retry & Recovery: Failed run can be safely fixed and delivered" -ForegroundColor Yellow
+  $case13Dir = Join-Path $testTempRoot 'case13-recovery'
+  $case13 = New-IsolatedTestRepo $case13Dir
+  $baseCommit13 = (& git -C $case13.LocalDir rev-parse HEAD).Trim()
+
+  $integBranch13 = 'integration/run-013'
+  & git -C $case13.LocalDir switch -c $integBranch13 $baseCommit13 2>$null | Out-Null
+  [IO.File]::WriteAllText((Join-Path $case13.LocalDir 'recover.txt'), 'Recover test', [Text.Encoding]::UTF8)
+  & git -C $case13.LocalDir add recover.txt
+  & git -C $case13.LocalDir commit -m "recover commit" 2>$null | Out-Null
+  $candCommit13 = (& git -C $case13.LocalDir rev-parse HEAD).Trim()
+  & git -C $case13.LocalDir switch main 2>$null | Out-Null
+
+  # First run: fails with failing verification command
+  $manifest13 = Setup-MockRun $case13.LocalDir 'run-013' $baseCommit13 $integBranch13 @('recover.txt') @('pwsh -NoProfile -Command exit 1') 'PASS'
+  $out13a = @(& pwsh -NoProfile -File $reviewScript -RunId 'run-013' -Repository $case13.LocalDir -AutoDeliver -SkipCodexReview 2>&1)
+  Assert-Test "Initial attempt fails as expected" ($LASTEXITCODE -ne 0)
+  $mainAfterFail13 = (& git -C $case13.LocalDir rev-parse refs/heads/main).Trim()
+  Assert-Test "Main unchanged after initial failure" ($mainAfterFail13 -eq $baseCommit13)
+
+  # Fix: update task test command to passing command
+  $taskPath13 = Join-Path $case13.LocalDir '.agent\runs\run-013\tasks\TASK-001.json'
+  $taskObj13 = Get-Content -Raw -LiteralPath $taskPath13 | ConvertFrom-Json
+  $taskObj13.testCommands = @('pwsh -NoProfile -Command exit 0')
+  [IO.File]::WriteAllText($taskPath13, ($taskObj13 | ConvertTo-Json), [Text.Encoding]::UTF8)
+
+  $manifestObj13 = Get-Content -Raw -LiteralPath (Join-Path $case13.LocalDir '.agent\runs\run-013\run.json') | ConvertFrom-Json
+  $manifestObj13.integrationTestCommands = @('pwsh -NoProfile -Command exit 0')
+  [IO.File]::WriteAllText((Join-Path $case13.LocalDir '.agent\runs\run-013\run.json'), ($manifestObj13 | ConvertTo-Json -Depth 8), [Text.Encoding]::UTF8)
+
+  # Re-run review-integration
+  $out13b = @(& pwsh -NoProfile -File $reviewScript -RunId 'run-013' -Repository $case13.LocalDir -AutoDeliver -SkipCodexReview 2>&1)
+  $exit13b = $LASTEXITCODE
+
+  Assert-Test "Recovery re-run succeeds with exit code 0" ($exit13b -eq 0) ($out13b -join "`n")
+  $manifestAfter13 = Get-Content -Raw -LiteralPath (Join-Path $case13.LocalDir '.agent\runs\run-013\run.json') | ConvertFrom-Json
+  Assert-Test "Status transitioned to completed on recovery" ($manifestAfter13.status -eq 'completed')
+  $mainFinal13 = (& git -C $case13.LocalDir rev-parse refs/heads/main).Trim()
+  Assert-Test "Main branch updated to candidate commit after recovery" ($mainFinal13 -eq $candCommit13)
+  $remoteFinal13 = (& git -C $case13.LocalDir rev-parse refs/remotes/origin/main).Trim()
+  Assert-Test "Remote origin/main updated after recovery" ($remoteFinal13 -eq $candCommit13)
 
   Write-Host "`n======================================================" -ForegroundColor Cyan
   Write-Host "   테스트 완료: $passCount 통과 / $failCount 실패" -ForegroundColor $(if ($failCount -eq 0) { 'Green' } else { 'Red' })

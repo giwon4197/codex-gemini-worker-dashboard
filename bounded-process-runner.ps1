@@ -13,7 +13,7 @@ function Redact-Text([string]$text) {
   $result = $text
   $result = [regex]::Replace($result, '(?i)(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{16,}', '[REDACTED_TOKEN]')
   $result = [regex]::Replace($result, '(?i)github_pat_[A-Za-z0-9_]{20,}', '[REDACTED_TOKEN]')
-  $result = [regex]::Replace($result, 'AIza[0-9A-Za-z-_]{35}', '[REDACTED_API_KEY]')
+  $result = [regex]::Replace($result, 'AIza[0-9A-Za-z-_]{30,40}', '[REDACTED_API_KEY]')
   $result = [regex]::Replace($result, '(?i)Bearer\s+[A-Za-z0-9\-._~+/]+=*', 'Bearer [REDACTED]')
   $result = [regex]::Replace($result, '(?i)Authorization:\s*[^\r\n]+', 'Authorization: [REDACTED]')
   $result = [regex]::Replace($result, 'https?://[^/@\s\r\n]+(?::[^/@\s\r\n]+)?@', 'https://[REDACTED_CREDENTIALS]@')
@@ -44,6 +44,7 @@ if (-not ([System.Management.Automation.PSTypeName]'BoundedCommandRunner').Type)
           Process.StartInfo.UseShellExecute = false;
           Process.StartInfo.RedirectStandardOutput = true;
           Process.StartInfo.RedirectStandardError = true;
+          Process.StartInfo.RedirectStandardInput = true;
           Process.StartInfo.StandardOutputEncoding = Encoding.UTF8;
           Process.StartInfo.StandardErrorEncoding = Encoding.UTF8;
           Process.StartInfo.CreateNoWindow = true;
@@ -62,6 +63,7 @@ if (-not ([System.Management.Automation.PSTypeName]'BoundedCommandRunner').Type)
           };
 
           Process.Start();
+          try { Process.StandardInput.Close(); } catch {}
           Process.BeginOutputReadLine();
           Process.BeginErrorReadLine();
       }
@@ -170,6 +172,24 @@ function Stop-ProcessTree([int]$ProcessId, [System.Diagnostics.Process]$ProcessO
       try { & kill -9 $cid 2>$null | Out-Null } catch {}
     }
   }
+
+  # 6. Verify all processes in the tree have exited
+  $allIds = @($ProcessId) + $treeIds
+  $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+  while ($stopwatch.ElapsedMilliseconds -lt 3000) {
+    $anyAlive = $false
+    foreach ($pidToCheck in $allIds) {
+      try {
+        $p = Get-Process -Id $pidToCheck -ErrorAction SilentlyContinue
+        if ($p -and -not $p.HasExited) {
+          $anyAlive = $true
+          try { Stop-Process -Id $pidToCheck -Force -ErrorAction SilentlyContinue } catch {}
+        }
+      } catch {}
+    }
+    if (-not $anyAlive) { break }
+    Start-Sleep -Milliseconds 50
+  }
 }
 
 function Invoke-BoundedCommand {
@@ -185,6 +205,20 @@ function Invoke-BoundedCommand {
   if ($TimeoutSeconds -le 0) { $TimeoutSeconds = 120 }
   $isWin = $IsWindows -or ($env:OS -like '*Windows*')
 
+  $execCommand = $Command
+  $targetDir = if (Test-Path -LiteralPath $WorkingDirectory) { (Resolve-Path -LiteralPath $WorkingDirectory).Path } else { (Get-Location).Path }
+
+  # Support npm --prefix <dir> exec tsc by executing in prefix directory
+  if ($Command -match '(?i)^npm\s+--prefix\s+([^\s"''`]+|"[^"]*"|''[^'']*'')\s+exec\s+tsc(.*)$') {
+    $rawPrefix = $Matches[1].Trim('"', "'")
+    $tail = $Matches[2]
+    $resolvedPrefix = if ([System.IO.Path]::IsPathRooted($rawPrefix)) { $rawPrefix } else { Join-Path $targetDir $rawPrefix }
+    if (Test-Path -LiteralPath $resolvedPrefix) {
+      $targetDir = (Resolve-Path -LiteralPath $resolvedPrefix).Path
+      $execCommand = "npm exec tsc$tail"
+    }
+  }
+
   $fileName = if ($isWin) {
     if ($env:ComSpec) { $env:ComSpec } else { 'cmd.exe' }
   } else {
@@ -192,12 +226,10 @@ function Invoke-BoundedCommand {
   }
 
   $arguments = if ($isWin) {
-    "/d /s /c `"$Command`""
+    "/d /s /c `"$execCommand`""
   } else {
-    "-c `"$Command`""
+    "-c `"$execCommand`""
   }
-
-  $targetDir = if (Test-Path -LiteralPath $WorkingDirectory) { $WorkingDirectory } else { (Get-Location).Path }
 
   $envDict = [System.Collections.Generic.Dictionary[string, string]]::new()
   $envDict['CI'] = 'true'
@@ -206,6 +238,8 @@ function Invoke-BoundedCommand {
   $envDict['GIT_TERMINAL_PROMPT'] = '0'
   $envDict['NO_COLOR'] = '1'
   $envDict['DEBIAN_FRONTEND'] = 'noninteractive'
+  $envDict['NONINTERACTIVE'] = '1'
+  $envDict['TERM'] = 'dumb'
 
   if ($EnvironmentVariables) {
     foreach ($k in $EnvironmentVariables.Keys) {
@@ -218,6 +252,11 @@ function Invoke-BoundedCommand {
   try {
     $runner.Start($fileName, $arguments, $targetDir, $envDict)
     $spawnedPid = $runner.Process.Id
+    try {
+      if ($runner.Process.StartInfo.RedirectStandardInput) {
+        $runner.Process.StandardInput.Close()
+      }
+    } catch {}
     $timeoutMs = [int]($TimeoutSeconds * 1000)
 
     $exited = $runner.WaitForExit($timeoutMs)

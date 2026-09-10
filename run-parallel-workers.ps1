@@ -909,7 +909,7 @@ try {
       $failureParts = @($state.error, $state.finalResponse) + @($tests | Where-Object status -eq 'FAIL' | ForEach-Object { $_.output })
       $failureText = $failureParts -join "`n"
       $classification = Get-FailureClassification $failureText
-      $decision = if ($wasCancelled) { 'CANCELLED' } elseif ($wasTimedOut) { 'TIMED_OUT' } elseif ($violations.Count -gt 0) { 'POLICY_VIOLATION' } elseif ($classification) { $classification } elseif ($state.status -ne 'completed') { 'WORKER_FAILED' } elseif (@($tests | Where-Object status -eq 'FAIL').Count -gt 0) { 'TEST_FAILED' } else { 'PASS' }
+      $decision = if ($wasCancelled) { 'CANCELLED' } elseif ($wasTimedOut) { 'TIMED_OUT' } elseif ($violations.Count -gt 0) { 'POLICY_VIOLATION' } elseif ($classification) { $classification } elseif ($state.status -ne 'completed') { 'WORKER_FAILED' } elseif (@($tests | Where-Object { $_.status -in @('FAIL', 'TIMED_OUT') }).Count -gt 0) { 'TEST_FAILED' } else { 'PASS' }
 
       # Preserve attempt state file for current attempt
       $attFile = Join-Path $runRoot "attempts\$safeId.attempt-$attempt.json"
@@ -1039,7 +1039,7 @@ $compressed
         if ($integrationDecision -eq 'INTEGRATION_CONFLICT') { break }
       }
       $integrationTests = if ($integrationDecision -eq 'AWAITING_CODEX_REVIEW') { @(Invoke-Verification $integrationPath $integrationTestCommands) } else { @() }
-      if (@($integrationTests | Where-Object status -eq 'FAIL').Count -gt 0) { $integrationDecision = 'INTEGRATION_TEST_FAILED' }
+      if (@($integrationTests | Where-Object { $_.status -in @('FAIL', 'TIMED_OUT') }).Count -gt 0) { $integrationDecision = 'INTEGRATION_TEST_FAILED' }
       $diffFiles = @(& git -C $integrationPath diff --name-only "$baseCommit...HEAD" | Where-Object { $_ })
       $diffStat = @(& git -C $integrationPath diff --stat "$baseCommit...HEAD") -join "`n"
       $integrationCommits = @(& git -C $integrationPath rev-list --reverse "$baseCommit..HEAD")
