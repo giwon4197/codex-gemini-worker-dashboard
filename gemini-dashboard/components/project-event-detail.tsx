@@ -18,7 +18,13 @@ import {
   ChevronRight,
 } from 'lucide-react';
 import type { ProjectGraphNode, GraphNodeOwner } from '../lib/project-event-graph';
-import { formatDuration, WORKER_STATUS_META, RUN_STATUS_META, evaluateRunRetrySafety } from '../lib/workspace-contract';
+import {
+  formatDuration,
+  WORKER_STATUS_META,
+  getRunStatusMeta,
+  getDeliveryFailureDisplayName,
+  evaluateRunRetrySafety,
+} from '../lib/workspace-contract';
 
 interface ProjectEventDetailProps {
   node: ProjectGraphNode | null;
@@ -65,12 +71,15 @@ export function ProjectEventDetail({
 
   const targetRunId = currentRunId || (node?.id?.includes(':') ? node.id.split(':')[0] : node?.id) || '';
 
+  const isDeliveryFailed = Boolean(node?.delivery && node.delivery.status === 'failed');
+
   const isFailed =
     node?.status === 'failed' ||
     node?.status === 'policy_violation' ||
     node?.status === 'test_failed' ||
     node?.status === 'timed_out' ||
-    node?.status === 'escalated';
+    node?.status === 'escalated' ||
+    isDeliveryFailed;
 
   const retrySafety = evaluateRunRetrySafety({
     status: isFailed ? 'failed' : node?.status,
@@ -78,13 +87,15 @@ export function ProjectEventDetail({
       node?.escalation?.requiresCodex ||
       node?.status === 'policy_violation' ||
       node?.status === 'test_failed' ||
-      node?.status === 'escalated'
+      node?.status === 'escalated' ||
+      isDeliveryFailed
     ),
-    errorCategory: (node?.metadata?.errorCategory as string) || (node?.status === 'policy_violation' ? 'policy_violation' : undefined),
-    failureReason: node?.error || (node?.metadata?.failureReason as string),
-    error: node?.error,
+    errorCategory: (node?.metadata?.errorCategory as string) || node?.delivery?.failureCategory || (node?.status === 'policy_violation' ? 'policy_violation' : undefined),
+    failureReason: node?.delivery?.failureReason || node?.error || (node?.metadata?.failureReason as string),
+    error: node?.delivery?.failureReason || node?.error,
     retryable: node?.retryable,
     escalation: node?.escalation,
+    delivery: node?.delivery,
   });
 
   const handleRetry = async () => {
@@ -139,8 +150,7 @@ export function ProjectEventDetail({
   const OwnerIcon = ownerBadge.icon;
   const statusMeta =
     WORKER_STATUS_META[node.status as keyof typeof WORKER_STATUS_META] ||
-    RUN_STATUS_META[node.status as keyof typeof RUN_STATUS_META] ||
-    RUN_STATUS_META.running;
+    getRunStatusMeta(node.status);
 
   const hasFiles = Boolean(node.files && node.files.length > 0);
   const hasVerification = Boolean(
@@ -244,6 +254,86 @@ export function ProjectEventDetail({
             </div>
           </div>
         </section>
+
+        {/* Automatic Delivery Section */}
+        {node.delivery && (
+          <section aria-labelledby="delivery-heading" className="space-y-2">
+            <div className="flex items-center justify-between">
+              <h4 id="delivery-heading" className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
+                자동 전달 (Automatic Delivery)
+              </h4>
+              <span
+                className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium border ${
+                  node.delivery.status === 'delivered'
+                    ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+                    : node.delivery.status === 'failed'
+                    ? 'bg-rose-500/10 text-rose-400 border-rose-500/30'
+                    : 'bg-cyan-500/10 text-cyan-400 border-cyan-500/30'
+                }`}
+              >
+                {node.delivery.status === 'delivered'
+                  ? '전달 완료'
+                  : node.delivery.status === 'failed'
+                  ? '전달 실패'
+                  : '전달 진행 중'}
+              </span>
+            </div>
+            <div className="rounded-lg border border-border/70 bg-card/40 p-3 space-y-2 text-[11px]">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 font-mono">
+                {node.delivery.targetBranch && (
+                  <div>
+                    <span className="text-slate-500">대상 브랜치: </span>
+                    <span className="text-slate-200">{node.delivery.targetBranch}</span>
+                  </div>
+                )}
+                {node.delivery.remote && (
+                  <div>
+                    <span className="text-slate-500">원격 저장소: </span>
+                    <span className="text-slate-200">{node.delivery.remote}</span>
+                  </div>
+                )}
+                {node.delivery.deliveredCommit && (
+                  <div className="sm:col-span-2">
+                    <span className="text-slate-500">전달 커밋: </span>
+                    <span className="text-cyan-300 font-mono">{node.delivery.deliveredCommit}</span>
+                  </div>
+                )}
+                {node.delivery.currentStage && (
+                  <div>
+                    <span className="text-slate-500">진행 단계: </span>
+                    <span className="text-slate-200">{node.delivery.currentStage}</span>
+                  </div>
+                )}
+              </div>
+
+              {node.delivery.status === 'failed' && (
+                <div className="mt-2 rounded border border-rose-500/30 bg-rose-950/20 p-2.5 space-y-1 text-rose-200">
+                  <div className="font-semibold text-rose-300 flex items-center gap-1.5">
+                    <AlertTriangle className="h-3.5 w-3.5 text-rose-400 shrink-0" />
+                    <span>실패 원인: {getDeliveryFailureDisplayName(node.delivery.failureCategory)}</span>
+                  </div>
+                  {node.delivery.failureReason && (
+                    <p className="text-[11px] text-rose-200/90 font-mono whitespace-pre-wrap">
+                      {node.delivery.failureReason}
+                    </p>
+                  )}
+                  {node.delivery.actionGuidance && (
+                    <div className="pt-1 text-[11px] text-slate-300">
+                      <span className="text-slate-400 font-medium">조치 안내: </span>
+                      {node.delivery.actionGuidance}
+                    </div>
+                  )}
+                  {node.delivery.diagnosticArtifact && (
+                    <div className="pt-1 text-[11px] font-mono text-slate-400">
+                      <span>진단 아티팩트: </span>
+                      <span className="text-cyan-300">{node.delivery.diagnosticArtifact}</span>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </section>
+        )}
 
         {/* Persisted Real Instruction / Prompt */}
         {node.instruction && (

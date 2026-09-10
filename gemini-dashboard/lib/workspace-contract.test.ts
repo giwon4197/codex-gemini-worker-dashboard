@@ -1,7 +1,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 // @ts-expect-error TS5097 allowed for test runner
-import { normalizeRunStatus, normalizeWorkerStatus, isWorkerActive, requiresUserAction, getUserActionReason, extractTimelineEvents, formatDuration, RUN_STATUS_META, WORKER_STATUS_META, validateSessionId, isLauncherError } from './workspace-contract.ts';
+import { normalizeRunStatus, normalizeWorkerStatus, isWorkerActive, isRunActive, requiresUserAction, getUserActionReason, extractTimelineEvents, formatDuration, RUN_STATUS_META, WORKER_STATUS_META, validateSessionId, isLauncherError, classifyDeliveryFailureCategory, getDeliveryFailureDisplayName, getDeliveryActionGuidance, getRunStatusMeta, evaluateRunRetrySafety, type RunStatus, type DeliveryInfo } from './workspace-contract.ts';
 
 void describe('Workspace Contract & Pure State Transforms', () => {
   void describe('normalizeRunStatus', () => {
@@ -23,6 +23,17 @@ void describe('Workspace Contract & Pure State Transforms', () => {
       assert.strictEqual(normalizeRunStatus(null), 'running');
       assert.strictEqual(normalizeRunStatus(undefined), 'running');
       assert.strictEqual(normalizeRunStatus('unknown_status'), 'running');
+      // Automatic delivery stages
+      assert.strictEqual(normalizeRunStatus<RunStatus>('delivered'), 'delivered');
+      assert.strictEqual(normalizeRunStatus<RunStatus>('DELIVERED'), 'delivered');
+      assert.strictEqual(normalizeRunStatus<RunStatus>('review_validation'), 'review_validation');
+      assert.strictEqual(normalizeRunStatus<RunStatus>('divergence_check'), 'divergence_check');
+      assert.strictEqual(normalizeRunStatus<RunStatus>('conflict_check'), 'conflict_check');
+      assert.strictEqual(normalizeRunStatus<RunStatus>('candidate_verification'), 'candidate_verification');
+      assert.strictEqual(normalizeRunStatus<RunStatus>('main_integration'), 'main_integration');
+      assert.strictEqual(normalizeRunStatus<RunStatus>('post_integration_verification'), 'post_integration_verification');
+      assert.strictEqual(normalizeRunStatus<RunStatus>('push'), 'push');
+      assert.strictEqual(normalizeRunStatus<RunStatus>('delivering'), 'delivering');
     });
   });
 
@@ -257,6 +268,194 @@ void describe('Workspace Contract & Pure State Transforms', () => {
         error: '실행기 프로세스가 비정상 종료되었습니다 (종료 코드: 1).',
       });
       assert.strictEqual(events.length, 0);
+    });
+  });
+
+  void describe('Automatic Delivery Contract & Pure State Transforms', () => {
+    void test('isRunActive accurately distinguishes in-flight delivery from terminal and legacy states', () => {
+      // In-flight delivery stages
+      assert.strictEqual(isRunActive('review_validation'), true);
+      assert.strictEqual(isRunActive('divergence_check'), true);
+      assert.strictEqual(isRunActive('conflict_check'), true);
+      assert.strictEqual(isRunActive('candidate_verification'), true);
+      assert.strictEqual(isRunActive('main_integration'), true);
+      assert.strictEqual(isRunActive('post_integration_verification'), true);
+      assert.strictEqual(isRunActive('push'), true);
+      assert.strictEqual(isRunActive('running'), true);
+      assert.strictEqual(isRunActive('planning'), true);
+      assert.strictEqual(isRunActive('pending'), true);
+
+      // Terminal and review states
+      assert.strictEqual(isRunActive('delivered'), false);
+      assert.strictEqual(isRunActive('completed'), false);
+      assert.strictEqual(isRunActive('failed'), false);
+      assert.strictEqual(isRunActive('cancelled'), false);
+      assert.strictEqual(isRunActive('escalated'), false);
+      assert.strictEqual(isRunActive('awaiting_review'), false);
+      assert.strictEqual(isRunActive(null), false);
+      assert.strictEqual(isRunActive(undefined), false);
+    });
+
+    void test('classifyDeliveryFailureCategory categorizes failure conditions correctly', () => {
+      assert.strictEqual(classifyDeliveryFailureCategory('conflict', 'Merge conflict in file.ts'), 'conflict');
+      assert.strictEqual(classifyDeliveryFailureCategory(undefined, 'Branch divergence detected against main'), 'divergence');
+      assert.strictEqual(classifyDeliveryFailureCategory(undefined, 'Review failed: lint errors present'), 'review_failed');
+      assert.strictEqual(classifyDeliveryFailureCategory('policy_violation', 'Disallowed file modified'), 'policy_violation');
+      assert.strictEqual(classifyDeliveryFailureCategory(undefined, 'Unexpected untracked changes before merge'), 'unexpected_changes');
+      assert.strictEqual(classifyDeliveryFailureCategory(undefined, 'Verification failed during candidate test'), 'verification_failed');
+      assert.strictEqual(classifyDeliveryFailureCategory(undefined, 'Missing upstream tracking branch'), 'missing_upstream');
+      assert.strictEqual(classifyDeliveryFailureCategory(undefined, 'Push rejected by remote hook'), 'push_rejected');
+      assert.strictEqual(classifyDeliveryFailureCategory(undefined, 'Something random'), 'unknown');
+    });
+
+    void test('getDeliveryFailureDisplayName and getDeliveryActionGuidance provide safe Korean guidance', () => {
+      const cat = 'conflict';
+      const name = getDeliveryFailureDisplayName(cat);
+      const guidance = getDeliveryActionGuidance(cat);
+      assert.ok(name.includes('충돌'));
+      assert.ok(guidance.includes('충돌'));
+
+      const pushCat = 'push_rejected';
+      assert.ok(getDeliveryFailureDisplayName(pushCat).includes('푸시 거부'));
+      assert.ok(getDeliveryActionGuidance(pushCat).includes('푸시가 거부'));
+    });
+
+    void test('getRunStatusMeta covers all delivery states and graceful fallback', () => {
+      const deliveredMeta = getRunStatusMeta('delivered');
+      assert.strictEqual(deliveredMeta.label, '전달 완료');
+      assert.ok(deliveredMeta.badgeClass.includes('emerald'));
+
+      const pushMeta = getRunStatusMeta('push');
+      assert.strictEqual(pushMeta.label, '원격 푸시 중');
+
+      const verificationMeta = getRunStatusMeta('candidate_verification');
+      assert.strictEqual(verificationMeta.label, '후보 커밋 검증 중');
+
+      // Graceful fallback for unexpected string
+      const unknownMeta = getRunStatusMeta('future_hypothetical_stage' as RunStatus);
+      assert.ok(unknownMeta.label);
+      assert.ok(unknownMeta.badgeClass);
+    });
+
+    void test('requiresUserAction behaves correctly for delivery lifecycles', () => {
+      const inFlightDelivery: DeliveryInfo = {
+        status: 'in_progress',
+        targetBranch: 'main',
+        currentStage: 'candidate_verification',
+      };
+      // Active delivery stages do not require user action
+      assert.strictEqual(requiresUserAction('candidate_verification', null, undefined, undefined, inFlightDelivery), false);
+      assert.strictEqual(requiresUserAction('push', null, undefined, undefined, inFlightDelivery), false);
+
+      // Delivered state does not require user action
+      const deliveredInfo: DeliveryInfo = {
+        status: 'delivered',
+        targetBranch: 'main',
+        deliveredCommit: 'abc1234',
+      };
+      assert.strictEqual(requiresUserAction('delivered', null, undefined, undefined, deliveredInfo), false);
+
+      // Failed delivery requires user action
+      const failedDelivery: DeliveryInfo = {
+        status: 'failed',
+        targetBranch: 'main',
+        failureCategory: 'conflict',
+        failureReason: 'Merge conflict in app/page.tsx',
+        actionGuidance: 'main 브랜치와의 병합 충돌을 수동으로 해결하세요.',
+        diagnosticArtifact: '.agent/runs/run-001/delivery.json',
+      };
+      assert.strictEqual(requiresUserAction('failed', null, undefined, undefined, failedDelivery), true);
+
+      // Legacy awaiting_review still requires action
+      assert.strictEqual(requiresUserAction('awaiting_review'), true);
+    });
+
+    void test('getUserActionReason provides actionable guidance on delivery failure', () => {
+      const failedDelivery: DeliveryInfo = {
+        status: 'failed',
+        targetBranch: 'main',
+        failureCategory: 'conflict',
+        failureReason: 'Merge conflict in app/page.tsx',
+        actionGuidance: 'main 브랜치와의 병합 충돌을 수동으로 해결하세요.',
+        diagnosticArtifact: '.agent/runs/run-001/delivery.json',
+      };
+
+      const reason = getUserActionReason('failed', null, undefined, undefined, failedDelivery);
+      assert.ok(reason);
+      assert.ok(reason.includes('충돌'));
+      assert.ok(reason.includes('수동으로 충돌을 해결'));
+      assert.ok(reason.includes('.agent/runs/run-001/delivery.json'));
+    });
+
+    void test('evaluateRunRetrySafety blocks retries on delivery failures with clear guidance', () => {
+      const failedDelivery: DeliveryInfo = {
+        status: 'failed',
+        targetBranch: 'main',
+        failureCategory: 'divergence',
+        failureReason: 'Divergence detected',
+        actionGuidance: 'main 브랜치 변경 사항을 확인하세요.',
+      };
+
+      const safety = evaluateRunRetrySafety({
+        status: 'failed',
+        requiresUserAction: true,
+        delivery: failedDelivery,
+      });
+
+      assert.strictEqual(safety.canRetry, false);
+      assert.ok(safety.reason?.includes('자동 전달'));
+      assert.ok(safety.reason?.includes('main 브랜치'));
+    });
+
+    void test('extractTimelineEvents surfaces delivery lifecycle stages', () => {
+      // In-flight delivery
+      const inFlightEvents = extractTimelineEvents({
+        runId: 'deliv-run-1',
+        status: 'main_integration',
+        startedAt: '2026-09-09T10:00:00Z',
+        delivery: {
+          status: 'in_progress',
+          targetBranch: 'main',
+          currentStage: 'main_integration',
+        },
+      });
+      const delivStage = inFlightEvents.find(e => e.stage === 'delivery');
+      assert.ok(delivStage);
+      assert.strictEqual(delivStage.status, 'in_progress');
+      assert.ok(delivStage.title.includes('main'));
+
+      // Delivered
+      const deliveredEvents = extractTimelineEvents({
+        runId: 'deliv-run-2',
+        status: 'delivered',
+        startedAt: '2026-09-09T10:00:00Z',
+        delivery: {
+          status: 'delivered',
+          targetBranch: 'main',
+          deliveredCommit: '1234567',
+        },
+      });
+      const deliveredStage = deliveredEvents.find(e => e.stage === 'complete');
+      assert.ok(deliveredStage);
+      assert.strictEqual(deliveredStage.status, 'passed');
+      assert.ok(deliveredStage.description?.includes('1234567'));
+
+      // Failed delivery
+      const failedEvents = extractTimelineEvents({
+        runId: 'deliv-run-3',
+        status: 'failed',
+        startedAt: '2026-09-09T10:00:00Z',
+        delivery: {
+          status: 'failed',
+          targetBranch: 'main',
+          failureCategory: 'conflict',
+          failureReason: 'Merge conflict',
+        },
+      });
+      const failedStage = failedEvents.find(e => e.stage === 'action_required');
+      assert.ok(failedStage);
+      assert.strictEqual(failedStage.status, 'failed');
+      assert.ok(failedStage.title.includes('실패') || failedStage.title.includes('중지'));
     });
   });
 });

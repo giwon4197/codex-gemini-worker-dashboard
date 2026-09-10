@@ -1043,4 +1043,164 @@ void describe('Workspace Store (Idempotency, Path Traversal, & Recovery)', () =>
       assert.strictEqual(projectWorkersRes.activeWorkers.length, 0);
     });
   });
+
+  void describe('Automatic Delivery Ingestion & Backward Compatibility', () => {
+    void test('ingests completed delivery artifact and presents delivered status without active workers', async () => {
+      const runId = '20260910-120000-deliv001';
+      const runDir = path.join(testTempDir, '.agent', 'runs', runId);
+      fs.mkdirSync(runDir, { recursive: true });
+
+      const manifestContent = JSON.stringify({
+        runId,
+        prompt: '자동 전달 테스트 요청',
+        status: 'delivered',
+        createdAt: new Date().toISOString(),
+        tasks: ['TASK-001'],
+      });
+
+      // Write run.json and manifest.json
+      fs.writeFileSync(path.join(runDir, 'run.json'), manifestContent);
+      fs.writeFileSync(path.join(runDir, 'manifest.json'), manifestContent);
+
+      // Write delivery.json
+      fs.writeFileSync(
+        path.join(runDir, 'delivery.json'),
+        JSON.stringify({
+          status: 'delivered',
+          targetBranch: 'main',
+          remote: 'origin',
+          deliveredCommit: 'a1b2c3d4e5f6',
+          completedAt: new Date().toISOString(),
+        })
+      );
+
+      const runDetails = await getRunDetails(runId, testTempDir);
+      assert.ok(runDetails);
+      assert.strictEqual(runDetails.status, 'delivered');
+      assert.strictEqual(runDetails.requiresUserAction, false);
+      assert.strictEqual(runDetails.activeWorkersCount, 0);
+      assert.strictEqual(runDetails.completedTasksCount, 1);
+      assert.ok(runDetails.delivery);
+      assert.strictEqual(runDetails.delivery.status, 'delivered');
+      assert.strictEqual(runDetails.delivery.targetBranch, 'main');
+      assert.strictEqual(runDetails.delivery.deliveredCommit, 'a1b2c3d4e5f6');
+
+      // Test listCompactRuns
+      const compactList = await listCompactRuns(testTempDir);
+      const compact = compactList.find((r) => r.runId === runId);
+      assert.ok(compact);
+      assert.strictEqual(compact.status, 'delivered');
+      assert.strictEqual(compact.requiresUserAction, false);
+      assert.strictEqual(compact.activeWorkersCount, 0);
+    });
+
+    void test('ingests in-flight delivery stage without showing active workers or requiring action', async () => {
+      const runId = '20260910-120000-deliv002';
+      const runDir = path.join(testTempDir, '.agent', 'runs', runId);
+      fs.mkdirSync(runDir, { recursive: true });
+
+      const manifestContent = JSON.stringify({
+        runId,
+        prompt: '후보 검증 진행 중 요청',
+        status: 'candidate_verification',
+        createdAt: new Date().toISOString(),
+        tasks: ['TASK-001'],
+      });
+
+      fs.writeFileSync(path.join(runDir, 'run.json'), manifestContent);
+      fs.writeFileSync(path.join(runDir, 'manifest.json'), manifestContent);
+
+      fs.writeFileSync(
+        path.join(runDir, 'delivery.json'),
+        JSON.stringify({
+          status: 'in_progress',
+          targetBranch: 'main',
+          currentStage: 'candidate_verification',
+          stageStartedAt: new Date().toISOString(),
+        })
+      );
+
+      const runDetails = await getRunDetails(runId, testTempDir);
+      assert.ok(runDetails);
+      assert.strictEqual(runDetails.status, 'candidate_verification');
+      assert.strictEqual(runDetails.requiresUserAction, false);
+      assert.strictEqual(runDetails.activeWorkersCount, 0);
+      assert.ok(runDetails.delivery);
+      assert.strictEqual(runDetails.delivery.status, 'in_progress');
+      assert.strictEqual(runDetails.delivery.currentStage, 'candidate_verification');
+    });
+
+    void test('ingests delivery failure and exposes diagnostic guidance requiring user action', async () => {
+      const runId = '20260910-120000-deliv003';
+      const runDir = path.join(testTempDir, '.agent', 'runs', runId);
+      fs.mkdirSync(runDir, { recursive: true });
+
+      const manifestContent = JSON.stringify({
+        runId,
+        prompt: '충돌 발생 요청',
+        status: 'failed',
+        createdAt: new Date().toISOString(),
+        tasks: ['TASK-001'],
+      });
+
+      fs.writeFileSync(path.join(runDir, 'run.json'), manifestContent);
+      fs.writeFileSync(path.join(runDir, 'manifest.json'), manifestContent);
+
+      fs.writeFileSync(
+        path.join(runDir, 'delivery.json'),
+        JSON.stringify({
+          status: 'failed',
+          targetBranch: 'main',
+          failureCategory: 'conflict',
+          failureReason: 'Automatic merge into main resulted in conflict in index.ts',
+          actionGuidance: 'main 브랜치와의 병합 충돌을 수동으로 해결하세요.',
+          diagnosticArtifact: path.join(runDir, 'delivery.json'),
+        })
+      );
+
+      const runDetails = await getRunDetails(runId, testTempDir);
+      assert.ok(runDetails);
+      assert.strictEqual(runDetails.status, 'failed');
+      assert.strictEqual(runDetails.requiresUserAction, true);
+      assert.ok(runDetails.delivery);
+      assert.strictEqual(runDetails.delivery.status, 'failed');
+      assert.strictEqual(runDetails.delivery.failureCategory, 'conflict');
+      assert.ok(runDetails.userActionReason?.includes('충돌'));
+      // Check diagnostic artifact path was sanitized to relative repo path
+      assert.ok(runDetails.delivery.diagnosticArtifact);
+      assert.strictEqual(runDetails.delivery.diagnosticArtifact.includes(testTempDir), false);
+      assert.ok(runDetails.delivery.diagnosticArtifact.startsWith('.agent/'));
+    });
+
+    void test('retains complete backward compatibility with legacy runs stopping at awaiting_review', async () => {
+      const runId = '20260910-120000-legacy001';
+      const runDir = path.join(testTempDir, '.agent', 'runs', runId);
+      fs.mkdirSync(runDir, { recursive: true });
+
+      const manifestContent = JSON.stringify({
+        runId,
+        prompt: '기존 수동 검토 대기 작업',
+        status: 'awaiting_review',
+        createdAt: new Date().toISOString(),
+        tasks: ['TASK-001'],
+      });
+
+      fs.writeFileSync(path.join(runDir, 'run.json'), manifestContent);
+      fs.writeFileSync(path.join(runDir, 'manifest.json'), manifestContent);
+
+      // No delivery.json exists (legacy run)
+      const runDetails = await getRunDetails(runId, testTempDir);
+      assert.ok(runDetails);
+      assert.strictEqual(runDetails.status, 'awaiting_review');
+      assert.strictEqual(runDetails.requiresUserAction, true);
+      assert.strictEqual(runDetails.delivery, undefined);
+      assert.ok(runDetails.userActionReason?.includes('통합 브랜치'));
+
+      const compactList = await listCompactRuns(testTempDir);
+      const compact = compactList.find((r) => r.runId === runId);
+      assert.ok(compact);
+      assert.strictEqual(compact.status, 'awaiting_review');
+      assert.strictEqual(compact.requiresUserAction, true);
+    });
+  });
 });

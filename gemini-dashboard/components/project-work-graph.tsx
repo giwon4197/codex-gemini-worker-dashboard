@@ -27,7 +27,7 @@ import {
   computeGraphLayoutGeometry,
   GRAPH_LAYOUT_CONFIG,
 } from '../lib/project-event-graph';
-import { formatDuration, WORKER_STATUS_META, RUN_STATUS_META } from '../lib/workspace-contract';
+import { formatDuration, WORKER_STATUS_META, getRunStatusMeta } from '../lib/workspace-contract';
 
 interface ProjectWorkGraphProps {
   graph: ProjectWorkGraphData;
@@ -146,8 +146,7 @@ export function ProjectWorkGraph({
             const ownerBadge = getOwnerBadge(tip.owner);
             const statusMeta =
               WORKER_STATUS_META[tip.status as keyof typeof WORKER_STATUS_META] ||
-              RUN_STATUS_META[tip.status as keyof typeof RUN_STATUS_META] ||
-              RUN_STATUS_META.running;
+              getRunStatusMeta(tip.status);
 
             return (
               <div
@@ -200,7 +199,6 @@ export function ProjectWorkGraph({
               strokeOpacity={0.4}
             />
           ))}
-
           {/* Continuous graph edges (direct edges, branch curves, merge curves) */}
           {layout.edges.map((edge) => (
             <path
@@ -254,8 +252,7 @@ export function ProjectWorkGraph({
             const ActivityIcon = getActivityIcon(node.activity);
             const statusMeta =
               WORKER_STATUS_META[node.status as keyof typeof WORKER_STATUS_META] ||
-              RUN_STATUS_META[node.status as keyof typeof RUN_STATUS_META] ||
-              RUN_STATUS_META.running;
+              getRunStatusMeta(node.status);
 
             return (
               <li key={node.id} className="list-none h-[52px] box-border">

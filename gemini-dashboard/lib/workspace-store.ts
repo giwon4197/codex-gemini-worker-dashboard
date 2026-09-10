@@ -14,17 +14,25 @@ import type {
   LaunchMetadata,
   ProjectWorkGraphData,
   LiveWorkerVerificationCommand,
+  DeliveryInfo,
+  DeliveryStage,
+  DeliveryFailureCategory,
+  RunStatus,
 } from './workspace-contract.ts';
 import {
   normalizeRunStatus,
   normalizeWorkerStatus,
   isWorkerActive,
+  isRunActive,
   requiresUserAction,
   getUserActionReason,
   extractTimelineEvents,
   validateSessionId,
   isLauncherError,
   evaluateRunRetrySafety,
+  classifyDeliveryFailureCategory,
+  getDeliveryActionGuidance,
+  getDeliveryFailureDisplayName,
 // @ts-expect-error TS5097 allowed for test runner
 } from './workspace-contract.ts';
 // @ts-expect-error TS5097 allowed for test runner
@@ -425,6 +433,110 @@ function getDashboardStateDir(repoRoot: string): string {
 
 function parseJsonFileText<T>(raw: string): T {
   return JSON.parse(raw.replace(/^\uFEFF/, '')) as T;
+}
+
+/**
+ * Loads and sanitizes delivery artifact or manifest delivery block if present.
+ * Ensures all paths, URLs, and failure guidance are sanitized without exposing credentials.
+ */
+export async function loadDeliveryInfo(
+  runDir: string,
+  manifest?: Record<string, unknown> | null,
+  compact?: CompactRunState | null,
+  repoRoot?: string
+): Promise<DeliveryInfo | undefined> {
+  const root = repoRoot || getAllowedRepoRoot();
+
+  // 1. Check direct delivery.json or delivery-state.json in runDir
+  const deliveryCandidates = [
+    path.join(runDir, 'delivery.json'),
+    path.join(runDir, 'delivery-state.json'),
+  ];
+
+  let rawDel: Record<string, unknown> | null = null;
+  let artifactFileUsed: string | undefined;
+
+  for (const delPath of deliveryCandidates) {
+    try {
+      if (fs.existsSync(delPath)) {
+        const raw = await fs.promises.readFile(delPath, 'utf8');
+        rawDel = parseJsonFileText<Record<string, unknown>>(raw);
+        artifactFileUsed = delPath;
+        break;
+      }
+    } catch {
+      // Ignore
+    }
+  }
+
+  // 2. Fallback to manifest.delivery or compact.delivery
+  if (!rawDel && manifest && typeof manifest.delivery === 'object' && manifest.delivery !== null) {
+    rawDel = manifest.delivery as Record<string, unknown>;
+  }
+
+  if (!rawDel && compact?.delivery) {
+    return compact.delivery;
+  }
+
+  if (!rawDel) {
+    // If manifest status is explicitly 'delivered', synthesize minimal DeliveryInfo
+    if (manifest?.status === 'delivered') {
+      return {
+        status: 'delivered',
+        stage: 'delivered',
+        targetBranch: (manifest.targetBranch as string) || 'main',
+        remote: 'origin',
+        deliveredCommit: (manifest.deliveredCommit as string) || (manifest.baseCommit as string),
+        deliveredAt: (manifest.updatedAt as string) || (manifest.createdAt as string),
+      };
+    }
+    return undefined;
+  }
+
+  const rawStatus = (rawDel.status as string) || (rawDel.stage as string) || 'delivering';
+  const normStatus: DeliveryInfo['status'] =
+    rawStatus === 'delivered' ? 'delivered' :
+    rawStatus === 'failed' ? 'failed' :
+    rawStatus === 'awaiting_review' ? 'awaiting_review' :
+    rawStatus === 'skipped' ? 'skipped' :
+    rawStatus === 'in_progress' ? 'in_progress' : 'delivering';
+
+  const failureCat = (rawDel.failureCategory as string) || (rawDel.category as string);
+  const rawFailureReason = (rawDel.failureReason as string) || (rawDel.reason as string) || (rawDel.error as string);
+  const sanitizedReason = rawFailureReason ? sanitizeText(rawFailureReason, root) : undefined;
+  const classifiedCat = failureCat ? classifyDeliveryFailureCategory(failureCat, sanitizedReason) : undefined;
+
+  const rawArtifactPath = (rawDel.diagnosticArtifactPath as string) || (rawDel.diagnosticArtifact as string) || (rawDel.artifactPath as string) || artifactFileUsed;
+  const safeArtifactPath = rawArtifactPath ? sanitizePath(rawArtifactPath, root) : undefined;
+
+  // Mask tokens/passwords in remote URL if present
+  let safeRemote = (rawDel.remote as string) || 'origin';
+  if (safeRemote.includes('://') || safeRemote.includes('@')) {
+    safeRemote = safeRemote.replace(/:\/\/[^@]+@/, '://***@');
+  }
+
+  const effectiveGuidance = (rawDel.actionGuidance as string) || (rawDel.guidance as string) || (classifiedCat
+    ? getDeliveryActionGuidance(classifiedCat, sanitizedReason, safeArtifactPath)
+    : undefined);
+
+  return {
+    status: normStatus,
+    stage: (rawDel.stage as DeliveryStage) || undefined,
+    stageName: (rawDel.stageName as string) || undefined,
+    currentStage: (rawDel.currentStage as string) || (rawDel.stage as string) || undefined,
+    targetBranch: (rawDel.targetBranch as string) || 'main',
+    remote: safeRemote,
+    candidateCommit: (rawDel.candidateCommit as string) || undefined,
+    deliveredCommit: (rawDel.deliveredCommit as string) || undefined,
+    deliveredAt: (rawDel.deliveredAt as string) || (normStatus === 'delivered' ? (rawDel.updatedAt as string) : undefined),
+    failureCategory: (classifiedCat || failureCat || undefined) as DeliveryFailureCategory | undefined,
+    failureReason: sanitizedReason,
+    diagnosticArtifactPath: safeArtifactPath,
+    diagnosticArtifact: safeArtifactPath,
+    guidance: effectiveGuidance,
+    actionGuidance: effectiveGuidance,
+    verificationCommands: Array.isArray(rawDel.tests) ? (rawDel.tests as LiveWorkerVerificationCommand[]) : undefined,
+  };
 }
 
 /**
@@ -1215,7 +1327,8 @@ export async function listCompactRuns(
           parsed.actualRunId = actualRunId;
 
           // Merge live status from actual run manifest if available
-          const actualManifestPath = path.join(root, '.agent', 'runs', actualRunId, 'run.json');
+          const actualRunDir = path.join(root, '.agent', 'runs', actualRunId);
+          const actualManifestPath = path.join(actualRunDir, 'run.json');
           try {
             const mRaw = await fs.promises.readFile(actualManifestPath, 'utf8');
             const m = parseJsonFileText<{
@@ -1224,13 +1337,17 @@ export async function listCompactRuns(
               tasks?: string[];
               baseCommit?: string;
               orchestratorProcessId?: number;
+              delivery?: unknown;
             }>(mRaw);
-            if (m.status) {
-              const norm = normalizeRunStatus(m.status);
-              parsed.status = norm;
-              parsed.requiresUserAction = requiresUserAction(norm, null, parsed.errorCategory, parsed.failureReason);
-              parsed.userActionReason = getUserActionReason(norm, null, parsed.errorCategory, parsed.failureReason);
+            const delivery = await loadDeliveryInfo(actualRunDir, m, parsed, root);
+            if (delivery) {
+              parsed.delivery = delivery;
             }
+            const rawStatus = delivery?.status === 'delivered' ? 'delivered' : delivery?.status === 'failed' ? 'failed' : (m.status || parsed.status);
+            const norm = normalizeRunStatus<RunStatus>(rawStatus);
+            parsed.status = norm;
+            parsed.requiresUserAction = requiresUserAction(norm, null, parsed.errorCategory || delivery?.failureCategory, parsed.failureReason || delivery?.failureReason, delivery);
+            parsed.userActionReason = getUserActionReason(norm, null, parsed.errorCategory || delivery?.failureCategory, parsed.failureReason || delivery?.failureReason, delivery);
             if (m.updatedAt) parsed.updatedAt = m.updatedAt;
             if (Array.isArray(m.tasks)) parsed.tasksCount = m.tasks.length;
             if (m.baseCommit) parsed.baseCommit = m.baseCommit;
@@ -1269,7 +1386,8 @@ export async function listCompactRuns(
         continue;
       }
 
-      const manifestPath = path.join(runsDir, folder, 'run.json');
+      const runFolderDir = path.join(runsDir, folder);
+      const manifestPath = path.join(runFolderDir, 'run.json');
       try {
         const raw = await fs.promises.readFile(manifestPath, 'utf8');
         const manifest = parseJsonFileText<{
@@ -1280,11 +1398,24 @@ export async function listCompactRuns(
           tasks?: string[];
           baseCommit?: string;
           orchestratorProcessId?: number;
+          delivery?: unknown;
         }>(raw);
 
         const existing = runsMap.get(folder);
-        const normStatus = normalizeRunStatus(manifest.status);
-        const actionRequired = requiresUserAction(normStatus);
+        const delivery = await loadDeliveryInfo(runFolderDir, manifest, existing, root);
+        const rawStatus = delivery?.status === 'delivered' ? 'delivered' : delivery?.status === 'failed' ? 'failed' : (manifest.status || 'running');
+        const normStatus = normalizeRunStatus<RunStatus>(rawStatus);
+        const actionRequired = requiresUserAction(normStatus, null, delivery?.failureCategory, delivery?.failureReason, delivery);
+
+        const isDeliveryStage =
+          normStatus === 'delivering' ||
+          normStatus === 'review_validation' ||
+          normStatus === 'divergence_check' ||
+          normStatus === 'conflict_check' ||
+          normStatus === 'candidate_verification' ||
+          normStatus === 'main_integration' ||
+          normStatus === 'post_integration_verification' ||
+          normStatus === 'push';
 
         const recovered: CompactRunState = {
           runId: folder,
@@ -1294,12 +1425,13 @@ export async function listCompactRuns(
           updatedAt: manifest.updatedAt || existing?.updatedAt || new Date().toISOString(),
           status: normStatus,
           requiresUserAction: actionRequired,
-          userActionReason: getUserActionReason(normStatus),
+          userActionReason: getUserActionReason(normStatus, null, delivery?.failureCategory, delivery?.failureReason, delivery),
           tasksCount: Array.isArray(manifest.tasks) ? manifest.tasks.length : existing?.tasksCount || 1,
           activeWorkersCount: normStatus === 'running' ? 1 : 0,
-          completedTasksCount: normStatus === 'completed' ? 1 : existing?.completedTasksCount || 0,
+          completedTasksCount: (normStatus === 'completed' || normStatus === 'delivered' || isDeliveryStage) ? 1 : existing?.completedTasksCount || 0,
           baseCommit: manifest.baseCommit || existing?.baseCommit,
           orchestratorProcessId: manifest.orchestratorProcessId || existing?.orchestratorProcessId,
+          delivery,
         };
 
         // Evaluate liveness for recovered unaliased active run
@@ -1821,10 +1953,39 @@ export async function getRunDetails(
   const prompt = alias?.prompt || compact?.prompt || `작업 (${runId})`;
   const createdAt = manifest?.createdAt || compact?.createdAt || now;
   const updatedAt = manifest?.updatedAt || compact?.updatedAt || now;
+
+  const delivery = await loadDeliveryInfo(runDir, manifest, compact, root);
+  if (delivery && compact) {
+    compact.delivery = delivery;
+  }
+
+  const isDeliveryStage =
+    delivery?.stage === 'review_validation' ||
+    delivery?.stage === 'divergence_check' ||
+    delivery?.stage === 'conflict_check' ||
+    delivery?.stage === 'candidate_verification' ||
+    delivery?.stage === 'main_integration' ||
+    delivery?.stage === 'post_integration_verification' ||
+    delivery?.stage === 'push' ||
+    manifest?.status === 'delivering' ||
+    manifest?.status === 'review_validation' ||
+    manifest?.status === 'divergence_check' ||
+    manifest?.status === 'conflict_check' ||
+    manifest?.status === 'candidate_verification' ||
+    manifest?.status === 'main_integration' ||
+    manifest?.status === 'post_integration_verification' ||
+    manifest?.status === 'push';
+
   const rawStatus = isStaleMismatch
     ? 'failed'
+    : delivery?.status === 'delivered'
+    ? 'delivered'
+    : delivery?.status === 'failed'
+    ? 'failed'
+    : delivery?.status === 'delivering'
+    ? (delivery.stage || 'delivering')
     : (manifest?.status || compact?.status || 'running');
-  const status = normalizeRunStatus(rawStatus);
+  const status = normalizeRunStatus<RunStatus>(rawStatus);
 
   const tasks: TaskProgressSummary[] = [];
   const activeWorkers: LiveWorkerData[] = [];
@@ -1973,7 +2134,17 @@ export async function getRunDetails(
         changedFiles: firstWorker.changedFiles,
         finalResponse: firstWorker.finalResponse,
         error: firstWorker.error,
-        errorCategory: compact?.errorCategory,
+        errorCategory: compact?.errorCategory || delivery?.failureCategory,
+        delivery,
+      })
+    : delivery
+    ? extractTimelineEvents({
+        runId: effectiveRunId,
+        status,
+        startedAt: createdAt,
+        updatedAt: updatedAt,
+        errorCategory: compact?.errorCategory || delivery?.failureCategory,
+        delivery,
       })
     : [];
 
@@ -1981,12 +2152,24 @@ export async function getRunDetails(
     ? false
     : isStaleMismatch
     ? true
-    : requiresUserAction(status, firstWorker?.escalation, compact?.errorCategory, compact?.failureReason);
+    : requiresUserAction(
+        status,
+        firstWorker?.escalation,
+        compact?.errorCategory || delivery?.failureCategory,
+        compact?.failureReason || delivery?.failureReason,
+        delivery
+      );
   const runActionReason = isLauncher
     ? undefined
     : isStaleMismatch
     ? STALE_PROCESS_MISMATCH_REASON
-    : getUserActionReason(status, firstWorker?.escalation, compact?.errorCategory, compact?.failureReason);
+    : getUserActionReason(
+        status,
+        firstWorker?.escalation,
+        compact?.errorCategory || delivery?.failureCategory,
+        compact?.failureReason || delivery?.failureReason,
+        delivery
+      );
 
   // Read agent message / integration review if present
   let agentMessage: string | undefined = firstWorker?.finalResponse || undefined;
@@ -1998,6 +2181,9 @@ export async function getRunDetails(
     // Not present
   }
 
+  const isDeliveredOrInDelivery = status === 'delivered' || isDeliveryStage;
+  const activeWorkersCount = isStaleMismatch || status === 'failed' || isDeliveredOrInDelivery ? 0 : activeWorkers.length;
+
   return {
     runId, // Preserve the requested runId
     actualRunId: actualRunId || manifest?.runId || undefined,
@@ -2008,10 +2194,12 @@ export async function getRunDetails(
     requiresUserAction: runUserAction,
     userActionReason: runActionReason,
     tasksCount: tasks.length,
-    activeWorkersCount: isStaleMismatch || status === 'failed' ? 0 : activeWorkers.length,
-    completedTasksCount: historyWorkers.filter(w => w.status === 'completed').length,
+    activeWorkersCount,
+    completedTasksCount: (status === 'delivered' || status === 'completed' || isDeliveryStage) && historyWorkers.length === 0
+      ? (tasks.length || 1)
+      : historyWorkers.filter(w => w.status === 'completed').length,
     tasks,
-    activeWorkers: isStaleMismatch || status === 'failed' ? [] : activeWorkers,
+    activeWorkers: isStaleMismatch || status === 'failed' || isDeliveredOrInDelivery ? [] : activeWorkers,
     historyWorkers,
     timeline: overallTimeline,
     agentMessage,
@@ -2019,12 +2207,15 @@ export async function getRunDetails(
     orchestratorProcessId: manifest?.orchestratorProcessId || compact?.orchestratorProcessId,
     integrationBranch: manifest?.integrationBranch,
     error: compact?.error || (isStaleMismatch ? STALE_PROCESS_MISMATCH_REASON : undefined),
-    failureLogPath: compact?.failureLogPath || (status === 'failed' ? sanitizePath(getRunLogPath(runId, root), root) : undefined),
-    failureReason: compact?.failureReason || compact?.error || undefined,
+    failureLogPath: compact?.failureLogPath || delivery?.diagnosticArtifactPath || (status === 'failed' ? sanitizePath(getRunLogPath(runId, root), root) : undefined),
+    failureReason: delivery?.failureReason || compact?.failureReason || compact?.error || undefined,
     exitCode: compact?.exitCode,
-    errorCategory: compact?.errorCategory,
-    errorDisplayName: compact?.errorDisplayName || (isLauncher ? '실행기 오류' : undefined),
+    errorCategory: delivery?.failureCategory || compact?.errorCategory,
+    errorDisplayName: delivery?.failureCategory
+      ? getDeliveryFailureDisplayName(delivery.failureCategory)
+      : compact?.errorDisplayName || (isLauncher ? '실행기 오류' : undefined),
     retryable: compact?.retryable !== undefined ? compact.retryable : (isLauncher ? true : undefined),
+    delivery,
   };
 }
 
@@ -2044,8 +2235,8 @@ export async function getProjectWorkGraph(
   if (!targetRunId || targetRunId === 'current') {
     const runs = await listCompactRuns(root, livenessOptions);
     const sorted = [...runs].sort((a, b) => {
-      const aActive = a.status === 'running' || a.status === 'planning' ? 1 : 0;
-      const bActive = b.status === 'running' || b.status === 'planning' ? 1 : 0;
+      const aActive = isRunActive(a.status) ? 1 : 0;
+      const bActive = isRunActive(b.status) ? 1 : 0;
       if (aActive !== bActive) return bActive - aActive;
       return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
     });
@@ -2130,6 +2321,7 @@ export async function getProjectWorkGraph(
   // Load workers
   const details = await getRunDetails(targetRunId, root, livenessOptions);
   const workers: LiveWorkerData[] = details ? [...details.activeWorkers, ...details.historyWorkers] : [];
+  const delivery = details?.delivery || (await loadDeliveryInfo(runDir, manifest, compact, root));
 
   // Read events per task
   const eventsByTask: Record<string, string[]> = {};
@@ -2190,6 +2382,7 @@ export async function getProjectWorkGraph(
     retriedByRunId: compact?.retriedByRunId,
     retryCount: compact?.retryCount,
     retryable: compact?.retryable,
+    delivery,
   });
 
   return sanitizeGraphData(rawGraph, root);
@@ -2219,8 +2412,8 @@ export async function getProjectWorkers(
 
   // Sort runs prioritizing active runs, then latest createdAt
   const sortedRuns = [...runs].sort((a, b) => {
-    const aActive = a.status === 'running' || a.status === 'planning' ? 1 : 0;
-    const bActive = b.status === 'running' || b.status === 'planning' ? 1 : 0;
+    const aActive = isRunActive(a.status) ? 1 : 0;
+    const bActive = isRunActive(b.status) ? 1 : 0;
     if (aActive !== bActive) return bActive - aActive;
     return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
   });

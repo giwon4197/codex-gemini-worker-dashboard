@@ -780,4 +780,126 @@ void describe('Project Work Graph & Defensive NDJSON Parser', () => {
       assert.strictEqual(tipNode.y, computeNodeY(0));
     });
   });
+
+  void describe('Automatic Delivery DAG Derivation & Tip Status', () => {
+    const mockWorker = (runId: string, taskId = 'TASK-001') => ({
+      runId,
+      taskId,
+      task: '작업 1',
+      model: 'gemini-3.8-flash-high',
+      status: 'completed' as const,
+      startedAt: '2026-09-10T02:00:00Z',
+      updatedAt: '2026-09-10T02:01:00Z',
+      elapsedSeconds: 60,
+      recentLogs: [],
+    });
+
+    void test('derives delivered merge node and tip correctly', () => {
+      const runId = 'run-deliv-dag-1';
+      const graph = buildProjectWorkGraph({
+        runId,
+        prompt: '배포 완료 테스트',
+        status: 'delivered',
+        delivery: {
+          status: 'delivered',
+          targetBranch: 'main',
+          remote: 'origin',
+          deliveredCommit: 'c0ffee123456',
+        },
+        tasks: [{ id: 'TASK-001', name: '작업 1', prompt: '수행' }],
+        workers: [mockWorker(runId)],
+      });
+
+      assert.ok(graph.delivery);
+      assert.strictEqual(graph.delivery.status, 'delivered');
+
+      const mergeNode = graph.nodes.find((n) => n.type === 'merge');
+      assert.ok(mergeNode);
+      assert.strictEqual(mergeNode.owner, 'Orchestrator');
+      assert.strictEqual(mergeNode.status, 'delivered');
+      assert.ok(mergeNode.label.includes('자동 전달 완료'));
+      assert.ok(mergeNode.completedAt);
+      assert.ok(mergeNode.delivery);
+      assert.strictEqual(mergeNode.delivery.deliveredCommit, 'c0ffee123456');
+
+      // Tip check
+      const orchTip = graph.tips.find((t) => t.lane === 0);
+      assert.ok(orchTip);
+      assert.strictEqual(orchTip.status, 'delivered');
+    });
+
+    void test('derives in-flight delivery stage merge node without completedAt', () => {
+      const runId = 'run-deliv-dag-2';
+      const graph = buildProjectWorkGraph({
+        runId,
+        prompt: '푸시 진행 중 테스트',
+        status: 'push',
+        delivery: {
+          status: 'in_progress',
+          targetBranch: 'main',
+          currentStage: 'push',
+        },
+        tasks: [{ id: 'TASK-001', name: '작업 1', prompt: '수행' }],
+        workers: [mockWorker(runId)],
+      });
+
+      const mergeNode = graph.nodes.find((n) => n.type === 'merge');
+      assert.ok(mergeNode);
+      assert.strictEqual(mergeNode.owner, 'Orchestrator');
+      assert.strictEqual(mergeNode.status, 'push');
+      assert.ok(mergeNode.label.includes('자동 전달 진행 중'));
+      assert.strictEqual(mergeNode.completedAt, undefined);
+
+      const orchTip = graph.tips.find((t) => t.lane === 0);
+      assert.ok(orchTip);
+      assert.strictEqual(orchTip.status, 'push');
+    });
+
+    void test('derives delivery failure merge node with diagnostic instruction', () => {
+      const runId = 'run-deliv-dag-3';
+      const graph = buildProjectWorkGraph({
+        runId,
+        prompt: '전달 실패 테스트',
+        status: 'failed',
+        delivery: {
+          status: 'failed',
+          targetBranch: 'main',
+          failureCategory: 'conflict',
+          failureReason: 'Merge conflict in package.json',
+          actionGuidance: '충돌을 수동으로 병합하세요.',
+          diagnosticArtifact: '.agent/runs/run-3/delivery.json',
+        },
+        tasks: [{ id: 'TASK-001', name: '작업 1', prompt: '수행' }],
+        workers: [mockWorker(runId)],
+      });
+
+      const mergeNode = graph.nodes.find((n) => n.type === 'merge');
+      assert.ok(mergeNode);
+      assert.strictEqual(mergeNode.status, 'failed');
+      assert.ok(mergeNode.label.includes('자동 전달 실패'));
+      assert.ok(mergeNode.instruction?.includes('충돌을 수동으로 병합하세요.'));
+      assert.strictEqual(mergeNode.delivery?.diagnosticArtifact, '.agent/runs/run-3/delivery.json');
+
+      const orchTip = graph.tips.find((t) => t.lane === 0);
+      assert.ok(orchTip);
+      assert.strictEqual(orchTip.status, 'failed');
+    });
+
+    void test('preserves legacy awaiting_review merge node when delivery is omitted', () => {
+      const runId = 'run-legacy-dag';
+      const graph = buildProjectWorkGraph({
+        runId,
+        prompt: '레거시 검토 대기',
+        status: 'awaiting_review',
+        tasks: [{ id: 'TASK-001', name: '작업 1', prompt: '수행' }],
+        workers: [mockWorker(runId)],
+      });
+
+      const mergeNode = graph.nodes.find((n) => n.type === 'merge');
+      assert.ok(mergeNode);
+      assert.strictEqual(mergeNode.status, 'awaiting_review');
+      assert.strictEqual(mergeNode.label, '통합 검토 대기 (main 병합 승인 필요)');
+      assert.strictEqual(mergeNode.delivery, undefined);
+    });
+  });
 });

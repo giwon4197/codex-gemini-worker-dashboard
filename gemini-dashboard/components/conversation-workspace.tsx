@@ -29,7 +29,10 @@ import type {
   ConversationSession,
   ConversationApproval,
 } from '../lib/workspace-contract';
-import { RUN_STATUS_META } from '../lib/workspace-contract';
+import {
+  getRunStatusMeta,
+  getDeliveryFailureDisplayName,
+} from '../lib/workspace-contract';
 
 export interface ConversationWorkspaceProps {
   session?: ConversationSession | null;
@@ -167,7 +170,7 @@ export function ConversationWorkspace({
     }
   };
 
-  const activeStatusMeta = currentRun ? RUN_STATUS_META[currentRun.status] : null;
+  const activeStatusMeta = currentRun ? getRunStatusMeta(currentRun.status) : null;
   const messages = session?.messages || [];
   const currentError = sendError || approvalError || localError;
 
@@ -633,6 +636,45 @@ export function ConversationWorkspace({
                   </div>
                 )}
 
+                {/* Automatic Delivery In Progress Banner */}
+                {currentRun.delivery && (currentRun.delivery.status === 'in_progress' || currentRun.delivery.status === 'delivering') && (
+                  <section
+                    aria-label="자동 전달 진행 상태"
+                    className="rounded-lg border border-cyan-500/60 bg-cyan-500/10 p-3 text-cyan-200 text-xs space-y-1.5"
+                  >
+                    <div className="flex items-center gap-1.5 font-semibold text-cyan-300">
+                      <Loader2 className="h-4 w-4 text-cyan-400 shrink-0 animate-spin" aria-hidden="true" />
+                      <span>자동 전달 진행 중 ({currentRun.delivery.currentStage || currentRun.status})</span>
+                    </div>
+                    <p className="text-[11px] leading-relaxed text-cyan-100/90">
+                      {currentRun.delivery.targetBranch
+                        ? `${currentRun.delivery.targetBranch} 브랜치로 자동 반영(통합 및 푸시) 단계가 진행 중입니다.`
+                        : '자동 반영 단계가 진행 중입니다.'}
+                    </p>
+                  </section>
+                )}
+
+                {/* Automatic Delivery Completed Banner */}
+                {currentRun.delivery && currentRun.delivery.status === 'delivered' && (
+                  <section
+                    aria-label="자동 전달 완료 상태"
+                    className="rounded-lg border border-emerald-500/60 bg-emerald-500/10 p-3 text-emerald-200 text-xs space-y-1.5"
+                  >
+                    <div className="flex items-center gap-1.5 font-semibold text-emerald-300">
+                      <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0" aria-hidden="true" />
+                      <span>자동 전달 완료</span>
+                    </div>
+                    <p className="text-[11px] leading-relaxed text-emerald-100/90">
+                      대상 브랜치({currentRun.delivery.targetBranch || 'main'})로 변경 사항 반영 및 푸시가 완료되었습니다.
+                    </p>
+                    {currentRun.delivery.deliveredCommit && (
+                      <div className="font-mono text-[10px] text-emerald-300 bg-emerald-950/40 p-1.5 rounded border border-emerald-500/30">
+                        전달 커밋: {currentRun.delivery.deliveredCommit}
+                      </div>
+                    )}
+                  </section>
+                )}
+
                 {/* User Action Required Alert */}
                 {currentRun.requiresUserAction && (
                   <div
@@ -641,11 +683,24 @@ export function ConversationWorkspace({
                   >
                     <div className="flex items-center gap-1.5 font-semibold text-amber-300">
                       <AlertTriangle className="h-4 w-4 text-amber-400 shrink-0" aria-hidden="true" />
-                      <span>{currentRun.status === 'awaiting_review' ? '통합 검토 및 승인 필요' : '사용자 조치 필요'}</span>
+                      <span>
+                        {currentRun.status === 'awaiting_review'
+                          ? '통합 검토 및 승인 필요'
+                          : currentRun.delivery?.status === 'failed'
+                          ? `자동 전달 실패 (${getDeliveryFailureDisplayName(currentRun.delivery.failureCategory)})`
+                          : '사용자 조치 필요'}
+                      </span>
                     </div>
                     <p className="text-[11px] leading-relaxed text-amber-100/90">
-                      {currentRun.userActionReason || '오케스트레이터가 작업을 완료했습니다.'}
+                      {currentRun.userActionReason ||
+                        currentRun.delivery?.actionGuidance ||
+                        '오케스트레이터가 작업을 완료했습니다.'}
                     </p>
+                    {currentRun.delivery?.diagnosticArtifact && (
+                      <div className="font-mono text-[10px] text-amber-300 bg-amber-950/40 p-1.5 rounded border border-amber-500/30">
+                        진단 아티팩트: {currentRun.delivery.diagnosticArtifact}
+                      </div>
+                    )}
                     {currentRun.status === 'awaiting_review' && (
                       <div className="font-mono text-[10px] text-amber-300 bg-amber-950/40 p-1.5 rounded border border-amber-500/30">
                         브랜치: integration/{currentRun.runId}

@@ -7,11 +7,13 @@ import type {
   LiveWorkerVerificationCommand,
   LiveWorkerRetryRecord,
   LiveWorkerEscalation,
+  DeliveryInfo,
 } from './workspace-contract.ts';
 import {
   normalizeRunStatus,
   normalizeWorkerStatus,
   isWorkerActive,
+  getDeliveryFailureDisplayName,
 // @ts-expect-error TS5097 allowed for test runner
 } from './workspace-contract.ts';
 // @ts-expect-error TS5097 allowed for test runner
@@ -84,6 +86,7 @@ export interface ProjectGraphNode {
   retriedByRunId?: string;
   retryCount?: number;
   retryable?: boolean;
+  delivery?: DeliveryInfo;
 }
 export interface ProjectGraphEdge {
   from: string;
@@ -105,6 +108,7 @@ export interface ProjectWorkGraphData {
   retryOf?: string;
   retriedByRunId?: string;
   retryCount?: number;
+  delivery?: DeliveryInfo;
 }
 
 export interface RawWorkerEventRecord {
@@ -353,6 +357,7 @@ export interface BuildProjectGraphOptions {
   retriedByRunId?: string;
   retryCount?: number;
   retryable?: boolean;
+  delivery?: DeliveryInfo | null;
 }
 
 /**
@@ -383,7 +388,7 @@ export function buildProjectWorkGraph(
     repoRoot,
   } = options;
 
-  const normalizedRunStatus = normalizeRunStatus(options.status);
+  const normalizedRunStatus = normalizeRunStatus<RunStatus>(options.status);
   const nodes: ProjectGraphNode[] = [];
   const edges: ProjectGraphEdge[] = [];
   let depthCounter = 0;
@@ -632,11 +637,32 @@ export function buildProjectWorkGraph(
     workerTips.set(taskId, tipCandidate);
   });
 
-  // 4. Integration Review Merge Node (Lane 0, Owner: Orchestrator)
+  // 4. Integration Review / Delivery Merge Node (Lane 0, Owner: Orchestrator)
+  const delivery = options.delivery;
+  const isDelivered = normalizedRunStatus === 'delivered' || delivery?.status === 'delivered';
+  const isDeliveryActive = !isDelivered && (
+    delivery?.status === 'delivering' ||
+    normalizedRunStatus === 'delivering' ||
+    normalizedRunStatus === 'review_validation' ||
+    normalizedRunStatus === 'divergence_check' ||
+    normalizedRunStatus === 'conflict_check' ||
+    normalizedRunStatus === 'candidate_verification' ||
+    normalizedRunStatus === 'main_integration' ||
+    normalizedRunStatus === 'post_integration_verification' ||
+    normalizedRunStatus === 'push'
+  );
+  const isDeliveryFailed = !isDelivered && !isDeliveryActive && (
+    delivery?.status === 'failed' ||
+    (delivery?.failureCategory !== undefined && delivery?.failureCategory !== null)
+  );
+
   const hasIntegrationEvidence = Boolean(
     integration ||
     normalizedRunStatus === 'awaiting_review' ||
     normalizedRunStatus === 'completed' ||
+    isDelivered ||
+    isDeliveryActive ||
+    isDeliveryFailed ||
     options.integrationBranch
   );
 
@@ -646,17 +672,60 @@ export function buildProjectWorkGraph(
     const tipNodes = Array.from(workerTips.values());
     const parentIds = tipNodes.map(t => t.id);
 
+    const stageKey = delivery?.stage || (isDeliveryActive ? normalizedRunStatus : undefined);
+    const stageKoreanName =
+      stageKey === 'review_validation' ? '사전 검토 및 유효성 검증' :
+      stageKey === 'divergence_check' ? '원격 브랜치 분기 검사' :
+      stageKey === 'conflict_check' ? '충돌 점검' :
+      stageKey === 'candidate_verification' ? '후보 커밋 검증' :
+      stageKey === 'main_integration' ? 'main 브랜치 통합' :
+      stageKey === 'post_integration_verification' ? '통합 후 검증' :
+      stageKey === 'push' ? '원격 푸시' : '파이프라인 수행';
+
     const mergeLabel =
-      normalizedRunStatus === 'awaiting_review'
-        ? '통합 검토 대기 (main 병합 승인 필요)'
-        : normalizedRunStatus === 'completed'
-          ? '통합 검증 및 병합 완료'
-          : normalizedRunStatus === 'failed'
-            ? '통합 검토 실패'
-            : '통합 검토';
+      isDelivered
+        ? '자동 전달 완료 (main 반영 및 푸시 완료)'
+        : isDeliveryActive
+          ? (delivery?.stageName ? `자동 전달 진행 중 (${delivery.stageName})` : `자동 전달 진행 중 (${stageKoreanName})`)
+          : isDeliveryFailed
+            ? (delivery?.failureCategory ? `자동 전달 실패 (${getDeliveryFailureDisplayName(delivery.failureCategory)})` : '자동 전달 실패')
+            : normalizedRunStatus === 'awaiting_review'
+              ? '통합 검토 대기 (main 병합 승인 필요)'
+              : normalizedRunStatus === 'completed'
+                ? '통합 검증 및 병합 완료'
+                : normalizedRunStatus === 'failed'
+                  ? '통합 검토 실패'
+                  : '통합 검토';
 
     const integrationBranch =
       integration?.branch || options.integrationBranch || `integration/${runId}`;
+
+    const mergeDetailTitle =
+      isDelivered
+        ? (delivery?.deliveredCommit ? `자동 전달 완료: ${delivery.targetBranch || 'main'} (${delivery.remote || 'origin'}) - ${delivery.deliveredCommit.slice(0, 10)}` : `자동 전달 완료: ${delivery?.targetBranch || 'main'}`)
+        : isDeliveryActive
+          ? (delivery?.targetBranch ? `자동 전달 진행 중: 대상 ${delivery.targetBranch} (${delivery.remote || 'origin'})` : '자동 전달 파이프라인 수행 중')
+          : isDeliveryFailed
+            ? (delivery?.failureReason || '자동 전달 실패')
+            : `통합 브랜치: ${integrationBranch}`;
+
+    const mergeInstruction =
+      isDelivered
+        ? `모든 워커의 변경 사항이 검증되어 ${delivery?.targetBranch || 'main'} 브랜치에 안전하게 반영 및 푸시되었습니다.`
+        : isDeliveryActive
+          ? '제어 평면에서 자동 전달 단계를 수행하고 있습니다.'
+          : isDeliveryFailed
+            ? (delivery?.actionGuidance || delivery?.guidance || '자동 전달 중 실패가 발생했습니다. 진단 내역을 확인하세요.')
+            : '모든 Gemini 워커 브랜치를 통합 브랜치로 체리픽하고 통합 검증을 수행했습니다.';
+
+    const mergeStatus: RunStatus =
+      isDelivered
+        ? 'delivered'
+        : isDeliveryActive
+          ? ((stageKey as RunStatus) || 'delivering')
+          : isDeliveryFailed
+            ? 'failed'
+            : normalizedRunStatus;
 
     mergeNode = {
       id: mergeNodeId,
@@ -667,19 +736,25 @@ export function buildProjectWorkGraph(
       type: 'merge',
       owner: 'Orchestrator',
       label: mergeLabel,
-      detailTitle: `통합 브랜치: ${integrationBranch}`,
-      instruction: '모든 Gemini 워커 브랜치를 통합 브랜치로 체리픽하고 통합 검증을 수행했습니다.',
-      status: normalizedRunStatus,
-      startedAt: integration?.startedAt || updatedAt,
+      detailTitle: mergeDetailTitle,
+      instruction: mergeInstruction,
+      status: mergeStatus,
+      startedAt: delivery?.deliveredAt || integration?.startedAt || updatedAt,
       completedAt:
-        normalizedRunStatus === 'completed' || normalizedRunStatus === 'awaiting_review'
-          ? updatedAt
-          : undefined,
+        isDelivered
+          ? (delivery?.deliveredAt || updatedAt)
+          : isDeliveryActive
+            ? undefined
+            : (normalizedRunStatus === 'completed' || normalizedRunStatus === 'awaiting_review' || isDeliveryFailed)
+              ? updatedAt
+              : undefined,
       elapsedSeconds: Math.max(...tipNodes.map(t => t.elapsedSeconds || 0), 0),
       files: integration?.changedFiles?.map(f => sanitizePath(f, repoRoot)),
-      verificationCommands: integration?.tests,
+      verificationCommands: delivery?.verificationCommands || integration?.tests,
       verificationDecision: integration?.decision as string | undefined,
-      metadata: integration || undefined,
+      metadata: (delivery || integration) ? { ...integration, delivery } : undefined,
+      delivery: delivery || undefined,
+      error: isDeliveryFailed ? (delivery?.failureReason || undefined) : undefined,
     };
 
     nodes.push(mergeNode);
@@ -732,6 +807,7 @@ export function buildProjectWorkGraph(
     retryOf: options.retryOf,
     retriedByRunId: options.retriedByRunId,
     retryCount: options.retryCount,
+    delivery: delivery || undefined,
   };
 }
 
