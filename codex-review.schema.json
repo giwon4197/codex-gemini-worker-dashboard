@@ -2,10 +2,11 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
-  "required": ["verdict", "summary", "findings"],
+  "required": ["verdict", "summary", "findings", "candidateCommit"],
   "properties": {
     "verdict": { "type": "string", "enum": ["PASS", "REQUEST_FIX"] },
     "summary": { "type": "string" },
+    "candidateCommit": { "type": "string" },
     "findings": {
       "type": "array",
       "items": {

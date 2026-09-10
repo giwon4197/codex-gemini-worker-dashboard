@@ -19,6 +19,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $orchestratorRoot = $PSScriptRoot
 $workerScript = Join-Path $orchestratorRoot 'run-gemini-worker.ps1'
+. (Join-Path $orchestratorRoot 'bounded-process-runner.ps1')
 
 function Resolve-SharedDashboardPaths {
   param(
@@ -665,32 +666,8 @@ function Test-AllowedPath([string]$Path, $AllowedPatterns) {
   return $false
 }
 
-function Invoke-Verification([string]$Worktree, $Commands) {
-  $results = @()
-  Push-Location $Worktree
-  try {
-    foreach ($commandValue in @($Commands)) {
-      $command = [string]$commandValue
-      $started = Get-Date
-      $output = if ($IsWindows -or ($env:OS -like '*Windows*')) {
-        @(& cmd.exe /d /s /c $command 2>&1 | ForEach-Object { $_.ToString() })
-      } else {
-        @(& /bin/sh -c $command 2>&1 | ForEach-Object { $_.ToString() })
-      }
-      $exitCode = $LASTEXITCODE
-      $joined = $output -join "`n"
-      $results += [pscustomobject]@{
-        command = $command
-        exitCode = $exitCode
-        durationSeconds = [math]::Round(((Get-Date) - $started).TotalSeconds, 2)
-        output = $joined.Substring(0, [math]::Min(12000, $joined.Length))
-        status = if ($exitCode -eq 0) { 'PASS' } else { 'FAIL' }
-      }
-    }
-  } finally {
-    Pop-Location
-  }
-  return $results
+function Invoke-Verification([string]$Worktree, $Commands, [int]$DefaultTimeoutSeconds = 120) {
+  return @(Invoke-BoundedVerification -Worktree $Worktree -Commands $Commands -DefaultTimeoutSeconds $DefaultTimeoutSeconds)
 }
 
 function Get-FailureClassification([string]$Text) {
@@ -706,9 +683,9 @@ function Get-FailureClassification([string]$Text) {
 }
 
 function Get-FailureFingerprint($Tests, [string]$Classification) {
-  $basis = @($Tests | Where-Object status -eq 'FAIL' | ForEach-Object {
+  $basis = @($Tests | Where-Object { $_.status -in @('FAIL', 'TIMED_OUT') } | ForEach-Object {
     $normalized = ([string]$_.output).ToLowerInvariant() -replace '\d+', '#' -replace '\s+', ' '
-    "$($_.command)|$($_.exitCode)|$normalized"
+    "$($_.command)|$($_.exitCode)|$($_.status)|$normalized"
   }) -join "`n"
   if (-not $basis) { $basis = $Classification }
   $bytes = [Text.Encoding]::UTF8.GetBytes($basis)
@@ -721,10 +698,10 @@ function Get-FailureFingerprint($Tests, [string]$Classification) {
 }
 
 function Get-CompressedFailureLog($Tests) {
-  $parts = @($Tests | Where-Object status -eq 'FAIL' | ForEach-Object {
+  $parts = @($Tests | Where-Object { $_.status -in @('FAIL', 'TIMED_OUT') } | ForEach-Object {
     $output = [string]$_.output
     if ($output.Length -gt 2500) { $output = $output.Substring($output.Length - 2500) }
-    "COMMAND: $($_.command)`nEXIT_CODE: $($_.exitCode)`nOUTPUT:`n$output"
+    "COMMAND: $($_.command)`nSTATUS: $($_.status)`nEXIT_CODE: $($_.exitCode)`nOUTPUT:`n$output"
   })
   $text = $parts -join "`n---`n"
   if ($text.Length -gt 5000) { $text = $text.Substring($text.Length - 5000) }
