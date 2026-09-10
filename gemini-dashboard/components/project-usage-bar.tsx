@@ -4,6 +4,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Gauge, RefreshCw, AlertCircle, Clock, Calendar } from 'lucide-react';
 import type { CodexUsageResponse, CodexRateLimitsSnapshot } from '../lib/codex-usage';
 import type { GeminiQuotaResponse, GeminiQuotaSnapshot } from '../lib/gemini-quota';
+import { getSharedRunTracker, type RunTracker } from '../lib/run-tracking';
 
 const STORAGE_KEY_CODEX = 'gemini_dashboard_codex_usage_cache_v1';
 const STORAGE_KEY_GEMINI = 'gemini_dashboard_gemini_quota_cache_v1';
@@ -106,7 +107,11 @@ function saveGeminiCache(state: GeminiState): void {
   } catch {}
 }
 
-export function ProjectUsageBar() {
+export interface ProjectUsageBarProps {
+  tracker?: RunTracker;
+}
+
+export function ProjectUsageBar({ tracker }: ProjectUsageBarProps = {}) {
   const [codex, setCodex] = useState<CodexState>(() => {
     if (typeof window !== 'undefined') {
       try {
@@ -247,6 +252,20 @@ export function ProjectUsageBar() {
       }));
     }
   }, []);
+ 
+  const activeTracker = tracker || getSharedRunTracker();
+
+  useEffect(() => {
+    const unsubscribe = activeTracker.subscribe(event => {
+      if (event.bypassCache) {
+        void fetchCodex(true);
+        void fetchGemini(true);
+      }
+    });
+    return () => {
+      unsubscribe();
+    };
+  }, [activeTracker, fetchCodex, fetchGemini]);
 
   return (
     <section

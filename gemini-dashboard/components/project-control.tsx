@@ -9,7 +9,9 @@ import {
   ArrowLeft,
   History,
   GitBranch,
+  Sparkles,
 } from 'lucide-react';
+import type { RunTracker } from '../lib/run-tracking';
 import { WorkerTerminal } from './worker-terminal';
 import { ProjectWorkGraph } from './project-work-graph';
 import { ProjectEventDetail } from './project-event-detail';
@@ -29,7 +31,7 @@ import {
   getUserActionReason,
 } from '../lib/workspace-contract';
 
-interface ProjectControlProps {
+export interface ProjectControlProps {
   activeWorkers?: LiveWorkerData[];
   historyWorkers?: LiveWorkerData[];
   projectName?: string;
@@ -41,6 +43,10 @@ interface ProjectControlProps {
   onSelectNode?: (nodeId: string) => void;
   onRefresh?: () => void;
   isLoading?: boolean;
+  pendingNewRun?: CompactRunState | null;
+  onSwitchToNewRun?: () => void;
+  onDismissNewRun?: () => void;
+  tracker?: RunTracker;
 }
 
 export function ProjectControl({
@@ -55,6 +61,10 @@ export function ProjectControl({
   onSelectNode: propOnSelectNode,
   onRefresh,
   isLoading = false,
+  pendingNewRun = null,
+  onSwitchToNewRun,
+  onDismissNewRun,
+  tracker,
 }: ProjectControlProps) {
   const [internalSelectedNodeId, setInternalSelectedNodeId] = useState<string | undefined>(
     propSelectedNodeId
@@ -89,7 +99,43 @@ export function ProjectControl({
   return (
     <div className="flex h-full flex-col bg-background text-foreground">
       {/* Real-time Usage Bar at top of /projects */}
-      <ProjectUsageBar />
+      <ProjectUsageBar tracker={tracker} />
+
+      {/* Accessible New-Run Notification Banner (when historical run is retained) */}
+      {pendingNewRun && (
+        <output
+          aria-live="polite"
+          className="flex flex-wrap items-center justify-between gap-3 border-b border-cyan-500/40 bg-cyan-950/80 px-6 py-2.5 text-xs text-cyan-200 backdrop-blur-xs"
+        >
+          <div className="flex items-center gap-2">
+            <Sparkles className="h-4 w-4 text-cyan-400 shrink-0" aria-hidden="true" />
+            <span>
+              새로운 작업 Run(ID: <strong className="font-mono text-white">{pendingNewRun.runId}</strong>)이 감지되었습니다.
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            {onSwitchToNewRun && (
+              <button
+                type="button"
+                onClick={onSwitchToNewRun}
+                className="rounded-md bg-cyan-500 px-3 py-1 text-xs font-semibold text-slate-950 hover:bg-cyan-400 focus:outline-hidden focus:ring-1 focus:ring-cyan-400 transition-colors"
+              >
+                새 Run으로 전환
+              </button>
+            )}
+            {onDismissNewRun && (
+              <button
+                type="button"
+                onClick={onDismissNewRun}
+                className="text-slate-400 hover:text-white text-xs px-1.5 py-0.5"
+                aria-label="알림 닫기"
+              >
+                닫기
+              </button>
+            )}
+          </div>
+        </output>
+      )}
 
       {/* Control Header */}
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/80 bg-card/40 px-6 py-4 backdrop-blur-xs">

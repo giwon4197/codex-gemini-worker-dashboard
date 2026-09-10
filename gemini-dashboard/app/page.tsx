@@ -1,8 +1,9 @@
 'use client';
 
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { WorkspaceShell } from '../components/workspace-shell';
 import { ConversationWorkspace } from '../components/conversation-workspace';
+import { getSharedRunTracker, RunLifecycleCoordinator } from '../lib/run-tracking';
 import type {
   RunDetail,
   CompactRunState,
@@ -130,6 +131,10 @@ export default function Home() {
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [currentRun, setCurrentRun] = useState<RunDetail | null>(null);
   const [activeWorkersCount, setActiveWorkersCount] = useState<number>(0);
+  const [pendingNewRun, setPendingNewRun] = useState<CompactRunState | null>(null);
+
+  const trackerRef = useRef(getSharedRunTracker());
+  const lifecycleRef = useRef(new RunLifecycleCoordinator());
 
   // Conversation session state
   const [session, setSession] = useState<ConversationSession | null>(null);
@@ -146,7 +151,8 @@ export default function Home() {
       if (!res.ok) return;
       const data = (await res.json()) as { ok: boolean; runs?: CompactRunState[] };
       if (data.ok && Array.isArray(data.runs)) {
-        setRuns(data.runs);
+        trackerRef.current.processSnapshot(data.runs);
+        setRuns(trackerRef.current.getAllRuns());
       }
     } catch {
       // Ignore background poll errors
@@ -197,16 +203,24 @@ export default function Home() {
     }
   }, []);
 
-  // Fetch selected run details
+  // Fetch selected run details with race prevention
   const fetchRunDetail = useCallback(async (runId: string) => {
+    const handle = lifecycleRef.current.startLifecycle(runId);
     try {
-      const res = await fetch(`/api/runs/${runId}?t=${Date.now()}`);
+      const res = await fetch(`/api/runs/${encodeURIComponent(runId)}?t=${Date.now()}`, {
+        signal: handle.signal,
+      });
       if (!res.ok) return;
       const data = (await res.json()) as { ok: boolean; run?: RunDetail };
+      // Race prevention: drop slower responses for an old run
+      if (!handle.isValid()) return;
       if (data.ok && data.run) {
         setCurrentRun(data.run);
       }
-    } catch {
+    } catch (err: unknown) {
+      if (err instanceof Error && err.name === 'AbortError') {
+        return;
+      }
       // Ignore background poll errors
     }
   }, []);
@@ -294,7 +308,9 @@ export default function Home() {
       await fetchActiveWorkersCount();
 
       if (data.runId) {
+        trackerRef.current.selectRun(data.runId, 'latest');
         setSelectedRunId(data.runId);
+        setPendingNewRun(null);
         await fetchRunDetail(data.runId);
       }
     } catch {
@@ -324,6 +340,29 @@ export default function Home() {
     }
   };
 
+  const handleSelectRun = (runId: string) => {
+    const tracker = trackerRef.current;
+    const latest = tracker.getLatestRun();
+    const isLatest = !latest || latest.runId === runId;
+    tracker.selectRun(runId, isLatest ? 'latest' : 'historical');
+    setSelectedRunId(runId);
+    setPendingNewRun(null);
+    void fetchRunDetail(runId);
+  };
+
+  const handleSwitchToNewRun = () => {
+    const tracker = trackerRef.current;
+    const target = tracker.switchToLatestRun();
+    if (target) {
+      handleSelectRun(target.runId);
+    }
+  };
+
+  const handleDismissNewRun = () => {
+    trackerRef.current.dismissPendingNewRun();
+    setPendingNewRun(null);
+  };
+
   // Initial load and periodic polling
   useEffect(() => {
     let isCancelled = false;
@@ -340,7 +379,8 @@ export default function Home() {
         if (runsRes.ok) {
           const runsData = (await runsRes.json()) as { ok: boolean; runs?: CompactRunState[] };
           if (runsData.ok && Array.isArray(runsData.runs) && !isCancelled) {
-            setRuns(runsData.runs);
+            trackerRef.current.processSnapshot(runsData.runs);
+            setRuns(trackerRef.current.getAllRuns());
           }
         }
 
@@ -388,20 +428,51 @@ export default function Home() {
     };
   }, []);
 
-  // When selected run changes or periodically update active run
+  // Run invalidation coordinator subscription
+  useEffect(() => {
+    const tracker = trackerRef.current;
+    const unsubscribe = tracker.subscribe(event => {
+      if (event.autoSwitched) {
+        const newRunId = event.newRun.runId;
+        setSelectedRunId(newRunId);
+        setPendingNewRun(null);
+        void fetchRunDetail(newRunId);
+        void fetchActiveWorkersCount();
+        void fetchRuns();
+      } else {
+        setPendingNewRun(event.newRun);
+      }
+    });
+
+    const lifecycle = lifecycleRef.current;
+    return () => {
+      unsubscribe();
+      lifecycle.dispose();
+    };
+  }, [fetchRunDetail, fetchActiveWorkersCount, fetchRuns]);
+
+  // When selected run changes or periodically update active run with race prevention
   useEffect(() => {
     if (!selectedRunId) return;
     let isCancelled = false;
+    const runId = selectedRunId;
+    const lifecycle = lifecycleRef.current;
 
     const pollCurrentRun = async () => {
+      const handle = lifecycle.startLifecycle(runId);
       try {
-        const res = await fetch(`/api/runs/${selectedRunId}?t=${Date.now()}`);
-        if (!res.ok || isCancelled) return;
+        const res = await fetch(`/api/runs/${encodeURIComponent(runId)}?t=${Date.now()}`, {
+          signal: handle.signal,
+        });
+        if (!res.ok || isCancelled || !handle.isValid()) return;
         const data = (await res.json()) as { ok: boolean; run?: RunDetail };
-        if (data.ok && data.run && !isCancelled) {
+        if (data.ok && data.run && !isCancelled && handle.isValid()) {
           setCurrentRun(data.run);
         }
-      } catch {
+      } catch (err: unknown) {
+        if (err instanceof Error && err.name === 'AbortError') {
+          return;
+        }
         // Ignore background poll errors
       }
     };
@@ -414,6 +485,7 @@ export default function Home() {
     return () => {
       isCancelled = true;
       clearInterval(runInterval);
+      lifecycle.dispose();
     };
   }, [selectedRunId]);
 
@@ -449,10 +521,10 @@ export default function Home() {
         isApproving={isApproving}
         sendError={sendError}
         approvalError={approvalError}
-        onSelectRun={runId => {
-          setSelectedRunId(runId);
-          void fetchRunDetail(runId);
-        }}
+        onSelectRun={handleSelectRun}
+        pendingNewRun={pendingNewRun}
+        onSwitchToNewRun={handleSwitchToNewRun}
+        onDismissNewRun={handleDismissNewRun}
         onRefresh={handleRefresh}
       />
     </WorkspaceShell>
