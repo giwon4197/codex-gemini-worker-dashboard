@@ -143,9 +143,12 @@ Start-Sleep -Seconds 120
   Assert-Test "Second command timed out" ($verifResults[1].status -eq 'TIMED_OUT' -and $verifResults[1].timedOut -eq $true)
   Assert-Test "Third command failed" ($verifResults[2].status -eq 'FAIL' -and $verifResults[2].exitCode -eq 1)
 
-  # 9. TypeScript Compilation: npm --prefix ./gemini-dashboard exec -- tsc --noEmit performs actual compilation
-  Write-Host "`n9. TypeScript Compilation: npm --prefix ./gemini-dashboard exec -- tsc --noEmit performs actual compilation" -ForegroundColor Yellow
-  $res9 = Invoke-BoundedCommand -Command 'npm --prefix ./gemini-dashboard exec -- tsc --noEmit' -WorkingDirectory $repoRoot
+  # 9. TypeScript Compilation: worktree-local TypeScript binary performs actual compilation
+  Write-Host "`n9. TypeScript Compilation: worktree-local TypeScript binary performs actual compilation" -ForegroundColor Yellow
+  $isWin = $IsWindows -or ($env:OS -like '*Windows*')
+  $localTscBin = if ($isWin) { '.\gemini-dashboard\node_modules\.bin\tsc.cmd' } else { './gemini-dashboard/node_modules/.bin/tsc' }
+  $tscCmd = "$localTscBin --noEmit -p gemini-dashboard/tsconfig.json"
+  $res9 = Invoke-BoundedCommand -Command $tscCmd -WorkingDirectory $repoRoot
   Assert-Test "Dashboard tsc executes with status PASS" ($res9.status -eq 'PASS') "Got $($res9.status), output: $($res9.output)"
   Assert-Test "Dashboard tsc exitCode is 0" ($res9.exitCode -eq 0)
   Assert-Test "Dashboard tsc did not time out" ($res9.timedOut -eq $false)
@@ -158,6 +161,12 @@ Start-Sleep -Seconds 120
   Assert-Test "Mock help command exited 0" ($res10.exitCode -eq 0)
   $mockIsHelp = ($res10.output -match '(?i)Syntax:\s+tsc|Examples:\s+tsc|tsc\s+\[options\]|--help|Common Commands')
   Assert-Test "TypeScript help-only text is recognized and rejected from being considered a valid compile" $mockIsHelp
+
+  # 11. Verification Rejection: tsc command with help-only output is rejected with FAIL status
+  Write-Host "`n11. Verification Rejection: tsc command with help-only output is rejected as FAIL" -ForegroundColor Yellow
+  $res11 = @(Invoke-BoundedVerification -Worktree $repoRoot -Commands @('tsc --help'))[0]
+  Assert-Test "Verification marks tsc help output as status FAIL" ($res11.status -eq 'FAIL') "Got $($res11.status)"
+  Assert-Test "Verification marks exitCode as non-zero on help rejection" ($res11.exitCode -ne 0) "Got $($res11.exitCode)"
 
   Write-Host "`n======================================================" -ForegroundColor Cyan
   Write-Host "   테스트 완료: $passCount 통과 / $failCount 실패" -ForegroundColor $(if ($failCount -eq 0) { 'Green' } else { 'Red' })

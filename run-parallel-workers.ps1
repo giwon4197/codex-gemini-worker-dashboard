@@ -20,6 +20,7 @@ $ErrorActionPreference = 'Stop'
 $orchestratorRoot = $PSScriptRoot
 $workerScript = Join-Path $orchestratorRoot 'run-gemini-worker.ps1'
 . (Join-Path $orchestratorRoot 'bounded-process-runner.ps1')
+. (Join-Path $orchestratorRoot 'dashboard-dependency-bootstrap.ps1')
 
 function Resolve-SharedDashboardPaths {
   param(
@@ -630,6 +631,14 @@ function Start-WorkerProcess($Task, $Worktree, [string]$Tier, [string]$RunId, [s
     '-DashboardPath', $dashboardPath,
     '-DataDir', $publicData
   )) { $null = $info.ArgumentList.Add($argument) }
+  if ($Task.PSObject.Properties.Name -contains 'mock_output_json' -and $Task.mock_output_json) {
+    $null = $info.ArgumentList.Add('-MockOutputJson')
+    $null = $info.ArgumentList.Add([string]$Task.mock_output_json)
+  }
+  if ($Task.PSObject.Properties.Name -contains 'mock_exit_code' -and $null -ne $Task.mock_exit_code) {
+    $null = $info.ArgumentList.Add('-MockExitCode')
+    $null = $info.ArgumentList.Add([string]$Task.mock_exit_code)
+  }
   $process = [Diagnostics.Process]::new()
   $process.StartInfo = $info
   $null = $process.Start()
@@ -795,10 +804,8 @@ try {
     $worktree = Join-Path $worktreeRoot $safeId
     & git -C $repoRoot worktree add -b $branch $worktree $baseCommit
     if ($LASTEXITCODE -ne 0) { throw "worktree 생성 실패: $($task.id)" }
-    $srcNm = Join-Path $repoRoot 'gemini-dashboard\node_modules'
-    $dstNm = Join-Path $worktree 'gemini-dashboard\node_modules'
-    if ((Test-Path -LiteralPath $srcNm) -and (Test-Path -LiteralPath (Join-Path $worktree 'gemini-dashboard')) -and (-not (Test-Path -LiteralPath $dstNm))) {
-      try { New-Item -ItemType Junction -Path $dstNm -Target $srcNm -Force -ErrorAction SilentlyContinue | Out-Null } catch {}
+    if (Test-Path -LiteralPath (Join-Path $worktree 'gemini-dashboard')) {
+      Ensure-DashboardDependencies -Worktree $worktree -SourceWorktree $repoRoot | Out-Null
     }
     $wtRecord = [pscustomobject]@{ id = $task.id; branch = $branch; path = $worktree; baseCommit = $baseCommit }
     $worktrees += $wtRecord
@@ -890,7 +897,19 @@ try {
       $wasTimedOut = $record -and $record.TimedOut
       $changed = @(Get-ChangedFiles $wt.path $baseCommit)
       $violations = @($changed | Where-Object { -not (Test-AllowedPath $_ @($task.allowed_files)) })
-      $tests = if (-not $wasCancelled -and -not $wasTimedOut -and $state.status -eq 'completed' -and $violations.Count -eq 0) { @(Invoke-Verification $wt.path @($task.test_commands)) } else { @() }
+      $bootstrapFailed = $false
+      $bootstrapError = $null
+      if (-not $wasCancelled -and -not $wasTimedOut -and $state.status -eq 'completed' -and $violations.Count -eq 0) {
+        if (Test-Path -LiteralPath (Join-Path $wt.path 'gemini-dashboard')) {
+          $bootWt = Ensure-DashboardDependencies -Worktree $wt.path -SourceWorktree $repoRoot
+          if (-not $bootWt.success) {
+            $bootstrapFailed = $true
+            $bootstrapError = $bootWt.error
+            if (-not $state.error) { $state.error = "ENVIRONMENT_ERROR: $bootstrapError" }
+          }
+        }
+      }
+      $tests = if (-not $wasCancelled -and -not $wasTimedOut -and -not $bootstrapFailed -and $state.status -eq 'completed' -and $violations.Count -eq 0) { @(Invoke-Verification $wt.path @($task.test_commands)) } else { @() }
       $branchEvtPath = Join-Path $runRoot "events\$safeId.ndjson"
       if ($tests -and $tests.Count -gt 0 -and (Test-Path -LiteralPath $branchEvtPath)) {
         $vSeq = 0
@@ -913,7 +932,7 @@ try {
       }
       $hasTestFailures = @($tests | Where-Object { $_.status -in @('FAIL', 'TIMED_OUT') -or ($null -ne $_.exitCode -and $_.exitCode -ne 0) -or $_.timedOut }).Count -gt 0
       $isWorkerFailed = ($state.status -ne 'completed')
-      $hasAnyFailure = $wasCancelled -or $wasTimedOut -or ($violations.Count -gt 0) -or $isWorkerFailed -or $hasTestFailures
+      $hasAnyFailure = $wasCancelled -or $wasTimedOut -or ($violations.Count -gt 0) -or $bootstrapFailed -or $isWorkerFailed -or $hasTestFailures
 
       $classification = $null
       if ($hasAnyFailure) {
@@ -932,6 +951,8 @@ try {
         'TIMED_OUT'
       } elseif ($violations.Count -gt 0) {
         'POLICY_VIOLATION'
+      } elseif ($bootstrapFailed) {
+        'ENVIRONMENT_ERROR'
       } elseif ($classification) {
         $classification
       } elseif ($isWorkerFailed) {
@@ -1052,49 +1073,59 @@ $compressed
       $integration = [pscustomobject]@{ branch=$integrationBranch; worktree=$integrationPath; decision='INTEGRATION_SETUP_FAILED'; approvalRequired=$true }
       $failed++
     } else {
-      $srcNm = Join-Path $repoRoot 'gemini-dashboard\node_modules'
-      $dstNm = Join-Path $integrationPath 'gemini-dashboard\node_modules'
-      if ((Test-Path -LiteralPath $srcNm) -and (Test-Path -LiteralPath (Join-Path $integrationPath 'gemini-dashboard')) -and (-not (Test-Path -LiteralPath $dstNm))) {
-        try { New-Item -ItemType Junction -Path $dstNm -Target $srcNm -Force -ErrorAction SilentlyContinue | Out-Null } catch {}
-      }
-      $cherryPicks = @()
-      $integrationDecision = 'AWAITING_CODEX_REVIEW'
-      foreach ($task in $tasks) {
-        $safeId = ([string]$task.id) -replace '[^A-Za-z0-9._-]', '-'
-        $result = Get-Content -Raw (Join-Path $runRoot "results\$safeId-result.json") | ConvertFrom-Json
-        foreach ($commitHash in @($result.commitHashes)) {
-          & git -C $integrationPath cherry-pick $commitHash
-          $pickStatus = if ($LASTEXITCODE -eq 0) { 'PASS' } else { 'CONFLICT' }
-          $cherryPicks += [pscustomobject]@{ taskId=$task.id; commit=$commitHash; status=$pickStatus }
-          if ($pickStatus -eq 'CONFLICT') {
-            & git -C $integrationPath cherry-pick --abort 2>$null
-            $integrationDecision = 'INTEGRATION_CONFLICT'
-            break
-          }
+      $bootInteg = Ensure-DashboardDependencies -Worktree $integrationPath -SourceWorktree $repoRoot
+      if (-not $bootInteg.success) {
+        $integrationDecision = 'ENVIRONMENT_ERROR'
+        $integration = [pscustomobject]@{
+          id="$runId-integration"; parentIds=@($tasks | ForEach-Object { "$([string]$_.id)-branch" }); startedAt=(Get-Date).ToString('o')
+          branch=$integrationBranch; worktree=$integrationPath; baseCommit=$baseCommit; headCommit=(& git -C $integrationPath rev-parse HEAD).Trim()
+          decision='ENVIRONMENT_ERROR'; approvalRequired=$true; mainModified=$false; cherryPicks=@()
+          tests=@(); changedFiles=@(); diffStat=''; commits=@()
+          reviewArtifact=(Join-Path $runRoot 'integration-review.md')
+          error=$bootInteg.error
         }
-        if ($integrationDecision -eq 'INTEGRATION_CONFLICT') { break }
+        Write-AtomicJson (Join-Path $runRoot 'integration.json') $integration
+        $failed++
+      } else {
+        $cherryPicks = @()
+        $integrationDecision = 'AWAITING_CODEX_REVIEW'
+        foreach ($task in $tasks) {
+          $safeId = ([string]$task.id) -replace '[^A-Za-z0-9._-]', '-'
+          $result = Get-Content -Raw (Join-Path $runRoot "results\$safeId-result.json") | ConvertFrom-Json
+          foreach ($commitHash in @($result.commitHashes)) {
+            & git -C $integrationPath cherry-pick $commitHash
+            $pickStatus = if ($LASTEXITCODE -eq 0) { 'PASS' } else { 'CONFLICT' }
+            $cherryPicks += [pscustomobject]@{ taskId=$task.id; commit=$commitHash; status=$pickStatus }
+            if ($pickStatus -eq 'CONFLICT') {
+              & git -C $integrationPath cherry-pick --abort 2>$null
+              $integrationDecision = 'INTEGRATION_CONFLICT'
+              break
+            }
+          }
+          if ($integrationDecision -eq 'INTEGRATION_CONFLICT') { break }
+        }
+        $integrationTests = if ($integrationDecision -eq 'AWAITING_CODEX_REVIEW') { @(Invoke-Verification $integrationPath $integrationTestCommands) } else { @() }
+        if (@($integrationTests | Where-Object { $_.status -in @('FAIL', 'TIMED_OUT') -or ($null -ne $_.exitCode -and $_.exitCode -ne 0) -or $_.timedOut }).Count -gt 0) { $integrationDecision = 'INTEGRATION_TEST_FAILED' }
+        $diffFiles = @(& git -C $integrationPath diff --name-only "$baseCommit...HEAD" | Where-Object { $_ })
+        $diffStat = @(& git -C $integrationPath diff --stat "$baseCommit...HEAD") -join "`n"
+        $integrationCommits = @(& git -C $integrationPath rev-list --reverse "$baseCommit..HEAD")
+        $integration = [pscustomobject]@{
+          id="$runId-integration"; parentIds=@($tasks | ForEach-Object { "$([string]$_.id)-branch" }); startedAt=(Get-Date).ToString('o')
+          branch=$integrationBranch; worktree=$integrationPath; baseCommit=$baseCommit; headCommit=(& git -C $integrationPath rev-parse HEAD).Trim()
+          decision=$integrationDecision; approvalRequired=$true; mainModified=$false; cherryPicks=$cherryPicks
+          tests=$integrationTests; changedFiles=$diffFiles; diffStat=$diffStat; commits=$integrationCommits
+          reviewArtifact=(Join-Path $runRoot 'integration-review.md')
+        }
+        Write-AtomicJson (Join-Path $runRoot 'integration.json') $integration
+        $reviewLines = @(
+          "# Integration Review: $runId", '', "- Decision: $integrationDecision", "- Base: $baseCommit",
+          "- Branch: $integrationBranch", "- Head: $($integration.headCommit)", '- Main modified: false', '- Approval required: true', '',
+          '## Changed files', ''
+        ) + @($diffFiles | ForEach-Object { "- $_" }) + @('', '## Diff stat', '', '```text', $diffStat, '```', '', '## Integration tests', '') +
+          @($integrationTests | ForEach-Object { "- [$($_.status)] ``$($_.command)`` (exit $($_.exitCode))" })
+        [IO.File]::WriteAllText($integration.reviewArtifact, ($reviewLines -join "`n"), [Text.Encoding]::UTF8)
+        if ($integrationDecision -ne 'AWAITING_CODEX_REVIEW') { $failed++ }
       }
-      $integrationTests = if ($integrationDecision -eq 'AWAITING_CODEX_REVIEW') { @(Invoke-Verification $integrationPath $integrationTestCommands) } else { @() }
-      if (@($integrationTests | Where-Object { $_.status -in @('FAIL', 'TIMED_OUT') -or ($null -ne $_.exitCode -and $_.exitCode -ne 0) -or $_.timedOut }).Count -gt 0) { $integrationDecision = 'INTEGRATION_TEST_FAILED' }
-      $diffFiles = @(& git -C $integrationPath diff --name-only "$baseCommit...HEAD" | Where-Object { $_ })
-      $diffStat = @(& git -C $integrationPath diff --stat "$baseCommit...HEAD") -join "`n"
-      $integrationCommits = @(& git -C $integrationPath rev-list --reverse "$baseCommit..HEAD")
-      $integration = [pscustomobject]@{
-        id="$runId-integration"; parentIds=@($tasks | ForEach-Object { "$([string]$_.id)-branch" }); startedAt=(Get-Date).ToString('o')
-        branch=$integrationBranch; worktree=$integrationPath; baseCommit=$baseCommit; headCommit=(& git -C $integrationPath rev-parse HEAD).Trim()
-        decision=$integrationDecision; approvalRequired=$true; mainModified=$false; cherryPicks=$cherryPicks
-        tests=$integrationTests; changedFiles=$diffFiles; diffStat=$diffStat; commits=$integrationCommits
-        reviewArtifact=(Join-Path $runRoot 'integration-review.md')
-      }
-      Write-AtomicJson (Join-Path $runRoot 'integration.json') $integration
-      $reviewLines = @(
-        "# Integration Review: $runId", '', "- Decision: $integrationDecision", "- Base: $baseCommit",
-        "- Branch: $integrationBranch", "- Head: $($integration.headCommit)", '- Main modified: false', '- Approval required: true', '',
-        '## Changed files', ''
-      ) + @($diffFiles | ForEach-Object { "- $_" }) + @('', '## Diff stat', '', '```text', $diffStat, '```', '', '## Integration tests', '') +
-        @($integrationTests | ForEach-Object { "- [$($_.status)] ``$($_.command)`` (exit $($_.exitCode))" })
-      [IO.File]::WriteAllText($integration.reviewArtifact, ($reviewLines -join "`n"), [Text.Encoding]::UTF8)
-      if ($integrationDecision -ne 'AWAITING_CODEX_REVIEW') { $failed++ }
     }
     Set-ObjectProperty $manifest 'integration' $integration
     Set-ObjectProperty $manifest 'integrationBranch' $integrationBranch
@@ -1102,6 +1133,26 @@ $compressed
 
   Sync-LiveWorkers $runRoot
   Update-DashboardUsage -RunRoot $runRoot -DashboardPath $dashboardPath
+  $hasEnvError = $false
+  if ($integration -and $integration.decision -eq 'ENVIRONMENT_ERROR') {
+    $hasEnvError = $true
+  }
+  foreach ($task in $tasks) {
+    $safeId = ([string]$task.id) -replace '[^A-Za-z0-9._-]', '-'
+    $rPath = Join-Path $runRoot "results\$safeId-result.json"
+    if (Test-Path -LiteralPath $rPath) {
+      try {
+        $r = Get-Content -Raw -LiteralPath $rPath | ConvertFrom-Json
+        if ($r.verification -and $r.verification.decision -eq 'ENVIRONMENT_ERROR') {
+          $hasEnvError = $true
+        }
+      } catch {}
+    }
+  }
+  if ($hasEnvError) {
+    Set-ObjectProperty $manifest 'errorCategory' 'environment_error'
+    Set-ObjectProperty $manifest 'error' 'ENVIRONMENT_ERROR: Dashboard dependencies absent or invalid and bootstrap failed'
+  }
   $manifest.status = if (Test-Path -LiteralPath $cancelPath) { 'cancelled' } elseif ($failed -gt 0) { 'failed' } elseif ($integration -and $integration.decision -eq 'AWAITING_CODEX_REVIEW') { 'awaiting_review' } else { 'completed' }
   $manifest.updatedAt = (Get-Date).ToString('o'); Write-AtomicJson $manifestPath $manifest
   Write-Output "Run: $runId"; Write-Output "State: $runRoot"; Write-Output "Status: $($manifest.status)"

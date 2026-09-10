@@ -10,6 +10,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'bounded-process-runner.ps1')
+. (Join-Path $PSScriptRoot 'dashboard-dependency-bootstrap.ps1')
 
 function Write-AtomicJson([string]$Path, $Data) {
   $parent = Split-Path -Parent $Path
@@ -332,9 +333,31 @@ if (Test-Path -LiteralPath $resultsDir) {
     } catch {}
   }
 }
+if ($manifest.integration -and $manifest.integration.decision -eq 'ENVIRONMENT_ERROR') {
+  Record-Diagnostic 'environment_error' "Integration setup failed due to ENVIRONMENT_ERROR: $($manifest.integration.error)"
+  exit 1
+}
+
 if ($failedTasks.Count -gt 0) {
-  Record-Diagnostic 'test_failed' "Worker test verification failed for task(s): $($failedTasks -join ', ')" @{
-    failedTasks = $failedTasks
+  $hasEnvError = $false
+  if (Test-Path -LiteralPath $resultsDir) {
+    foreach ($rFile in Get-ChildItem -LiteralPath $resultsDir -Filter '*.json') {
+      try {
+        $rObj = Get-Content -Raw -LiteralPath $rFile.FullName | ConvertFrom-Json
+        if ($rObj.verification -and $rObj.verification.decision -eq 'ENVIRONMENT_ERROR') {
+          $hasEnvError = $true
+        }
+      } catch {}
+    }
+  }
+  if ($hasEnvError) {
+    Record-Diagnostic 'environment_error' "Worker environment error for task(s): $($failedTasks -join ', ')" @{
+      failedTasks = $failedTasks
+    }
+  } else {
+    Record-Diagnostic 'test_failed' "Worker test verification failed for task(s): $($failedTasks -join ', ')" @{
+      failedTasks = $failedTasks
+    }
   }
   exit 1
 }
@@ -524,10 +547,15 @@ if (-not $alreadyCandidateVerified) {
     exit 1
   }
 
-  $srcNm = Join-Path $repoRoot 'gemini-dashboard\node_modules'
-  $dstNm = Join-Path $rehearsalWorktree 'gemini-dashboard\node_modules'
-  if ((Test-Path -LiteralPath $srcNm) -and (Test-Path -LiteralPath (Join-Path $rehearsalWorktree 'gemini-dashboard')) -and (-not (Test-Path -LiteralPath $dstNm))) {
-    try { New-Item -ItemType Junction -Path $dstNm -Target $srcNm -Force -ErrorAction SilentlyContinue | Out-Null } catch {}
+  $bootRehearsal = Ensure-DashboardDependencies -Worktree $rehearsalWorktree -SourceWorktree $repoRoot
+  if (-not $bootRehearsal.success) {
+    Record-Diagnostic 'environment_error' "Dashboard dependency bootstrap failed in rehearsal worktree: $($bootRehearsal.error)" @{
+      worktree = $rehearsalWorktree
+      timedOut = $bootRehearsal.timedOut
+      exitCode = $bootRehearsal.exitCode
+      output   = $bootRehearsal.output
+    }
+    exit 1
   }
 
   try {

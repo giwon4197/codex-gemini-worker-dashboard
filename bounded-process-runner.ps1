@@ -280,6 +280,15 @@ function Invoke-BoundedCommand {
       $joined = $joined.Substring(0, $MaxOutputChars)
     }
 
+    $isTscCmd = ($Command -match '(?i)(?:(?:^|;)\s*(?:(?:Set-Location|cd)\s+[^;]+;\s*)?(?:&|call)?\s*["'']?(?:[a-zA-Z0-9_\.\-\\/]*[\\/])?tsc(?:\.cmd|\.exe)?["'']?(?:\s|$)|npm\s+--prefix\s+.*exec.*tsc)')
+    $isHelpOrPlaceholder = ($joined -match '(?i)Syntax:\s+tsc|Examples:\s+tsc|tsc\s+\[options\]|Common Commands|This is not the tsc command|The TypeScript Compiler - Version|placeholder')
+    if ($isTscCmd -and $isHelpOrPlaceholder) {
+      $status = 'FAIL'
+      if ($null -eq $exitCode -or $exitCode -eq 0) {
+        $exitCode = 1
+      }
+    }
+
     return [pscustomobject]@{
       command         = Redact-Text $Command
       exitCode        = $exitCode
@@ -323,7 +332,21 @@ function Invoke-BoundedVerification {
 
     if ([string]::IsNullOrWhiteSpace($cmdStr)) { continue }
 
+    if ($cmdStr -match '(?i)npm\s+--prefix\s+\.?/?gemini-dashboard\s+exec\s+--?\s+tsc(?:\s+--)?\s+--noEmit') {
+      $isWin = $IsWindows -or ($env:OS -like '*Windows*')
+      $localTsc = if ($isWin) { '.\gemini-dashboard\node_modules\.bin\tsc.cmd' } else { './gemini-dashboard/node_modules/.bin/tsc' }
+      $cmdStr = "$localTsc --noEmit -p gemini-dashboard/tsconfig.json"
+    }
+
     $res = Invoke-BoundedCommand -Command $cmdStr -WorkingDirectory $Worktree -TimeoutSeconds $cmdTimeout
+    $isTsc = ($cmdStr -match '(?i)(?:(?:^|;)\s*(?:(?:Set-Location|cd)\s+[^;]+;\s*)?(?:&|call)?\s*["'']?(?:[a-zA-Z0-9_\.\-\\/]*[\\/])?tsc(?:\.cmd|\.exe)?["'']?(?:\s|$)|npm\s+--prefix\s+.*exec.*tsc)')
+    $isHelpOrPlaceholder = ($res.output -match '(?i)Syntax:\s+tsc|Examples:\s+tsc|tsc\s+\[options\]|Common Commands|This is not the tsc command|The TypeScript Compiler - Version|placeholder')
+    if ($isTsc -and $isHelpOrPlaceholder) {
+      $res.status = 'FAIL'
+      if ($null -eq $res.exitCode -or $res.exitCode -eq 0) {
+        $res.exitCode = 1
+      }
+    }
     $results += $res
   }
   return $results
