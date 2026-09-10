@@ -1,6 +1,6 @@
 # Codex × Gemini Worker v2 설계 및 구현 로드맵
 
-> 실제 구현 시도의 실패 원인과 재발 방지안은 [2026-09-09 실패 원인 분석](FAILURE_ANALYSIS_2026-09-09.md)을 참고한다. 파일 탐색과 수정·병합 권한을 분리하는 보완 정책은 [v2.1 Filesystem Policy & Dynamic Scope Expansion](V2_1_FILESYSTEM_POLICY.md)에 정의한다.
+> 실제 구현 시도의 실패 원인과 재발 방지안은 [2026-09-09 실패 원인 분석](FAILURE_ANALYSIS_2026-09-09.md)을 참고한다. 현재 구현된 v2 구조와 협업자의 v2.1 시작 순서는 [v2 완료 구조와 v2.1 인계 가이드](V2_COMPLETION_AND_V2_1_HANDOFF.md)에 정리되어 있다. 파일 탐색과 수정·병합 권한을 분리하는 보완 정책은 [v2.1 Filesystem Policy & Dynamic Scope Expansion](V2_1_FILESYSTEM_POLICY.md)에 정의한다.
 
 ## 1. 목표
 
