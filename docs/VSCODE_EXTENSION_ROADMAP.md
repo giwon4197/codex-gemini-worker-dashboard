@@ -84,6 +84,11 @@ Codex 검토
 
 ## 1단계: 현재 Web Workspace 안정화
 
+Web 오류의 수정 여부와 Extension 전환 시 제거할 항목은
+[`WEB_ISSUES_HANDOFF.md`](./WEB_ISSUES_HANDOFF.md)를 단일 인계 기준으로 사용한다.
+브라우저·SSR·`localhost` 수명주기 문제는 Web 안정화 범위에서만 처리하고,
+Run/Worker/Event 상태, 사용량 계산, 검증기, Scope Policy 문제는 공용 Core의 P0로 유지한다.
+
 Extension 작업 전 다음 기준선이 `main`에서 통과해야 한다.
 
 - 일반 대화와 실행 요청을 구분하고 일반 대화에는 워커를 만들지 않는다.
