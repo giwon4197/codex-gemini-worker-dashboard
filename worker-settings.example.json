@@ -1,5 +1,11 @@
 {
   "tier": "normal",
   "model": "gemini-3.8-flash-medium",
+  "autoDeliver": true,
+  "delivery": {
+    "enabled": true,
+    "targetBranch": "main",
+    "remote": "origin"
+  },
   "updatedAt": null
 }

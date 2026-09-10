@@ -2,7 +2,8 @@
 param(
   [Parameter(Mandatory = $true, Position = 0)][string]$Request,
   [string]$Repository = (Get-Location).Path,
-  [switch]$PlanOnly
+  [switch]$PlanOnly,
+  [Alias('Deliver')][switch]$AutoDeliver
 )
 
 $ErrorActionPreference = 'Stop'
@@ -81,5 +82,12 @@ $runRoot = Join-Path $repoRoot ".agent\runs\$runId"
 $manifest = Get-Content -Raw -LiteralPath (Join-Path $runRoot 'run.json') | ConvertFrom-Json
 if ($manifest.status -ne 'awaiting_review') { exit $(if ($runExit) { $runExit } else { 1 }) }
 
-& (Join-Path $root 'review-integration.ps1') -RunId $runId -Repository $repoRoot
+$reviewParams = @{
+  RunId = $runId
+  Repository = $repoRoot
+}
+if ($PSBoundParameters.ContainsKey('AutoDeliver')) {
+  $reviewParams['AutoDeliver'] = $AutoDeliver.IsPresent
+}
+& (Join-Path $root 'review-integration.ps1') @reviewParams
 exit $LASTEXITCODE

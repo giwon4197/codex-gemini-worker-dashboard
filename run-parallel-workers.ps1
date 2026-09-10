@@ -803,6 +803,7 @@ $manifest = [pscustomobject]@{
   runId = $runId; status = 'preparing'; createdAt = (Get-Date).ToString('o'); updatedAt = (Get-Date).ToString('o')
   repository = $repoRoot; baseCommit = $baseCommit; maxWorkers = $MaxWorkers; orchestratorProcessId = $PID
   tasks = @($tasks | ForEach-Object { $_.id }); worktrees = @()
+  tasksFile = $tasksPath; integrationTestCommands = @($integrationTestCommands)
 }
 $manifestPath = Join-Path $runRoot 'run.json'
 $cancelPath = Join-Path $runRoot 'cancel.requested'
@@ -1083,6 +1084,7 @@ $compressed
       if ($integrationDecision -ne 'AWAITING_CODEX_REVIEW') { $failed++ }
     }
     Set-ObjectProperty $manifest 'integration' $integration
+    Set-ObjectProperty $manifest 'integrationBranch' $integrationBranch
   }
 
   Sync-LiveWorkers $runRoot

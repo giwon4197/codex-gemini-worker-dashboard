@@ -131,9 +131,22 @@ Codex 계획 호출은 `read-only`, `ephemeral`, JSON Schema 강제 모드로 �
 `.git/**`, `.agent/**`, 저장소 전체 wildcard, 중복 ownership을 거부합니다. 현재 실행 계획은 같은 base에서
 독립적으로 수행 가능한 task만 허용하며 dependency chain은 하나의 task로 합쳐 계획합니다.
 
-Codex review가 깨끗하면 최종 상태는 `awaiting_human_approval`, 수정 사항을 발견하면 `changes_requested`입니다. 라우터와 Codex review는 main을 수정하지 않으며,
-`.agent/runs/<run-id>/codex-review.md`를 확인한 사용자가 명시적으로 승인해야 병합할 수 있습니다.
-리뷰 호출만 실패한 경우 Worker를 다시 실행하지 않고 `review-integration -RunId <run-id>`로 재시도할 수 있습니다.
+
+### 자동 배포(Automatic Delivery) 및 안전 게이트
+
+`worker-settings.json`의 `autoDeliver: true` 설정 또는 `codex-route` / `review-integration`의 `-AutoDeliver` 스위치를 사용하면, 워커 작업 및 통합 완료 후 일련의 비파괴적 안전 게이트를 거쳐 `main` 브랜치에 자동으로 통합 및 푸시됩니다:
+
+1. **Codex diff 리뷰 및 정책 검증**: 구조화된 판정(`verdict: PASS`), diff 존재 확인, `allowed_files` 범위 준수 여부, 워커 및 통합 테스트 성공 여부를 엄격히 검증합니다.
+2. **원격 저장소 및 브랜치 안전 검사**: 구성된 GitHub 원격(`origin`)을 fetch하고, target `main`과 integration 브랜치의 식별자 및 조상 관계(`baseCommit` 포함)를 검증하며, 더티 워크트리와 로컬/원격 간 커밋 분기(divergence)를 탐지합니다. 기존 원격 및 로컬 작업을 덮어쓰지 않는 무충돌 상태를 증명합니다.
+3. **후보 커밋 결정론적 검증**: 배포될 정확한 후보 커밋(`candidateCommit`)에서 계획의 필수 검증 명령을 사전 실행합니다.
+4. **비파괴적 main 통합**: 오직 non-destructive Git 작업(`git merge --ff-only`)으로만 main에 통합합니다. `--force`, `--force-with-lease`, 파괴적 reset, 안전하지 않은 덮어쓰기는 일체 사용하지 않습니다.
+5. **통합 후 재검증 및 정상 푸시**: 통합 완료 후 main에서 필수 검증 명령을 다시 실행하고, 통과 시 일반 `git push`로 원격에 배포합니다.
+6. **장애 차단 및 진단 아티팩트**: 충돌, 커밋 분기, 정책 위반, 예상치 못한 파일, 검증 실패, 인증/원격 누락, 푸시 거부 발생 시 즉시 모든 병합/푸시 동작을 중단하고 원자적 에스컬레이션 상태(`escalated`/`failed`)와 마스킹된 진단 파일(`.agent/runs/<run-id>/delivery-diagnostic.json`)을 기록합니다.
+7. **비밀정보 마스킹**: 토큰, 인증 헤더, 자격 증명이 포함된 URL 등은 로그 및 아티팩트에서 자동 마스킹됩니다.
+8. **멱등성 및 복구**: 모든 게이트는 멱등성을 보장하므로 재실행 시 이미 통과한 게이트나 커밋/푸시를 중복 없이 인식하여 안전하게 복구합니다.
+9. **부트스트랩 안내**: 자동 배포 파이프라인 구현 자체(최초 부트스트랩)는 안전을 위해 `awaiting_review` 상태로 보존되며 수동 검토 후 병합됩니다. 이후 자연어 라우팅 작업부터는 `worker-settings.json`에 의해 자동 배포가 기본 활성화됩니다.
+
+자동 배포가 비활성화된 경우(예: `-AutoDeliver:$false`), 실행은 `awaiting_human_approval`에서 멈추며 `.agent/runs/<run-id>/codex-review.md`를 확인한 뒤 수동 승인으로 병합합니다. 리뷰 및 배포만 재시도하려면 `review-integration -RunId <run-id>`를 실행합니다.
 
 ## 대시보드 기능
 

@@ -1,10 +1,92 @@
 [CmdletBinding()]
 param(
   [Parameter(Mandatory = $true, Position = 0)][string]$RunId,
-  [string]$Repository = (Get-Location).Path
+  [string]$Repository = (Get-Location).Path,
+  [Alias('Deliver')][switch]$AutoDeliver,
+  [string]$TargetBranch = '',
+  [string]$Remote = '',
+  [switch]$SkipCodexReview
 )
 
 $ErrorActionPreference = 'Stop'
+
+function Redact-Text([string]$text) {
+  if ([string]::IsNullOrEmpty($text)) { return $text }
+  $result = $text
+  $result = [regex]::Replace($result, '(?i)(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{16,}', '[REDACTED_TOKEN]')
+  $result = [regex]::Replace($result, '(?i)github_pat_[A-Za-z0-9_]{20,}', '[REDACTED_TOKEN]')
+  $result = [regex]::Replace($result, 'AIza[0-9A-Za-z-_]{35}', '[REDACTED_API_KEY]')
+  $result = [regex]::Replace($result, '(?i)Bearer\s+[A-Za-z0-9\-._~+/]+=*', 'Bearer [REDACTED]')
+  $result = [regex]::Replace($result, '(?i)Authorization:\s*[^\r\n]+', 'Authorization: [REDACTED]')
+  $result = [regex]::Replace($result, 'https?://[^/@\s\r\n]+(?::[^/@\s\r\n]+)?@', 'https://[REDACTED_CREDENTIALS]@')
+  $result = [regex]::Replace($result, '([?&](?:token|access_token|secret|password|api_key|apiKey)=)[^&\s\r\n]+', '$1[REDACTED]')
+  $result = [regex]::Replace($result, '-----BEGIN [A-Z ]+ PRIVATE KEY-----[\s\S]*?-----END [A-Z ]+ PRIVATE KEY-----', '[REDACTED_PRIVATE_KEY]')
+  return $result
+}
+
+function Write-AtomicJson([string]$Path, $Data) {
+  $parent = Split-Path -Parent $Path
+  if (-not (Test-Path -LiteralPath $parent)) {
+    New-Item -ItemType Directory -Path $parent -Force | Out-Null
+  }
+  $temp = "$Path.$([guid]::NewGuid().ToString('N')).tmp"
+  try {
+    [IO.File]::WriteAllText($temp, ($Data | ConvertTo-Json -Depth 16), [Text.Encoding]::UTF8)
+    try {
+      [IO.File]::Move($temp, $Path, $true)
+    } catch {
+      [IO.File]::Copy($temp, $Path, $true)
+      [IO.File]::Delete($temp)
+    }
+  } finally {
+    if (Test-Path -LiteralPath $temp) { try { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue } catch {} }
+  }
+}
+
+function Set-ObjectProperty($Object, [string]$Name, $Value) {
+  if ($Object.PSObject.Properties.Name -contains $Name) { $Object.$Name = $Value }
+  else { $Object | Add-Member -NotePropertyName $Name -NotePropertyValue $Value }
+}
+
+function Test-AllowedPath([string]$Path, $AllowedPatterns) {
+  foreach ($patternValue in @($AllowedPatterns)) {
+    $pattern = ([string]$patternValue).Replace('\', '/')
+    if ($pattern.EndsWith('/**')) {
+      $prefix = $pattern.Substring(0, $pattern.Length - 3).TrimEnd('/')
+      if ($Path -eq $prefix -or $Path.StartsWith("$prefix/", [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    } elseif ($Path -like $pattern) { return $true }
+  }
+  return $false
+}
+
+function Invoke-Verification([string]$Worktree, $Commands) {
+  $results = @()
+  Push-Location $Worktree
+  try {
+    foreach ($commandValue in @($Commands)) {
+      $command = [string]$commandValue
+      $started = Get-Date
+      $output = if ($IsWindows -or ($env:OS -like '*Windows*')) {
+        @(& cmd.exe /d /s /c $command 2>&1 | ForEach-Object { $_.ToString() })
+      } else {
+        @(& /bin/sh -c $command 2>&1 | ForEach-Object { $_.ToString() })
+      }
+      $exitCode = $LASTEXITCODE
+      $joined = ($output | ForEach-Object { Redact-Text $_ }) -join "`n"
+      $results += [pscustomobject]@{
+        command = Redact-Text $command
+        exitCode = $exitCode
+        durationSeconds = [math]::Round(((Get-Date) - $started).TotalSeconds, 2)
+        output = $joined.Substring(0, [math]::Min(12000, $joined.Length))
+        status = if ($exitCode -eq 0) { 'PASS' } else { 'FAIL' }
+      }
+    }
+  } finally {
+    Pop-Location
+  }
+  return $results
+}
+
 $repoRoot = (& git -C $Repository rev-parse --show-toplevel 2>$null)
 if ($LASTEXITCODE -ne 0 -or -not $repoRoot) { throw "Git 저장소가 아닙니다: $Repository" }
 $repoRoot = $repoRoot.Trim()
@@ -12,47 +94,564 @@ $runRoot = Join-Path $repoRoot ".agent\runs\$RunId"
 $manifestPath = Join-Path $runRoot 'run.json'
 if (-not (Test-Path -LiteralPath $manifestPath)) { throw "run을 찾을 수 없습니다: $RunId" }
 $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
-if (-not $manifest.integration -or -not (Test-Path -LiteralPath $manifest.integration.worktree)) { throw '검토할 integration worktree가 없습니다.' }
-if ($manifest.integration.mainModified) { throw 'mainModified=true인 실행은 자동 리뷰하지 않습니다.' }
+if (-not $manifest.integration) { throw '검토할 integration 정보가 없습니다.' }
+if ($manifest.integration.mainModified -and -not $manifest.delivery) { throw 'mainModified=true인 실행은 자동 리뷰하지 않습니다.' }
+
+function Record-Diagnostic([string]$Category, [string]$Reason, [hashtable]$Details = @{}) {
+  $redactedReason = Redact-Text $Reason
+  $redactedDetails = @{}
+  foreach ($k in $Details.Keys) {
+    $val = $Details[$k]
+    if ($val -is [string]) { $redactedDetails[$k] = Redact-Text $val }
+    elseif ($val -is [array]) {
+      $redactedDetails[$k] = @($val | ForEach-Object { if ($_ -is [string]) { Redact-Text $_ } else { $_ } })
+    } else {
+      $redactedDetails[$k] = $val
+    }
+  }
+
+  $diagJsonPath = Join-Path $runRoot 'delivery-diagnostic.json'
+  $diagMdPath = Join-Path $runRoot 'delivery-diagnostic.md'
+
+  $diagData = [pscustomobject]@{
+    runId = $RunId
+    status = 'failed'
+    errorCategory = $Category
+    reason = $redactedReason
+    details = $redactedDetails
+    timestamp = (Get-Date).ToString('o')
+  }
+  Write-AtomicJson $diagJsonPath $diagData
+
+  $mdLines = @(
+    "# Delivery Diagnostic: $RunId",
+    '',
+    '- Status: failed',
+    "- Category: $Category",
+    "- Reason: $redactedReason",
+    "- Timestamp: $($diagData.timestamp)",
+    '',
+    '## Details',
+    '```json',
+    ($diagData | ConvertTo-Json -Depth 8),
+    '```'
+  )
+  [IO.File]::WriteAllText($diagMdPath, ($mdLines -join "`n"), [Text.Encoding]::UTF8)
+
+  $m = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
+  $terminalStatus = if ($Category -in @('policy_violation', 'changes_requested', 'codex_review_failed', 'divergence_detected', 'push_rejected', 'merge_conflict', 'missing_upstream')) { 'escalated' } else { 'failed' }
+  Set-ObjectProperty $m 'status' $terminalStatus
+  Set-ObjectProperty $m 'errorCategory' $Category
+  Set-ObjectProperty $m 'failureReason' $redactedReason
+  Set-ObjectProperty $m 'error' $redactedReason
+  Set-ObjectProperty $m 'escalation' ([pscustomobject]@{
+    requiresCodex = $true
+    category = $Category
+    reason = $redactedReason
+  })
+  Set-ObjectProperty $m 'delivery' ([pscustomobject]@{
+    status = 'failed'
+    errorCategory = $Category
+    error = $redactedReason
+    diagnosticArtifact = $diagJsonPath
+    attemptedAt = (Get-Date).ToString('o')
+  })
+  Set-ObjectProperty $m 'updatedAt' (Get-Date).ToString('o')
+  Write-AtomicJson $manifestPath $m
+
+  [Console]::Error.WriteLine("DELIVERY_ERROR: [$Category] $redactedReason")
+}
+
+$settingsPath = Join-Path $repoRoot 'worker-settings.json'
+$settings = if (Test-Path -LiteralPath $settingsPath) {
+  try { Get-Content -Raw -LiteralPath $settingsPath | ConvertFrom-Json } catch { $null }
+} else { $null }
+
+if ([string]::IsNullOrWhiteSpace($TargetBranch)) {
+  if ($settings -and $settings.delivery -and -not [string]::IsNullOrWhiteSpace($settings.delivery.targetBranch)) {
+    $TargetBranch = [string]$settings.delivery.targetBranch
+  } elseif ($settings -and -not [string]::IsNullOrWhiteSpace($settings.targetBranch)) {
+    $TargetBranch = [string]$settings.targetBranch
+  } else {
+    $TargetBranch = 'main'
+  }
+}
+
+if ([string]::IsNullOrWhiteSpace($Remote)) {
+  if ($settings -and $settings.delivery -and -not [string]::IsNullOrWhiteSpace($settings.delivery.remote)) {
+    $Remote = [string]$settings.delivery.remote
+  } elseif ($settings -and -not [string]::IsNullOrWhiteSpace($settings.remote)) {
+    $Remote = [string]$settings.remote
+  } else {
+    $Remote = 'origin'
+  }
+}
+
+$shouldDeliver = $false
+if ($PSBoundParameters.ContainsKey('AutoDeliver')) {
+  $shouldDeliver = $AutoDeliver.IsPresent
+} else {
+  if ($settings) {
+    if ($settings.autoDeliver -eq $true -or ($settings.delivery -and $settings.delivery.enabled -eq $true) -or ($settings.delivery -and $settings.delivery.autoDeliver -eq $true)) {
+      $shouldDeliver = $true
+    }
+  }
+}
 
 $reviewJsonPath = Join-Path $runRoot 'codex-review.json'
 $reviewPath = Join-Path $runRoot 'codex-review.md'
 $reviewSchema = Join-Path $PSScriptRoot 'codex-review.schema.json'
-$reviewPrompt = @"
-Review only the committed diff from base commit $($manifest.integration.baseCommit) through HEAD.
+
+$baseCommit = [string]$manifest.integration.baseCommit
+$integrationBranch = [string]$manifest.integration.branch
+$candHash = (& git -C $repoRoot rev-parse --verify "refs/heads/$integrationBranch" 2>$null)
+if (-not $candHash) {
+  Record-Diagnostic 'integration_branch_missing' "Integration branch '$integrationBranch' does not exist."
+  exit 1
+}
+$candidateCommit = $candHash.Trim()
+
+# Codex Review execution or loading
+$review = $null
+if (Test-Path -LiteralPath $reviewJsonPath) {
+  try { $review = Get-Content -Raw -LiteralPath $reviewJsonPath | ConvertFrom-Json } catch {}
+}
+
+if (-not $review) {
+  if ($SkipCodexReview) {
+    $review = [pscustomobject]@{
+      verdict = 'PASS'
+      summary = 'Verification review passed via SkipCodexReview'
+      findings = @()
+    }
+    Write-AtomicJson $reviewJsonPath $review
+  } elseif (Get-Command codex.exe -ErrorAction SilentlyContinue) {
+    $reviewPrompt = @"
+Review only the committed diff from base commit $baseCommit through HEAD.
 Focus on correctness, regressions, security, test gaps, documentation/API mismatches, and contract violations.
 Do not edit files or merge branches. Run relevant read-only tests when useful.
 Return verdict REQUEST_FIX when any actionable finding exists; otherwise return PASS. Use repository-relative file paths.
 "@
-Push-Location ([string]$manifest.integration.worktree)
-try {
-  & codex.exe exec --sandbox read-only --ephemeral --color never --output-schema $reviewSchema --output-last-message $reviewJsonPath --cd $manifest.integration.worktree $reviewPrompt
-  $reviewExit = $LASTEXITCODE
-} finally { Pop-Location }
+    $worktreeForReview = if ($manifest.integration.worktree -and (Test-Path -LiteralPath $manifest.integration.worktree)) {
+      $manifest.integration.worktree
+    } else {
+      $repoRoot
+    }
+    Push-Location $worktreeForReview
+    try {
+      & codex.exe exec --sandbox read-only --ephemeral --color never --output-schema $reviewSchema --output-last-message $reviewJsonPath --cd $worktreeForReview $reviewPrompt
+      $reviewExit = $LASTEXITCODE
+    } finally { Pop-Location }
 
-$review = if ($reviewExit -eq 0 -and (Test-Path -LiteralPath $reviewJsonPath)) { Get-Content -Raw -LiteralPath $reviewJsonPath | ConvertFrom-Json } else { $null }
-$reviewStatus = if ($reviewExit -ne 0 -or -not $review) { 'codex_review_failed' } elseif ($review.verdict -eq 'PASS') { 'awaiting_human_approval' } else { 'changes_requested' }
-if ($review) {
-  $lines = @("# Codex Review: $RunId", '', "- Verdict: $($review.verdict)", '', $review.summary, '', '## Findings', '')
-  if (@($review.findings).Count -eq 0) { $lines += '- No actionable findings.' }
-  else { foreach ($finding in @($review.findings)) { $lines += "- [$($finding.severity)] $($finding.title) — $($finding.file):$($finding.line)`n  $($finding.body)" } }
-  [IO.File]::WriteAllText($reviewPath, ($lines -join "`n"), [Text.Encoding]::UTF8)
+    if ($reviewExit -eq 0 -and (Test-Path -LiteralPath $reviewJsonPath)) {
+      try { $review = Get-Content -Raw -LiteralPath $reviewJsonPath | ConvertFrom-Json } catch { $review = $null }
+    }
+  } else {
+    Record-Diagnostic 'codex_review_failed' 'Codex CLI를 찾을 수 없으며 기존 review 아티팩트가 없습니다.'
+    exit 1
+  }
+}
+
+if (-not $review -or -not $review.verdict) {
+  Record-Diagnostic 'codex_review_failed' 'Codex 리뷰 생성 또는 파싱에 실패했습니다.'
+  exit 1
+}
+
+# Write review markdown
+$lines = @("# Codex Review: $RunId", '', "- Verdict: $($review.verdict)", '', $review.summary, '', '## Findings', '')
+if (@($review.findings).Count -eq 0) { $lines += '- No actionable findings.' }
+else { foreach ($finding in @($review.findings)) { $lines += "- [$($finding.severity)] $($finding.title) — $($finding.file):$($finding.line)`n  $($finding.body)" } }
+[IO.File]::WriteAllText($reviewPath, ($lines -join "`n"), [Text.Encoding]::UTF8)
+
+# Validate structured verdict
+if ($review.verdict -ne 'PASS') {
+  Record-Diagnostic 'changes_requested' "Codex review returned $($review.verdict): $($review.summary)" @{
+    findings = @($review.findings)
+  }
+  exit 1
+}
+
+# Validate integration diff
+$diffFiles = @(& git -C $repoRoot diff --name-only "$baseCommit...$candidateCommit" | Where-Object { $_ })
+if ($diffFiles.Count -eq 0) {
+  Record-Diagnostic 'diff_empty' "Integration diff between base commit '$baseCommit' and candidate commit '$candidateCommit' is empty."
+  exit 1
+}
+
+# Validate expected-file policy
+$allAllowedFiles = [System.Collections.Generic.List[string]]::new()
+$tasksDir = Join-Path $runRoot 'tasks'
+if (Test-Path -LiteralPath $tasksDir) {
+  foreach ($tFile in Get-ChildItem -LiteralPath $tasksDir -Filter '*.json') {
+    try {
+      $tObj = Get-Content -Raw -LiteralPath $tFile.FullName | ConvertFrom-Json
+      foreach ($af in @($tObj.allowedFiles)) { [void]$allAllowedFiles.Add($af) }
+    } catch {}
+  }
+}
+$resultsDir = Join-Path $runRoot 'results'
+if (Test-Path -LiteralPath $resultsDir) {
+  foreach ($rFile in Get-ChildItem -LiteralPath $resultsDir -Filter '*.json') {
+    try {
+      $rObj = Get-Content -Raw -LiteralPath $rFile.FullName | ConvertFrom-Json
+      if ($rObj.policy -and $rObj.policy.allowedFiles) {
+        foreach ($af in @($rObj.policy.allowedFiles)) { [void]$allAllowedFiles.Add($af) }
+      }
+    } catch {}
+  }
+}
+if ($manifest.tasksFile -and (Test-Path -LiteralPath $manifest.tasksFile)) {
+  try {
+    $planObj = Get-Content -Raw -LiteralPath $manifest.tasksFile | ConvertFrom-Json
+    $taskList = if ($planObj -is [array]) { $planObj } elseif ($planObj.tasks) { $planObj.tasks } else { @() }
+    foreach ($t in $taskList) {
+      foreach ($af in @($t.allowed_files)) { [void]$allAllowedFiles.Add($af) }
+    }
+  } catch {}
+}
+
+$policyViolations = @()
+foreach ($f in $diffFiles) {
+  $fNorm = ([string]$f).Replace('\', '/')
+  if (-not (Test-AllowedPath $fNorm $allAllowedFiles)) {
+    $policyViolations += $fNorm
+  }
+}
+if ($policyViolations.Count -gt 0) {
+  Record-Diagnostic 'policy_violation' "Policy violation: file(s) outside allowed scope: $($policyViolations -join ', ')" @{
+    violations = $policyViolations
+    allowedPatterns = @($allAllowedFiles)
+    changedFiles = $diffFiles
+  }
+  exit 1
+}
+
+# Validate test summaries
+$failedTasks = @()
+if (Test-Path -LiteralPath $resultsDir) {
+  foreach ($rFile in Get-ChildItem -LiteralPath $resultsDir -Filter '*.json') {
+    try {
+      $rObj = Get-Content -Raw -LiteralPath $rFile.FullName | ConvertFrom-Json
+      if ($rObj.status -ne 'completed' -or ($rObj.verification -and $rObj.verification.decision -ne 'PASS')) {
+        $failedTasks += $rObj.taskId
+      }
+    } catch {}
+  }
+}
+if ($failedTasks.Count -gt 0) {
+  Record-Diagnostic 'test_failed' "Worker test verification failed for task(s): $($failedTasks -join ', ')" @{
+    failedTasks = $failedTasks
+  }
+  exit 1
+}
+
+if ($manifest.integration -and $manifest.integration.tests) {
+  $failedIntegTests = @($manifest.integration.tests | Where-Object { $_.status -eq 'FAIL' })
+  if ($failedIntegTests.Count -gt 0) {
+    Record-Diagnostic 'integration_test_failed' "Integration test command failed: $($failedIntegTests[0].command) (exit code $($failedIntegTests[0].exitCode))" @{
+      failedTests = $failedIntegTests
+    }
+    exit 1
+  }
+}
+
+# If auto-delivery is NOT enabled, stop at review
+if (-not $shouldDeliver) {
+  $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
+  Set-ObjectProperty $manifest 'status' 'awaiting_human_approval'
+  Set-ObjectProperty $manifest 'codexReview' ([pscustomobject]@{
+    status = 'completed'
+    verdict = $review.verdict
+    findingsCount = @($review.findings).Count
+    artifact = $reviewPath
+    jsonArtifact = $reviewJsonPath
+    reviewedAt = (Get-Date).ToString('o')
+    mainModified = $false
+  })
+  Set-ObjectProperty $manifest 'updatedAt' (Get-Date).ToString('o')
+  Write-AtomicJson $manifestPath $manifest
+  Write-Output "Codex review: $reviewPath"
+  Write-Output "Final status: $($manifest.status)"
+  exit 0
+}
+
+# --- Delivery Phase ---
+
+# Remote validation
+$remotes = @(& git -C $repoRoot remote 2>$null)
+if ($remotes -notcontains $Remote) {
+  Record-Diagnostic 'missing_upstream' "Remote '$Remote' is not configured in repository."
+  exit 1
+}
+
+# Fetch remote
+$fetchOut = @(& git -C $repoRoot fetch --prune $Remote 2>&1 | ForEach-Object { Redact-Text $_.ToString() })
+if ($LASTEXITCODE -ne 0) {
+  Record-Diagnostic 'remote_fetch_failed' "Failed to fetch remote '$Remote': $($fetchOut -join ' ')" @{
+    output = $fetchOut
+  }
+  exit 1
+}
+
+# Target and Integration branch validation
+$hasLocalTarget = (& git -C $repoRoot rev-parse --verify "refs/heads/$TargetBranch" 2>$null)
+$hasRemoteTarget = (& git -C $repoRoot rev-parse --verify "refs/remotes/$Remote/$TargetBranch" 2>$null)
+
+if (-not $hasLocalTarget -and -not $hasRemoteTarget) {
+  Record-Diagnostic 'target_branch_missing' "Target branch '$TargetBranch' does not exist locally or on remote '$Remote'."
+  exit 1
+}
+
+if (-not $hasLocalTarget -and $hasRemoteTarget) {
+  & git -C $repoRoot branch --track $TargetBranch "$Remote/$TargetBranch" 2>&1 | Out-Null
+  if ($LASTEXITCODE -ne 0) {
+    Record-Diagnostic 'target_branch_missing' "Failed to create local tracking branch for '$Remote/$TargetBranch'."
+    exit 1
+  }
+}
+
+$localTargetCommit = (& git -C $repoRoot rev-parse "refs/heads/$TargetBranch" 2>$null).Trim()
+$remoteTargetCommit = if ($hasRemoteTarget) { (& git -C $repoRoot rev-parse "refs/remotes/$Remote/$TargetBranch" 2>$null).Trim() } else { $null }
+
+# Ancestry validation: baseCommit must be ancestor of candidateCommit
+& git -C $repoRoot merge-base --is-ancestor $baseCommit $candidateCommit
+if ($LASTEXITCODE -ne 0) {
+  Record-Diagnostic 'invalid_ancestry' "Base commit '$baseCommit' is not an ancestor of candidate commit '$candidateCommit'."
+  exit 1
+}
+
+# Dirty worktree checks (excluding .agent runtime state)
+$dirtyRepo = @(& git -C $repoRoot status --porcelain 2>$null | Where-Object { $_ -and ($_ -notmatch '^\?\?\s+\.agent(/|\\|$)') })
+if ($dirtyRepo.Count -gt 0) {
+  Record-Diagnostic 'dirty_worktree' "Repository worktree at '$repoRoot' is dirty: $($dirtyRepo -join '; ')" @{
+    dirtyFiles = $dirtyRepo
+  }
+  exit 1
+}
+
+if ($manifest.integration.worktree -and (Test-Path -LiteralPath $manifest.integration.worktree)) {
+  $dirtyInteg = @(& git -C $manifest.integration.worktree status --porcelain 2>$null | Where-Object { $_ -and ($_ -notmatch '^\?\?\s+\.agent(/|\\|$)') })
+  if ($dirtyInteg.Count -gt 0) {
+    Record-Diagnostic 'dirty_worktree' "Integration worktree at '$($manifest.integration.worktree)' is dirty: $($dirtyInteg -join '; ')" @{
+      dirtyFiles = $dirtyInteg
+    }
+    exit 1
+  }
+}
+
+# Local / Remote divergence checks
+if ($remoteTargetCommit) {
+  $mbLocalRemote = (& git -C $repoRoot merge-base $localTargetCommit $remoteTargetCommit 2>$null)
+  if ($mbLocalRemote) {
+    $mbLocalRemote = $mbLocalRemote.Trim()
+    if ($mbLocalRemote -ne $localTargetCommit -and $mbLocalRemote -ne $remoteTargetCommit) {
+      Record-Diagnostic 'divergence_detected' "Local target branch '$TargetBranch' ($localTargetCommit) and remote '$Remote/$TargetBranch' ($remoteTargetCommit) have diverged." @{
+        localCommit = $localTargetCommit
+        remoteCommit = $remoteTargetCommit
+        commonAncestor = $mbLocalRemote
+      }
+      exit 1
+    }
+  }
+
+  if ($remoteTargetCommit -ne $baseCommit) {
+    & git -C $repoRoot merge-base --is-ancestor $remoteTargetCommit $candidateCommit
+    if ($LASTEXITCODE -ne 0) {
+      Record-Diagnostic 'divergence_detected' "Remote '$Remote/$TargetBranch' ($remoteTargetCommit) has commits not present in candidate commit '$candidateCommit'." @{
+        remoteCommit = $remoteTargetCommit
+        candidateCommit = $candidateCommit
+      }
+      exit 1
+    }
+  }
+}
+
+if ($localTargetCommit -ne $baseCommit) {
+  & git -C $repoRoot merge-base --is-ancestor $localTargetCommit $candidateCommit
+  if ($LASTEXITCODE -ne 0) {
+    Record-Diagnostic 'divergence_detected' "Local target branch '$TargetBranch' ($localTargetCommit) has commits not present in candidate commit '$candidateCommit'." @{
+      localCommit = $localTargetCommit
+      candidateCommit = $candidateCommit
+    }
+    exit 1
+  }
+}
+
+# Candidate commit verification
+$allVerifyCommands = [System.Collections.Generic.List[string]]::new()
+if ($manifest.integrationTestCommands) {
+  foreach ($cmd in @($manifest.integrationTestCommands)) {
+    if (-not [string]::IsNullOrWhiteSpace($cmd) -and -not $allVerifyCommands.Contains($cmd)) {
+      [void]$allVerifyCommands.Add($cmd)
+    }
+  }
+}
+if ($manifest.integration -and $manifest.integration.tests) {
+  foreach ($t in @($manifest.integration.tests)) {
+    if ($t.command -and -not $allVerifyCommands.Contains($t.command)) {
+      [void]$allVerifyCommands.Add($t.command)
+    }
+  }
+}
+if (Test-Path -LiteralPath $tasksDir) {
+  foreach ($tFile in Get-ChildItem -LiteralPath $tasksDir -Filter '*.json') {
+    try {
+      $tObj = Get-Content -Raw -LiteralPath $tFile.FullName | ConvertFrom-Json
+      foreach ($cmd in @($tObj.testCommands)) {
+        if (-not [string]::IsNullOrWhiteSpace($cmd) -and -not $allVerifyCommands.Contains($cmd)) {
+          [void]$allVerifyCommands.Add($cmd)
+        }
+      }
+    } catch {}
+  }
 }
 
 $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
-$manifest.status = $reviewStatus
-$manifest | Add-Member -NotePropertyName codexReview -NotePropertyValue ([pscustomobject]@{
-  status = if ($reviewExit -eq 0 -and $review) { 'completed' } else { 'failed' }
-  verdict = if ($review) { $review.verdict } else { $null }
-  findingsCount = if ($review) { @($review.findings).Count } else { $null }
+$alreadyCandidateVerified = ($manifest.delivery -and $manifest.delivery.candidateVerifiedCommit -eq $candidateCommit)
+
+if (-not $alreadyCandidateVerified) {
+  $testWorktree = if ($manifest.integration.worktree -and (Test-Path -LiteralPath $manifest.integration.worktree)) {
+    $manifest.integration.worktree
+  } else {
+    $repoRoot
+  }
+  $curCommitInTest = (& git -C $testWorktree rev-parse HEAD 2>$null).Trim()
+  $tempWorktreeCreated = $false
+  if ($curCommitInTest -ne $candidateCommit) {
+    $tempWorktree = Join-Path $runRoot 'verify-cand'
+    & git -C $repoRoot worktree add --detach $tempWorktree $candidateCommit 2>&1 | Out-Null
+    $testWorktree = $tempWorktree
+    $tempWorktreeCreated = $true
+  }
+  try {
+    $candResults = @(Invoke-Verification $testWorktree $allVerifyCommands)
+    $candFails = @($candResults | Where-Object status -eq 'FAIL')
+    if ($candFails.Count -gt 0) {
+      Record-Diagnostic 'verification_failed' "Candidate commit verification failed: $($candFails[0].command) (exit $($candFails[0].exitCode))" @{
+        failedCommand = $candFails[0].command
+        exitCode = $candFails[0].exitCode
+        output = $candFails[0].output
+      }
+      exit 1
+    }
+  } finally {
+    if ($tempWorktreeCreated -and (Test-Path -LiteralPath $testWorktree)) {
+      & git -C $repoRoot worktree remove $testWorktree --force 2>$null
+    }
+  }
+
+  $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
+  if (-not $manifest.delivery) {
+    Set-ObjectProperty $manifest 'delivery' ([pscustomobject]@{})
+  }
+  Set-ObjectProperty $manifest.delivery 'candidateVerifiedCommit' $candidateCommit
+  Set-ObjectProperty $manifest 'updatedAt' (Get-Date).ToString('o')
+  Write-AtomicJson $manifestPath $manifest
+}
+
+# Non-destructive integration into target branch (fast-forward only)
+$alreadyIntegrated = $false
+& git -C $repoRoot merge-base --is-ancestor $candidateCommit "refs/heads/$TargetBranch"
+if ($LASTEXITCODE -eq 0) {
+  $alreadyIntegrated = $true
+}
+
+if (-not $alreadyIntegrated) {
+  $currentBranch = (& git -C $repoRoot rev-parse --abbrev-ref HEAD 2>$null).Trim()
+  if ($currentBranch -ne $TargetBranch) {
+    $switchOut = @(& git -C $repoRoot switch $TargetBranch 2>&1 | ForEach-Object { Redact-Text $_.ToString() })
+    if ($LASTEXITCODE -ne 0) {
+      Record-Diagnostic 'switch_failed' "Failed to switch to target branch '$TargetBranch': $($switchOut -join ' ')"
+      exit 1
+    }
+  }
+
+  $mergeOut = @(& git -C $repoRoot merge --ff-only $candidateCommit 2>&1 | ForEach-Object { Redact-Text $_.ToString() })
+  if ($LASTEXITCODE -ne 0) {
+    Record-Diagnostic 'merge_conflict' "Non-destructive fast-forward merge failed for candidate commit '$candidateCommit': $($mergeOut -join ' ')" @{
+      output = $mergeOut
+    }
+    exit 1
+  }
+
+  $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
+  if (-not $manifest.delivery) {
+    Set-ObjectProperty $manifest 'delivery' ([pscustomobject]@{})
+  }
+  Set-ObjectProperty $manifest.delivery 'integratedCommit' $candidateCommit
+  Set-ObjectProperty $manifest 'updatedAt' (Get-Date).ToString('o')
+  Write-AtomicJson $manifestPath $manifest
+}
+
+# Post-integration verification on target branch
+$manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
+$alreadyMainVerified = ($manifest.delivery -and $manifest.delivery.mainVerifiedCommit -eq $candidateCommit)
+
+if (-not $alreadyMainVerified) {
+  $postResults = @(Invoke-Verification $repoRoot $allVerifyCommands)
+  $postFails = @($postResults | Where-Object status -eq 'FAIL')
+  if ($postFails.Count -gt 0) {
+    Record-Diagnostic 'verification_failed' "Post-integration verification failed on target branch '$TargetBranch': $($postFails[0].command) (exit $($postFails[0].exitCode))" @{
+      failedCommand = $postFails[0].command
+      exitCode = $postFails[0].exitCode
+      output = $postFails[0].output
+    }
+    exit 1
+  }
+
+  $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
+  if (-not $manifest.delivery) {
+    Set-ObjectProperty $manifest 'delivery' ([pscustomobject]@{})
+  }
+  Set-ObjectProperty $manifest.delivery 'mainVerifiedCommit' $candidateCommit
+  Set-ObjectProperty $manifest 'updatedAt' (Get-Date).ToString('o')
+  Write-AtomicJson $manifestPath $manifest
+}
+
+# Normal remote push (never --force, -f, --force-with-lease)
+$alreadyPushed = $false
+if ($remoteTargetCommit) {
+  & git -C $repoRoot merge-base --is-ancestor $candidateCommit "refs/remotes/$Remote/$TargetBranch"
+  if ($LASTEXITCODE -eq 0) {
+    $alreadyPushed = $true
+  }
+}
+
+if (-not $alreadyPushed) {
+  $pushOut = @(& git -C $repoRoot push $Remote $TargetBranch 2>&1 | ForEach-Object { Redact-Text $_.ToString() })
+  if ($LASTEXITCODE -ne 0) {
+    Record-Diagnostic 'push_rejected' "Push to $Remote/$TargetBranch was rejected: $($pushOut -join ' ')" @{
+      output = $pushOut
+    }
+    exit 1
+  }
+}
+
+# Complete delivery
+$manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
+Set-ObjectProperty $manifest 'status' 'completed'
+Set-ObjectProperty $manifest 'codexReview' ([pscustomobject]@{
+  status = 'completed'
+  verdict = $review.verdict
+  findingsCount = @($review.findings).Count
   artifact = $reviewPath
   jsonArtifact = $reviewJsonPath
   reviewedAt = (Get-Date).ToString('o')
-  mainModified = $false
-}) -Force
-$temp = "$manifestPath.$([guid]::NewGuid().ToString('N')).tmp"
-[IO.File]::WriteAllText($temp, ($manifest | ConvertTo-Json -Depth 16), [Text.Encoding]::UTF8)
-[IO.File]::Move($temp, $manifestPath, $true)
+  mainModified = $true
+})
+Set-ObjectProperty $manifest 'delivery' ([pscustomobject]@{
+  status = 'completed'
+  targetBranch = $TargetBranch
+  remote = $Remote
+  commit = $candidateCommit
+  candidateVerifiedCommit = $candidateCommit
+  mainVerifiedCommit = $candidateCommit
+  deliveredAt = (Get-Date).ToString('o')
+})
+Set-ObjectProperty $manifest 'updatedAt' (Get-Date).ToString('o')
+Write-AtomicJson $manifestPath $manifest
+
 Write-Output "Codex review: $reviewPath"
+Write-Output "Delivery completed: $TargetBranch at $candidateCommit pushed to $Remote"
 Write-Output "Final status: $($manifest.status)"
-exit $(if ($reviewExit -eq 0 -and $review) { 0 } else { 1 })
+exit 0

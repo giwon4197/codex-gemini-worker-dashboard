@@ -160,11 +160,14 @@ exit $LASTEXITCODE
 param(
   [Parameter(Mandatory=$true,Position=0)][string]$Request,
   [string]$Repository='',
-  [switch]$PlanOnly
+  [switch]$PlanOnly,
+  [Alias('Deliver')][switch]$AutoDeliver
 )
 $root = '__INSTALL_ROOT__'
 $repo = if ([string]::IsNullOrWhiteSpace($Repository)) { (Get-Location).Path } else { (Resolve-Path -LiteralPath $Repository).Path }
-& (Join-Path $root 'codex-router.ps1') -Request $Request -Repository $repo -PlanOnly:$PlanOnly
+$passArgs = @{ Request = $Request; Repository = $repo; PlanOnly = $PlanOnly }
+if ($PSBoundParameters.ContainsKey('AutoDeliver')) { $passArgs['AutoDeliver'] = $AutoDeliver.IsPresent }
+& (Join-Path $root 'codex-router.ps1') @passArgs
 exit $LASTEXITCODE
 '@.Replace('__INSTALL_ROOT__', $escapedRoot)
     Set-Content -LiteralPath (Join-Path $launcherDir 'codex-route.ps1') -Value $codexRouterLauncher -Encoding utf8
@@ -173,11 +176,20 @@ exit $LASTEXITCODE
 [CmdletBinding()]
 param(
   [Parameter(Mandatory=$true,Position=0)][string]$RunId,
-  [string]$Repository=''
+  [string]$Repository='',
+  [Alias('Deliver')][switch]$AutoDeliver,
+  [string]$TargetBranch='',
+  [string]$Remote='',
+  [switch]$SkipCodexReview
 )
 $root = '__INSTALL_ROOT__'
 $repo = if ([string]::IsNullOrWhiteSpace($Repository)) { (Get-Location).Path } else { (Resolve-Path -LiteralPath $Repository).Path }
-& (Join-Path $root 'review-integration.ps1') -RunId $RunId -Repository $repo
+$passArgs = @{ RunId = $RunId; Repository = $repo }
+if ($PSBoundParameters.ContainsKey('AutoDeliver')) { $passArgs['AutoDeliver'] = $AutoDeliver.IsPresent }
+if ($TargetBranch) { $passArgs['TargetBranch'] = $TargetBranch }
+if ($Remote) { $passArgs['Remote'] = $Remote }
+if ($SkipCodexReview) { $passArgs['SkipCodexReview'] = $true }
+& (Join-Path $root 'review-integration.ps1') @passArgs
 exit $LASTEXITCODE
 '@.Replace('__INSTALL_ROOT__', $escapedRoot)
     Set-Content -LiteralPath (Join-Path $launcherDir 'review-integration.ps1') -Value $reviewIntegrationLauncher -Encoding utf8
