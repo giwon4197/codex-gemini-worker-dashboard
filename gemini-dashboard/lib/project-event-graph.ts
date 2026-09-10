@@ -750,3 +750,314 @@ export function sortGraphNodesNewestFirst(nodes: ProjectGraphNode[]): ProjectGra
 export function sortGraphNodesOldestFirst(nodes: ProjectGraphNode[]): ProjectGraphNode[] {
   return [...nodes];
 }
+
+export const LANE_COLORS = [
+  '#38bdf8', // Lane 0: Sky (Main / Orchestrator / Codex)
+  '#c084fc', // Lane 1: Purple (Worker 1)
+  '#f472b6', // Lane 2: Pink (Worker 2)
+  '#34d399', // Lane 3: Emerald (Worker 3)
+  '#fbbf24', // Lane 4: Amber (Worker 4)
+  '#818cf8', // Lane 5: Indigo (Worker 5)
+] as const;
+
+export function getLaneColor(lane: number): string {
+  const index = Math.abs(lane) % LANE_COLORS.length;
+  return LANE_COLORS[index];
+}
+
+export const GRAPH_LAYOUT_CONFIG = {
+  rowHeight: 52,
+  laneWidth: 26,
+  laneXOffset: 14,
+  nodeCenterYOffset: 26,
+  nodeRadius: 5,
+  defaultMinLanes: 2,
+  svgExtraWidth: 16,
+} as const;
+
+export interface GraphLayoutNode {
+  id: string;
+  node: ProjectGraphNode;
+  rowIndex: number;
+  x: number;
+  y: number;
+  lane: number;
+  color: string;
+  isTip: boolean;
+}
+
+export type GraphLayoutEdgeType = 'direct' | 'branch' | 'merge';
+
+export interface GraphLayoutEdge {
+  id: string;
+  fromNodeId: string;
+  toNodeId: string;
+  fromRowIndex: number;
+  toRowIndex: number;
+  fromLane: number;
+  toLane: number;
+  fromX: number;
+  fromY: number;
+  toX: number;
+  toY: number;
+  type: GraphLayoutEdgeType;
+  color: string;
+  pathD: string;
+}
+
+export interface GraphPassThroughSegment {
+  lane: number;
+  x: number;
+  fromY: number;
+  toY: number;
+  fromRowIndex: number;
+  toRowIndex: number;
+  color: string;
+  fromNodeId?: string;
+  toNodeId?: string;
+}
+
+export interface GraphLayoutGeometry {
+  width: number;
+  height: number;
+  rowHeight: number;
+  laneWidth: number;
+  lanesCount: number;
+  nodes: GraphLayoutNode[];
+  edges: GraphLayoutEdge[];
+  passThroughSegments: GraphPassThroughSegment[];
+}
+
+export interface ComputeGraphGeometryOptions {
+  rowHeight?: number;
+  laneWidth?: number;
+  laneXOffset?: number;
+  nodeCenterYOffset?: number;
+  minLanes?: number;
+}
+
+export function computeLaneX(
+  lane: number,
+  laneWidth: number = GRAPH_LAYOUT_CONFIG.laneWidth,
+  xOffset: number = GRAPH_LAYOUT_CONFIG.laneXOffset
+): number {
+  return xOffset + lane * laneWidth;
+}
+
+export function computeNodeY(
+  rowIndex: number,
+  rowHeight: number = GRAPH_LAYOUT_CONFIG.rowHeight,
+  yOffset: number = GRAPH_LAYOUT_CONFIG.nodeCenterYOffset
+): number {
+  return rowIndex * rowHeight + yOffset;
+}
+
+export function computeGraphSvgWidth(
+  lanesCount: number,
+  laneWidth: number = GRAPH_LAYOUT_CONFIG.laneWidth,
+  extraWidth: number = GRAPH_LAYOUT_CONFIG.svgExtraWidth
+): number {
+  const effectiveLanes = Math.max(lanesCount || 1, GRAPH_LAYOUT_CONFIG.defaultMinLanes);
+  return effectiveLanes * laneWidth + extraWidth;
+}
+
+export function computeGraphSvgHeight(
+  nodeCount: number,
+  rowHeight: number = GRAPH_LAYOUT_CONFIG.rowHeight
+): number {
+  return Math.max(nodeCount, 0) * rowHeight;
+}
+
+/**
+ * Computes deterministic global layout geometry for the full-graph SVG.
+ * All coordinates are in a unified global system:
+ * - rowHeight defaults to 52px
+ * - node centers at rowIndex * rowHeight + nodeCenterYOffset (26px)
+ * - edges directly connect node centers (solid direct edges, smooth cubic bezier branches/merges)
+ * - pass-through segments connect inactive-row spans without duplicate lines underneath direct edges
+ */
+export function computeGraphLayoutGeometry(
+  input: ProjectGraphNode[] | ProjectWorkGraphData,
+  options?: ComputeGraphGeometryOptions
+): GraphLayoutGeometry {
+  const displayNodes = Array.isArray(input)
+    ? input
+    : sortGraphNodesNewestFirst(input.nodes);
+
+  const rowHeight = options?.rowHeight ?? GRAPH_LAYOUT_CONFIG.rowHeight;
+  const laneWidth = options?.laneWidth ?? GRAPH_LAYOUT_CONFIG.laneWidth;
+  const laneXOffset = options?.laneXOffset ?? GRAPH_LAYOUT_CONFIG.laneXOffset;
+  const nodeCenterYOffset = options?.nodeCenterYOffset ?? GRAPH_LAYOUT_CONFIG.nodeCenterYOffset;
+  const minLanes = options?.minLanes ?? (('lanesCount' in input && typeof input.lanesCount === 'number') ? input.lanesCount : GRAPH_LAYOUT_CONFIG.defaultMinLanes);
+
+  let maxLane = 0;
+  for (const node of displayNodes) {
+    if (node.lane > maxLane) maxLane = node.lane;
+  }
+  const lanesCount = Math.max(maxLane + 1, minLanes, GRAPH_LAYOUT_CONFIG.defaultMinLanes);
+  const width = computeGraphSvgWidth(lanesCount, laneWidth);
+  const height = computeGraphSvgHeight(displayNodes.length, rowHeight);
+
+  const nodeIndexMap = new Map<string, number>();
+  displayNodes.forEach((n, idx) => nodeIndexMap.set(n.id, idx));
+
+  // 1. Nodes layout
+  const layoutNodes: GraphLayoutNode[] = displayNodes.map((node, rowIndex) => {
+    const x = computeLaneX(node.lane, laneWidth, laneXOffset);
+    const y = computeNodeY(rowIndex, rowHeight, nodeCenterYOffset);
+    const color = getLaneColor(node.lane);
+    return {
+      id: node.id,
+      node,
+      rowIndex,
+      x,
+      y,
+      lane: node.lane,
+      color,
+      isTip: Boolean(node.isTip),
+    };
+  });
+
+  // 2. Edges layout
+  const layoutEdges: GraphLayoutEdge[] = [];
+  const edgePairKeys = new Set<string>();
+
+  const addEdge = (parent: ProjectGraphNode, child: ProjectGraphNode, explicitType?: GraphLayoutEdgeType) => {
+    const parentRow = nodeIndexMap.get(parent.id);
+    const childRow = nodeIndexMap.get(child.id);
+    if (parentRow === undefined || childRow === undefined) return;
+    if (parentRow <= childRow) return; // In displayNodes (newest first), parent is below child
+
+    const edgeKey = `${parent.id}->${child.id}`;
+    if (edgePairKeys.has(edgeKey)) return;
+    edgePairKeys.add(edgeKey);
+    edgePairKeys.add(`${parent.id}<->${child.id}`);
+    edgePairKeys.add(`${child.id}<->${parent.id}`);
+
+    const fromX = computeLaneX(parent.lane, laneWidth, laneXOffset);
+    const fromY = computeNodeY(parentRow, rowHeight, nodeCenterYOffset);
+    const toX = computeLaneX(child.lane, laneWidth, laneXOffset);
+    const toY = computeNodeY(childRow, rowHeight, nodeCenterYOffset);
+
+    let edgeType: GraphLayoutEdgeType;
+    if (explicitType) {
+      edgeType = explicitType;
+    } else if (parent.lane === child.lane) {
+      edgeType = 'direct';
+    } else if (child.type === 'merge') {
+      edgeType = 'merge';
+    } else {
+      edgeType = 'branch';
+    }
+
+    let edgeColor: string;
+    let pathD: string;
+
+    if (edgeType === 'direct') {
+      edgeColor = getLaneColor(child.lane);
+      pathD = `M ${fromX} ${fromY} L ${toX} ${toY}`;
+    } else if (edgeType === 'merge') {
+      edgeColor = getLaneColor(parent.lane);
+      const midY = (fromY + toY) / 2;
+      pathD = `M ${fromX} ${fromY} C ${fromX} ${midY}, ${toX} ${midY}, ${toX} ${toY}`;
+    } else {
+      edgeColor = getLaneColor(child.lane);
+      const midY = (fromY + toY) / 2;
+      pathD = `M ${fromX} ${fromY} C ${fromX} ${midY}, ${toX} ${midY}, ${toX} ${toY}`;
+    }
+
+    layoutEdges.push({
+      id: edgeKey,
+      fromNodeId: parent.id,
+      toNodeId: child.id,
+      fromRowIndex: parentRow,
+      toRowIndex: childRow,
+      fromLane: parent.lane,
+      toLane: child.lane,
+      fromX,
+      fromY,
+      toX,
+      toY,
+      type: edgeType,
+      color: edgeColor,
+      pathD,
+    });
+  };
+
+  // Add edges from child node parentIds / parentId
+  for (const childNode of displayNodes) {
+    const pIds = childNode.parentIds && childNode.parentIds.length > 0
+      ? childNode.parentIds
+      : (childNode.parentId ? [childNode.parentId] : []);
+
+    for (const pId of pIds) {
+      const parentRow = nodeIndexMap.get(pId);
+      if (parentRow !== undefined) {
+        addEdge(displayNodes[parentRow], childNode);
+      }
+    }
+  }
+
+  // If input has explicit edges array, ensure any additional defined edges are included
+  if (!Array.isArray(input) && input.edges) {
+    for (const e of input.edges) {
+      const parentRow = nodeIndexMap.get(e.from);
+      const childRow = nodeIndexMap.get(e.to);
+      if (parentRow !== undefined && childRow !== undefined && parentRow > childRow) {
+        addEdge(displayNodes[parentRow], displayNodes[childRow], e.type);
+      }
+    }
+  }
+
+  // 3. Pass-Through Segments for Inactive Rows
+  const passThroughSegments: GraphPassThroughSegment[] = [];
+
+  for (let l = 0; l < lanesCount; l++) {
+    const laneNodes: Array<{ node: ProjectGraphNode; rowIndex: number }> = [];
+    for (let i = 0; i < displayNodes.length; i++) {
+      if (displayNodes[i].lane === l) {
+        laneNodes.push({ node: displayNodes[i], rowIndex: i });
+      }
+    }
+
+    if (laneNodes.length < 2) continue;
+
+    for (let j = 0; j < laneNodes.length - 1; j++) {
+      const upper = laneNodes[j];
+      const lower = laneNodes[j + 1];
+
+      // If there is no direct edge connecting this pair, lane l passes through
+      const hasDirectEdge = edgePairKeys.has(`${upper.node.id}<->${lower.node.id}`);
+
+      if (!hasDirectEdge) {
+        const x = computeLaneX(l, laneWidth, laneXOffset);
+        const fromY = computeNodeY(upper.rowIndex, rowHeight, nodeCenterYOffset);
+        const toY = computeNodeY(lower.rowIndex, rowHeight, nodeCenterYOffset);
+
+        passThroughSegments.push({
+          lane: l,
+          x,
+          fromY,
+          toY,
+          fromRowIndex: upper.rowIndex,
+          toRowIndex: lower.rowIndex,
+          color: getLaneColor(l),
+          fromNodeId: upper.node.id,
+          toNodeId: lower.node.id,
+        });
+      }
+    }
+  }
+
+  return {
+    width,
+    height,
+    rowHeight,
+    laneWidth,
+    lanesCount,
+    nodes: layoutNodes,
+    edges: layoutEdges,
+    passThroughSegments,
+  };
+}
+
