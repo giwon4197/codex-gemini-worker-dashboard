@@ -268,6 +268,99 @@ Patch Write Scope
 Integration Merge Scope
 ```
 
+## v2.1 전체 아키텍처
+
+v2.1은 v2의 실행·검증·전달 구조를 교체하지 않는다. 기존 파이프라인 안에서 파일 접근을 `Read`, `Write`, `Merge`로 분리하고, 필요한 수정 범위만 실행 중에 확장한다.
+
+```mermaid
+flowchart TB
+    U[사용자 요청] --> TRIAGE[Task Triage]
+    TRIAGE --> PLAN[Codex Planning]
+    PLAN --> CONTRACT[Task Contract v2.1]
+
+    CONTRACT --> RS[Read Scope<br/>Repository-wide Search]
+    CONTRACT --> WS[Write Scope<br/>Expected Files]
+    CONTRACT --> MS[Merge Scope<br/>승인 가능한 변경 범위]
+    CONTRACT --> DENY[Denylist<br/>Secrets · .git · Other Worktrees]
+
+    RS --> CTX[Context Compiler<br/>Initial Relevant Context]
+    CTX --> WT[Isolated Task Worktree]
+    WS --> WT
+    DENY --> GUARD[Filesystem Guard]
+    GUARD --> WT
+
+    WT --> GEM[Gemini Worker]
+    GEM --> SEARCH[Repository Search / Read]
+    SEARCH --> GEM
+    GEM --> EDIT{수정 대상 분류}
+
+    EDIT -->|Tier 0 Expected| WRITE[수정 허용]
+    EDIT -->|Tier 1 Derived| EXPAND[REQUEST_WRITE_EXPANSION]
+    EDIT -->|Tier 2 Sensitive| ESC[Codex 또는 사용자 검토]
+    EDIT -->|Tier 3 Forbidden| BLOCK[POLICY_VIOLATION<br/>즉시 차단]
+
+    EXPAND --> POLICY[Local Policy Engine]
+    POLICY -->|직접 dependency 증거| ALLOW[ALLOW_DERIVED]
+    POLICY -->|근거 부족| DENYWRITE[DENY]
+    POLICY -->|고위험·공용 파일| ESC
+    ALLOW --> WRITE
+    WRITE --> GEM
+
+    GEM --> VERIFY[Deterministic Verification]
+    VERIFY --> SCOPE[Scope Verifier<br/>Expected · Derived · Sensitive · Forbidden]
+    SCOPE --> PROTECTED[Protected Test / Config / Contract Hash]
+    PROTECTED --> CONTRACTCHECK[Contract · Test · Build Verification]
+    CONTRACTCHECK --> RISK{Risk / Confidence Gate}
+
+    RISK -->|Low · Mid| HUMAN[Human Approval]
+    RISK -->|High| CREVIEW[Codex Diff Review]
+    CREVIEW --> HUMAN
+    HUMAN -->|승인| REHEARSAL[Integration Rehearsal]
+    HUMAN -->|거절| HOLD[변경 보류]
+    REHEARSAL --> MERGECHECK[Merge Scope + Ownership Check]
+    MS --> MERGECHECK
+    MERGECHECK -->|PASS| MAIN[main 반영 및 normal push]
+    MERGECHECK -->|FAIL| REJECT[Candidate Reject]
+```
+
+### Dynamic Write Expansion 흐름
+
+```mermaid
+sequenceDiagram
+    participant G as Gemini Worker
+    participant O as Orchestrator
+    participant P as Local Policy Engine
+    participant C as Codex/Human Review
+    participant V as Scope Verifier
+
+    G->>O: REQUEST_WRITE_EXPANSION(target, reason, evidence)
+    O->>P: 경로·dependency·ownership·민감도 검사
+
+    alt Tier 1 + 직접 dependency 증거
+        P-->>O: ALLOW_DERIVED
+        O-->>G: 해당 파일 Write Scope 추가
+        G->>G: 전체 재시작 없이 계속 구현
+    else Tier 2 Sensitive 또는 공용 파일
+        P-->>O: ESCALATE
+        O->>C: 근거와 위험 검토 요청
+        C-->>O: 승인 또는 거부
+        O-->>G: 제한적 허용 또는 수정 금지
+    else Tier 3 Forbidden / 다른 Worker 소유 / 근거 부족
+        P-->>O: DENY 또는 POLICY_VIOLATION
+        O-->>G: 수정 금지
+    end
+
+    G->>V: 최종 diff 제출
+    V->>V: 모든 변경 파일을 다시 분류
+    V-->>O: PASS 또는 WRITE_SCOPE_VIOLATION
+```
+
+다이어그램의 핵심은 다음 세 가지다.
+
+1. Initial Context에 없는 파일도 Repository 안에서 검색하고 읽을 수 있다.
+2. Write Scope 밖의 파일이 필요해도 Worker 전체를 재시작하지 않고 구조화된 확장 요청으로 처리한다.
+3. 실행 중 Write 허용과 최종 Merge 허용은 별도이며, 최종 diff를 Scope Verifier가 다시 판정한다.
+
 ### 첫 번째 구현 묶음
 
 1. 기존 `allowed_files`를 `write_scope.expected`로 해석하는 하위 호환 계층을 추가한다.
