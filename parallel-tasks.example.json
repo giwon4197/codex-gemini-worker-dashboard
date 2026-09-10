@@ -6,20 +6,98 @@
     {
       "id": "TASK-001",
       "name": "첫 번째 독립 작업",
+      "objective": "worker A 문서 생성",
       "prompt": "docs/worker-a.md 파일을 만들고 이 작업이 worker A에서 수행되었다고 한 줄로 기록하세요. 다른 파일은 수정하지 마세요.",
       "tier": "fast",
-      "allowed_files": ["docs/worker-a.md"],
-      "test_commands": ["if (-not (Test-Path -LiteralPath 'docs/worker-a.md')) { exit 1 }"],
+      "read_scope": {
+        "root": "task_worktree",
+        "mode": "project_wide_search",
+        "deny": [
+          ".env*",
+          "**/secrets/**",
+          "**/credentials/**",
+          ".git/**"
+        ]
+      },
+      "write_scope": {
+        "expected": [
+          "docs/worker-a.md"
+        ],
+        "derived_auto_expand": false,
+        "sensitive": [
+          "tests/**",
+          "package.json"
+        ],
+        "forbidden": [
+          ".env*",
+          "**/secrets/**",
+          ".git/**",
+          ".agent/**"
+        ]
+      },
+      "merge_scope": [
+        "docs/worker-a.md"
+      ],
+      "forbidden_operations": [
+        "git push",
+        "force push"
+      ],
+      "expected_change_scope": {
+        "files": 1,
+        "lines": 10
+      },
+      "test_commands": [
+        "if (-not (Test-Path -LiteralPath 'docs/worker-a.md')) { exit 1 }"
+      ],
       "timeout_seconds": 300,
       "retry_limit": 3
     },
     {
       "id": "TASK-002",
       "name": "두 번째 독립 작업",
+      "objective": "worker B 문서 생성",
       "prompt": "docs/worker-b.md 파일을 만들고 이 작업이 worker B에서 수행되었다고 한 줄로 기록하세요. 다른 파일은 수정하지 마세요.",
       "tier": "fast",
-      "allowed_files": ["docs/worker-b.md"],
-      "test_commands": ["if (-not (Test-Path -LiteralPath 'docs/worker-b.md')) { exit 1 }"],
+      "read_scope": {
+        "root": "task_worktree",
+        "mode": "project_wide_search",
+        "deny": [
+          ".env*",
+          "**/secrets/**",
+          "**/credentials/**",
+          ".git/**"
+        ]
+      },
+      "write_scope": {
+        "expected": [
+          "docs/worker-b.md"
+        ],
+        "derived_auto_expand": false,
+        "sensitive": [
+          "tests/**",
+          "package.json"
+        ],
+        "forbidden": [
+          ".env*",
+          "**/secrets/**",
+          ".git/**",
+          ".agent/**"
+        ]
+      },
+      "merge_scope": [
+        "docs/worker-b.md"
+      ],
+      "forbidden_operations": [
+        "git push",
+        "force push"
+      ],
+      "expected_change_scope": {
+        "files": 1,
+        "lines": 10
+      },
+      "test_commands": [
+        "if (-not (Test-Path -LiteralPath 'docs/worker-b.md')) { exit 1 }"
+      ],
       "timeout_seconds": 300,
       "retry_limit": 3
     }

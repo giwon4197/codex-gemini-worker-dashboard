@@ -13,7 +13,9 @@ param(
   [string]$DataDir = '',
   [string]$DashboardPath = '',
   [Parameter(Mandatory = $true, ParameterSetName = 'SyncOnly')]
-  [string]$SyncStateRoot = ''
+  [string]$SyncStateRoot = '',
+  [Parameter(Mandatory = $true, ParameterSetName = 'PolicyOnly')]
+  [switch]$ExportFunctionsOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -660,10 +662,340 @@ function Test-AllowedPath([string]$Path, $AllowedPatterns) {
     $pattern = ([string]$patternValue).Replace('\', '/')
     if ($pattern.EndsWith('/**')) {
       $prefix = $pattern.Substring(0, $pattern.Length - 3).TrimEnd('/')
-      if ($Path -eq $prefix -or $Path.StartsWith("$prefix/", [StringComparison]::OrdinalIgnoreCase)) { return $true }
-    } elseif ($Path -like $pattern) { return $true }
+      if ($prefix.StartsWith('**/')) {
+        $subPrefix = $prefix.Substring(3)
+        if ($Path -eq $subPrefix -or $Path.StartsWith("$subPrefix/", [StringComparison]::OrdinalIgnoreCase) -or $Path -match "(^|/)$([regex]::Escape($subPrefix))(/|$)") { return $true }
+      } else {
+        if ($Path -eq $prefix -or $Path.StartsWith("$prefix/", [StringComparison]::OrdinalIgnoreCase)) { return $true }
+      }
+    }
+    if ($Path -like $pattern) { return $true }
+    if ($pattern.StartsWith('**/') -and ($Path -like $pattern.Substring(3))) { return $true }
+    if ($pattern -match '\*\*/' -and ($Path -like ($pattern -replace '\*\*/', '*'))) { return $true }
   }
   return $false
+}
+
+function Test-SafeScopePath {
+  param(
+    [string]$Path,
+    [string]$ParamName = 'path',
+    [string]$TaskId = ''
+  )
+  $prefix = if ($TaskId) { "$($TaskId): " } else { "" }
+  if ([string]::IsNullOrWhiteSpace($Path)) {
+    throw "${prefix}안전하지 않은 ${ParamName} 경로: 빈 경로입니다."
+  }
+  $p = $Path.Replace('\', '/').Trim()
+
+  if ([System.IO.Path]::IsPathRooted($p) -or $p -match '^[a-zA-Z]:' -or $p.StartsWith('/') -or $p.StartsWith('\')) {
+    throw "${prefix}안전하지 않은 ${ParamName} 경로: $p"
+  }
+
+  if ($p -match '(^|/)\.\.(/|$)') {
+    throw "${prefix}안전하지 않은 ${ParamName} 경로: $p"
+  }
+
+  if ($p -match '^(\.git|\.agent)(/|$)') {
+    throw "${prefix}안전하지 않은 ${ParamName} 경로: $p"
+  }
+
+  if ($p -in @('*', '**', '**/*', './', '.')) {
+    throw "${prefix}안전하지 않은 ${ParamName} 경로: $p"
+  }
+
+  return $p
+}
+
+function Normalize-FilesystemPolicy {
+  param(
+    $Task
+  )
+
+  if ($null -eq $Task) { throw "Task가 null입니다." }
+  $taskId = [string]$Task.id
+
+  # 1. Determine write_scope.expected
+  $hasWriteScope = ($null -ne $Task.write_scope)
+  $hasAllowedFiles = ($null -ne $Task.allowed_files -and @($Task.allowed_files).Count -gt 0)
+
+  $rawExpected = @()
+  $scopeParamName = 'allowed_files'
+  if ($hasWriteScope -and ($null -ne $Task.write_scope.expected)) {
+    $rawExpected = @($Task.write_scope.expected)
+    $scopeParamName = 'write_scope'
+  } elseif ($hasAllowedFiles) {
+    $rawExpected = @($Task.allowed_files)
+    $scopeParamName = 'allowed_files'
+  } else {
+    if ($hasWriteScope) {
+      throw "$($taskId): write_scope.expected가 최소 하나 필요합니다."
+    } else {
+      throw "$($taskId): allowed_files가 최소 하나 필요합니다."
+    }
+  }
+
+  if ($rawExpected.Count -eq 0) {
+    if ($hasWriteScope) {
+      throw "$($taskId): write_scope.expected가 최소 하나 필요합니다."
+    } else {
+      throw "$($taskId): allowed_files가 최소 하나 필요합니다."
+    }
+  }
+
+  # Validate and normalize write_scope.expected
+  $normExpected = [System.Collections.Generic.List[string]]::new()
+  foreach ($pVal in $rawExpected) {
+    $safe = Test-SafeScopePath -Path ([string]$pVal) -ParamName $scopeParamName -TaskId $taskId
+    $normExpected.Add($safe)
+  }
+
+  # 2. write_scope fields
+  $derivedAutoExpand = $false
+  $normSensitive = @('tests/**', 'package.json', '**/*.config.*', 'db/migrations/**', 'src/security/**')
+  $normForbidden = @('.env*', '**/secrets/**', '**/credentials/**', '.git/**', '.agent/**')
+
+  if ($hasWriteScope) {
+    if ($null -ne $Task.write_scope.derived_auto_expand) {
+      $derivedAutoExpand = [bool]$Task.write_scope.derived_auto_expand
+    }
+    if ($null -ne $Task.write_scope.sensitive) {
+      $customSens = [System.Collections.Generic.List[string]]::new()
+      foreach ($sVal in @($Task.write_scope.sensitive)) {
+        $sStr = ([string]$sVal).Replace('\', '/').Trim()
+        if ([string]::IsNullOrWhiteSpace($sStr) -or [System.IO.Path]::IsPathRooted($sStr) -or $sStr -match '^[a-zA-Z]:' -or $sStr.StartsWith('/') -or $sStr -match '(^|/)\.\.(/|$)') {
+          throw "$($taskId): 안전하지 않은 write_scope.sensitive 경로: $sStr"
+        }
+        $customSens.Add($sStr)
+      }
+      $normSensitive = @($customSens)
+    }
+    if ($null -ne $Task.write_scope.forbidden) {
+      $customForb = [System.Collections.Generic.List[string]]::new()
+      foreach ($fVal in @($Task.write_scope.forbidden)) {
+        $fStr = ([string]$fVal).Replace('\', '/').Trim()
+        if ([string]::IsNullOrWhiteSpace($fStr) -or [System.IO.Path]::IsPathRooted($fStr) -or $fStr -match '^[a-zA-Z]:' -or $fStr.StartsWith('/') -or $fStr -match '(^|/)\.\.(/|$)') {
+          throw "$($taskId): 안전하지 않은 write_scope.forbidden 경로: $fStr"
+        }
+        $customForb.Add($fStr)
+      }
+      $normForbidden = @($customForb)
+    }
+  }
+
+  # Also validate allowed_files if present alongside write_scope
+  if ($hasWriteScope -and $hasAllowedFiles) {
+    foreach ($afVal in @($Task.allowed_files)) {
+      $null = Test-SafeScopePath -Path ([string]$afVal) -ParamName 'allowed_files' -TaskId $taskId
+    }
+  }
+
+  # 3. read_scope fields
+  $readRoot = 'task_worktree'
+  $readMode = 'project_wide_search'
+  $readDeny = @('.env*', '**/secrets/**', '**/credentials/**', '.git/**', '.agent/**')
+
+  if ($null -ne $Task.read_scope) {
+    if (-not [string]::IsNullOrWhiteSpace($Task.read_scope.root)) {
+      $rRoot = ([string]$Task.read_scope.root).Replace('\', '/').Trim()
+      if ([System.IO.Path]::IsPathRooted($rRoot) -or $rRoot -match '^[a-zA-Z]:' -or $rRoot.StartsWith('/') -or $rRoot -match '(^|/)\.\.(/|$)') {
+        throw "$($taskId): 안전하지 않은 read_scope.root 경로: $rRoot"
+      }
+      $readRoot = $rRoot
+    }
+    if (-not [string]::IsNullOrWhiteSpace($Task.read_scope.mode)) {
+      $readMode = [string]$Task.read_scope.mode
+    }
+    if ($null -ne $Task.read_scope.deny) {
+      $customDeny = [System.Collections.Generic.List[string]]::new()
+      foreach ($dVal in @($Task.read_scope.deny)) {
+        $dStr = ([string]$dVal).Replace('\', '/').Trim()
+        if ([string]::IsNullOrWhiteSpace($dStr) -or [System.IO.Path]::IsPathRooted($dStr) -or $dStr -match '^[a-zA-Z]:' -or $dStr.StartsWith('/') -or $dStr -match '(^|/)\.\.(/|$)') {
+          throw "$($taskId): 안전하지 않은 read_scope.deny 경로: $dStr"
+        }
+        $customDeny.Add($dStr)
+      }
+      $readDeny = @($customDeny)
+    }
+  }
+
+  # 4. merge_scope fields
+  $normMergeExpected = [System.Collections.Generic.List[string]]::new()
+  if ($null -ne $Task.merge_scope) {
+    $rawMerge = @()
+    if ($Task.merge_scope -is [array] -or ($Task.merge_scope.GetType().IsArray)) {
+      $rawMerge = @($Task.merge_scope)
+    } elseif ($null -ne $Task.merge_scope.expected) {
+      $rawMerge = @($Task.merge_scope.expected)
+    } elseif ($null -ne $Task.merge_scope.patterns) {
+      $rawMerge = @($Task.merge_scope.patterns)
+    }
+    foreach ($mVal in $rawMerge) {
+      $safeM = Test-SafeScopePath -Path ([string]$mVal) -ParamName 'merge_scope' -TaskId $taskId
+      $normMergeExpected.Add($safeM)
+    }
+  } else {
+    # Default: matches write_scope.expected
+    foreach ($exp in $normExpected) {
+      $normMergeExpected.Add($exp)
+    }
+  }
+
+  # 5. forbidden_operations
+  $forbiddenOps = @('git push', 'force push', 'disable tests', 'remove validation')
+  if ($null -ne $Task.forbidden_operations) {
+    $forbiddenOps = @($Task.forbidden_operations | ForEach-Object { [string]$_ })
+  }
+
+  # 6. expected_change_scope
+  $expectedChangeScope = $null
+  if ($null -ne $Task.expected_change_scope) {
+    $expectedChangeScope = [pscustomobject]@{
+      files = if ($null -ne $Task.expected_change_scope.files) { [int]$Task.expected_change_scope.files } else { 0 }
+      lines = if ($null -ne $Task.expected_change_scope.lines) { [int]$Task.expected_change_scope.lines } else { 0 }
+    }
+  }
+
+  return [pscustomobject]@{
+    filesystem_policy     = 'v2.1'
+    allowedFiles          = @($normExpected)
+    read_scope            = [pscustomobject]@{
+      root = $readRoot
+      mode = $readMode
+      deny = @($readDeny)
+    }
+    write_scope           = [pscustomobject]@{
+      expected            = @($normExpected)
+      derived_auto_expand = [bool]$derivedAutoExpand
+      sensitive           = @($normSensitive)
+      forbidden           = @($normForbidden)
+    }
+    merge_scope           = [pscustomobject]@{
+      expected = @($normMergeExpected)
+    }
+    forbidden_operations  = @($forbiddenOps)
+    expected_change_scope = $expectedChangeScope
+  }
+}
+
+function Get-PolicyViolations {
+  param(
+    [string[]]$ChangedFiles,
+    $Policy
+  )
+  $violations = [System.Collections.Generic.List[string]]::new()
+  $expectedWrite = @($Policy.write_scope.expected)
+  $forbiddenWrite = @($Policy.write_scope.forbidden)
+  $expectedMerge = @($Policy.merge_scope.expected)
+
+  foreach ($file in @($ChangedFiles)) {
+    if ([string]::IsNullOrWhiteSpace($file)) { continue }
+    $fNorm = $file.Replace('\', '/')
+
+    # 1. Must match write_scope.expected
+    $isExpected = Test-AllowedPath $fNorm $expectedWrite
+    if (-not $isExpected) {
+      $violations.Add($fNorm)
+      continue
+    }
+
+    # 2. Must not match write_scope.forbidden
+    if (Test-AllowedPath $fNorm $forbiddenWrite) {
+      $violations.Add($fNorm)
+      continue
+    }
+
+    # 3. Must match merge_scope.expected (independent merge scope enforcement)
+    if ($expectedMerge.Count -gt 0 -and (-not (Test-AllowedPath $fNorm $expectedMerge))) {
+      $violations.Add($fNorm)
+      continue
+    }
+  }
+  return @($violations | Select-Object -Unique)
+}
+
+function Test-ReadScopePermission {
+  param(
+    [string]$Path,
+    $Policy
+  )
+  if ([string]::IsNullOrWhiteSpace($Path) -or $null -eq $Policy) { return $false }
+  $pNorm = $Path.Replace('\', '/').Trim()
+  if ([System.IO.Path]::IsPathRooted($pNorm) -or $pNorm -match '^[a-zA-Z]:' -or $pNorm.StartsWith('/') -or $pNorm.StartsWith('\') -or $pNorm -match '(^|/)\.\.(/|$)') {
+    return $false
+  }
+  if (Test-AllowedPath $pNorm $Policy.read_scope.deny) {
+    return $false
+  }
+  return $true
+}
+
+function Test-WriteScopePermission {
+  param(
+    [string]$Path,
+    $Policy
+  )
+  if ([string]::IsNullOrWhiteSpace($Path) -or $null -eq $Policy) { return $false }
+  $pNorm = $Path.Replace('\', '/').Trim()
+  if ([System.IO.Path]::IsPathRooted($pNorm) -or $pNorm -match '^[a-zA-Z]:' -or $pNorm.StartsWith('/') -or $pNorm.StartsWith('\') -or $pNorm -match '(^|/)\.\.(/|$)') {
+    return $false
+  }
+  if (Test-AllowedPath $pNorm $Policy.write_scope.forbidden) {
+    return $false
+  }
+  return (Test-AllowedPath $pNorm $Policy.write_scope.expected)
+}
+
+function Test-MergeScopePermission {
+  param(
+    [string]$Path,
+    $Policy
+  )
+  if ([string]::IsNullOrWhiteSpace($Path) -or $null -eq $Policy) { return $false }
+  $pNorm = $Path.Replace('\', '/').Trim()
+  if ([System.IO.Path]::IsPathRooted($pNorm) -or $pNorm -match '^[a-zA-Z]:' -or $pNorm.StartsWith('/') -or $pNorm.StartsWith('\') -or $pNorm -match '(^|/)\.\.(/|$)') {
+    return $false
+  }
+  return (Test-AllowedPath $pNorm $Policy.merge_scope.expected)
+}
+
+function Get-CompactPolicyState {
+  param(
+    $Policy,
+    [string[]]$ChangedFiles = @(),
+    [string[]]$Violations = @(),
+    [int]$FilesRead = 0,
+    [int]$SearchCalls = 0,
+    [int]$ExpansionRequested = 0,
+    [int]$ExpansionApproved = 0,
+    [int]$ExpansionDenied = 0,
+    [int]$CodexEscalated = 0
+  )
+
+  $expectedCount = @($Policy.write_scope.expected).Count
+  $sensitiveTouched = 0
+  if ($null -ne $Policy.write_scope.sensitive -and @($ChangedFiles).Count -gt 0) {
+    $sensitiveTouched = @($ChangedFiles | Where-Object { Test-AllowedPath $_ $Policy.write_scope.sensitive }).Count
+  }
+  $violCount = @($Violations).Count
+
+  return [pscustomobject]@{
+    filesystem_policy = 'v2.1'
+    files_read        = [int]$FilesRead
+    search_calls      = [int]$SearchCalls
+    write_scope       = [pscustomobject]@{
+      expected          = [int]$expectedCount
+      derived_approved  = 0
+      sensitive_touched = [int]$sensitiveTouched
+      violations        = [int]$violCount
+    }
+    expansion         = [pscustomobject]@{
+      requested       = [int]$ExpansionRequested
+      approved        = [int]$ExpansionApproved
+      denied          = [int]$ExpansionDenied
+      codex_escalated = [int]$CodexEscalated
+    }
+  }
 }
 
 function Invoke-Verification([string]$Worktree, $Commands, [int]$DefaultTimeoutSeconds = 120) {
@@ -745,6 +1077,10 @@ function Repair-OrphanedRuns([string]$AgentRoot, [string]$RepositoryRoot) {
   & git -C $RepositoryRoot worktree prune
 }
 
+if ($ExportFunctionsOnly) {
+  return
+}
+
 $repoRoot = (& git -C $Repository rev-parse --show-toplevel 2>$null)
 if ($LASTEXITCODE -ne 0 -or -not $repoRoot) { throw "Git 저장소가 아닙니다: $Repository" }
 $repoRoot = $repoRoot.Trim()
@@ -766,8 +1102,17 @@ if ($taskConfig -is [array]) {
 if ($tasks.Count -eq 0) { throw '작업 파일에 task가 없습니다.' }
 $ids = @($tasks | ForEach-Object { $_.id })
 if (($ids | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count -gt 0 -or ($ids | Select-Object -Unique).Count -ne $ids.Count) { throw '각 task에는 고유한 id가 필요합니다.' }
+
+$allOwnership = @{}
+$normalizedPolicies = @{}
 foreach ($task in $tasks) {
-  if (@($task.allowed_files).Count -eq 0) { throw "$($task.id): allowed_files가 최소 하나 필요합니다." }
+  $normPolicy = Normalize-FilesystemPolicy $task
+  $normalizedPolicies[$task.id] = $normPolicy
+  foreach ($pathValue in @($normPolicy.write_scope.expected)) {
+    $key = ([string]$pathValue).Replace('\', '/').ToLowerInvariant()
+    if ($allOwnership.ContainsKey($key)) { throw "OWNERSHIP_OVERLAP: $key ($($allOwnership[$key]), $($task.id))" }
+    $allOwnership[$key] = $task.id
+  }
 }
 
 $runId = (Get-Date).ToString('yyyyMMdd-HHmmss') + '-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
@@ -778,6 +1123,7 @@ New-Item -ItemType Directory -Path (Join-Path $runRoot 'tasks'), (Join-Path $run
 $baseCommit = (& git -C $repoRoot rev-parse HEAD).Trim()
 $manifest = [pscustomobject]@{
   runId = $runId; status = 'preparing'; createdAt = (Get-Date).ToString('o'); updatedAt = (Get-Date).ToString('o')
+  filesystem_policy = 'v2.1'
   repository = $repoRoot; baseCommit = $baseCommit; maxWorkers = $MaxWorkers; orchestratorProcessId = $PID
   tasks = @($tasks | ForEach-Object { $_.id }); worktrees = @()
   tasksFile = $tasksPath; integrationTestCommands = @($integrationTestCommands)
@@ -803,8 +1149,12 @@ try {
     $wtRecord = [pscustomobject]@{ id = $task.id; branch = $branch; path = $worktree; baseCommit = $baseCommit }
     $worktrees += $wtRecord
     $manifest.worktrees = $worktrees; $manifest.updatedAt = (Get-Date).ToString('o'); Write-AtomicJson $manifestPath $manifest
+    $taskNormPolicy = $normalizedPolicies[$task.id]
     Write-AtomicJson (Join-Path $runRoot "tasks\$safeId.json") ([pscustomobject]@{
-      id = $task.id; name = $task.name; prompt = $task.prompt; tier = $task.tier; allowedFiles = @($task.allowed_files)
+      id = $task.id; name = $task.name; prompt = $task.prompt; tier = $task.tier
+      allowedFiles = @($taskNormPolicy.write_scope.expected)
+      policy = $taskNormPolicy
+      filesystem_policy = 'v2.1'
       testCommands = @($task.test_commands); timeoutSeconds = if ($task.timeout_seconds) { [int]$task.timeout_seconds } else { $WorkerTimeoutSeconds }
       retryLimit = if ($null -ne $task.retry_limit) { [math]::Min(3, [math]::Max(0, [int]$task.retry_limit)) } else { 3 }
       branch = $branch; worktree = $worktree; baseCommit = $baseCommit
@@ -888,8 +1238,9 @@ try {
       $state = if (Test-Path -LiteralPath $statePath) { Get-Content -Raw -LiteralPath $statePath | ConvertFrom-Json } else { [pscustomobject]@{ runId=$runId; taskId=$task.id; task=$task.name; status='failed'; error='워커 상태 파일이 생성되지 않음' } }
       $wasCancelled = Test-Path -LiteralPath $cancelPath
       $wasTimedOut = $record -and $record.TimedOut
+      $normPolicy = if ($normalizedPolicies.ContainsKey($task.id)) { $normalizedPolicies[$task.id] } else { Normalize-FilesystemPolicy $task }
       $changed = @(Get-ChangedFiles $wt.path $baseCommit)
-      $violations = @($changed | Where-Object { -not (Test-AllowedPath $_ @($task.allowed_files)) })
+      $violations = @(Get-PolicyViolations -ChangedFiles $changed -Policy $normPolicy)
       $tests = if (-not $wasCancelled -and -not $wasTimedOut -and $state.status -eq 'completed' -and $violations.Count -eq 0) { @(Invoke-Verification $wt.path @($task.test_commands)) } else { @() }
       $branchEvtPath = Join-Path $runRoot "events\$safeId.ndjson"
       if ($tests -and $tests.Count -gt 0 -and (Test-Path -LiteralPath $branchEvtPath)) {
@@ -1031,7 +1382,22 @@ $compressed
     Set-ObjectProperty $state 'attempt' $attempt; Set-ObjectProperty $state 'retryLimit' $retryLimit; Set-ObjectProperty $state 'retryHistory' $history
     Set-ObjectProperty $state 'changedFiles' $changed
     Set-ObjectProperty $state 'commitHashes' $commitHashes
-    Set-ObjectProperty $state 'policy' ([pscustomobject]@{ allowedFiles=@($task.allowed_files); violations=$violations; status=if($violations.Count){'FAIL'}else{'PASS'} })
+    $policyStatus = if ($violations.Count -gt 0) { 'FAIL' } else { 'PASS' }
+    $compactSummary = Get-CompactPolicyState -Policy $normPolicy -ChangedFiles $changed -Violations $violations
+    $recordedPolicy = [pscustomobject]@{
+      filesystem_policy     = 'v2.1'
+      allowedFiles          = @($normPolicy.write_scope.expected)
+      read_scope            = $normPolicy.read_scope
+      write_scope           = $normPolicy.write_scope
+      merge_scope           = $normPolicy.merge_scope
+      forbidden_operations  = @($normPolicy.forbidden_operations)
+      expected_change_scope = $normPolicy.expected_change_scope
+      violations            = @($violations)
+      status                = $policyStatus
+      compact               = $compactSummary
+    }
+    Set-ObjectProperty $state 'policy' $recordedPolicy
+    Set-ObjectProperty $state 'filesystem_policy' 'v2.1'
     Set-ObjectProperty $state 'verification' ([pscustomobject]@{ decision=$decision; commands=$tests; verifiedAt=(Get-Date).ToString('o') })
     Set-ObjectProperty $state 'escalation' $(if ($decision -eq 'PASS') { $null } else { [pscustomobject]@{ requiresCodex=$true; category=$decision; reason="자동 처리 중단: $decision" } })
     Set-ObjectProperty $state 'updatedAt' (Get-Date).ToString('o')
@@ -1080,6 +1446,7 @@ $compressed
       $diffStat = @(& git -C $integrationPath diff --stat "$baseCommit...HEAD") -join "`n"
       $integrationCommits = @(& git -C $integrationPath rev-list --reverse "$baseCommit..HEAD")
       $integration = [pscustomobject]@{
+        filesystem_policy='v2.1'
         id="$runId-integration"; parentIds=@($tasks | ForEach-Object { "$([string]$_.id)-branch" }); startedAt=(Get-Date).ToString('o')
         branch=$integrationBranch; worktree=$integrationPath; baseCommit=$baseCommit; headCommit=(& git -C $integrationPath rev-parse HEAD).Trim()
         decision=$integrationDecision; approvalRequired=$true; mainModified=$false; cherryPicks=$cherryPicks
@@ -1102,6 +1469,7 @@ $compressed
 
   Sync-LiveWorkers $runRoot
   Update-DashboardUsage -RunRoot $runRoot -DashboardPath $dashboardPath
+  Set-ObjectProperty $manifest 'filesystem_policy' 'v2.1'
   $manifest.status = if (Test-Path -LiteralPath $cancelPath) { 'cancelled' } elseif ($failed -gt 0) { 'failed' } elseif ($integration -and $integration.decision -eq 'AWAITING_CODEX_REVIEW') { 'awaiting_review' } else { 'completed' }
   $manifest.updatedAt = (Get-Date).ToString('o'); Write-AtomicJson $manifestPath $manifest
   Write-Output "Run: $runId"; Write-Output "State: $runRoot"; Write-Output "Status: $($manifest.status)"
