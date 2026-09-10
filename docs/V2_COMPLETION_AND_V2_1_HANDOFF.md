@@ -4,6 +4,244 @@
 
 이 문서는 v2 기반 안정화가 끝난 뒤 시스템이 실제로 어떻게 작동하는지 설명하고, 다음 협업자가 v2.1 Filesystem Policy 구현을 바로 시작할 수 있도록 작업 경계와 검증 기준을 제공한다.
 
+## 인수인계 핵심 요약
+
+### 우리가 최종적으로 만들려는 것
+
+이 프로젝트의 목표는 단순히 Codex와 Gemini를 한 화면에 연결하는 것이 아니다.
+
+> **Codex는 설계·진단·고위험 검토에 집중하고, Gemini는 격리된 환경에서 구현하며, 기계적으로 판정 가능한 검증과 Git 전달은 Orchestrator가 담당하는 비용 효율적인 로컬 개발 시스템을 만든다.**
+
+사용자가 자연어로 작업을 요청하면 시스템은 다음을 자동으로 수행해야 한다.
+
+```text
+요청 분류
+  → 필요한 경우 Codex 계획
+  → 사용자 승인
+  → Gemini Worker 구현
+  → 테스트·범위·정책 검증
+  → 실패 원인별 재시도 또는 Codex 진단
+  → 통합 후보 생성
+  → 최종 사용자 승인
+  → main 반영과 GitHub push
+```
+
+이 과정에서 Codex가 Worker의 진행을 계속 조회하거나 직접 구현을 대신하지 않아야 한다. 진행 상태는 Worker와 Orchestrator가 이벤트로 기록하고 Dashboard 또는 향후 VS Code Extension이 이를 직접 표시한다.
+
+### v2.1의 직접적인 목표
+
+v2.1은 새로운 멀티 에이전트 시스템을 다시 만드는 버전이 아니다. v2에서 완성한 격리 실행, 검증, Git 전달 기반 위에 **파일 접근 정책을 정교하게 추가하는 보완 버전**이다.
+
+해결하려는 문제는 다음과 같다.
+
+```text
+Context Compiler가 필요한 파일 하나를 누락
+  → Gemini가 파일을 읽거나 수정하지 못함
+  → 작업 중단
+  → Codex 재호출
+  → Gemini 전체 재실행
+  → 시간과 토큰 낭비
+```
+
+v2.1의 목표 흐름은 다음과 같다.
+
+```text
+좁은 Initial Context로 시작
+  → 저장소 전체에서 필요한 파일 Search/Read
+  → 예상 파일은 즉시 수정
+  → 추가 수정은 구조화된 Write Expansion 요청
+  → Local Policy Engine이 대부분 기계적으로 판정
+  → 최종 diff를 다시 검증한 뒤에만 Merge 후보 허용
+```
+
+즉, **탐색 자유도는 높이되 변경과 병합 권한은 좁고 검증 가능하게 유지하는 것**이 v2.1의 핵심 목표다.
+
+### 핵심 차별점
+
+| 비교 대상 | 일반적인 방식 | 이 프로젝트의 v2.1 방식 |
+|---|---|---|
+| AI 역할 | 한 모델이 계획·구현·검토를 모두 수행 | Codex는 설계·진단·검토, Gemini는 구현으로 역할 분리 |
+| 파일 컨텍스트 | 전체 저장소를 모두 전달하거나 선택 파일만 고정 | 작은 Initial Context로 시작하고 Repository Search/Read 허용 |
+| 파일 권한 | 저장소 전체 Write 또는 고정된 `allowed_files` | Read, Write, Merge Scope를 독립적으로 관리 |
+| 추가 파일 필요 | 권한 오류로 중단하거나 Worker 전체 재시작 | `REQUEST_WRITE_EXPANSION`으로 실행 중 범위 확장 |
+| 범위 확장 판정 | 매번 LLM이나 사용자가 판단 | 직접 dependency는 Local Policy Engine이 결정적으로 판정 |
+| 성공 판정 | 모델의 “완료” 응답이나 테스트 PASS에 의존 | Scope, Contract, Protected Files, Test, Build를 독립 검증 |
+| 테스트 수정 | Worker가 테스트를 바꿔 False Pass 가능 | Protected Test/Verifier snapshot으로 비의도적 변경 탐지 |
+| 병렬 작업 | 같은 저장소에서 충돌 가능 | 독립 worktree와 Write Ownership으로 충돌 통제 |
+| Codex 비용 | 진행 확인과 단순 오류에도 반복 호출 | 구조적·고위험 판단에만 일시적으로 호출 |
+| Git 반영 | Agent가 직접 main 또는 remote 수정 가능 | Candidate와 rehearsal을 거쳐 사용자 승인 후에만 반영 |
+
+가장 중요한 차별점은 다음 문장으로 요약한다.
+
+> **Repository를 볼 수 있는 범위, 수정할 수 있는 범위, 최종 병합할 수 있는 범위는 서로 다르다.**
+
+### v2와 v2.1의 차이
+
+| 구분 | v2 | v2.1 |
+|---|---|---|
+| 중심 관심사 | Worker를 안전하게 실행하고 검증·전달 | Worker가 필요한 파일을 찾고 안전하게 수정 범위를 확장 |
+| 파일 선택 | `allowed_files` 중심의 고정 범위 | Broad Read + Scoped Write + Dynamic Expansion |
+| Context Compiler | 사실상 볼 수 있는 파일을 결정 | 처음 볼 관련 파일만 추천하는 Relevance Optimizer |
+| 추가 파일 필요 시 | 중단·재계획·재실행 가능성 큼 | Worker를 유지한 채 확장 요청 처리 |
+| 최종 범위 검증 | 허용 파일 여부 중심 | Expected, Derived, Sensitive, Forbidden으로 재분류 |
+| 병렬 안전성 | 독립 worktree 중심 | 독립 worktree + 파일 Write Ownership |
+
+v2.1은 v2를 대체하지 않는다. v2의 실행 안전성을 유지하면서 파일 탐색과 수정 정책만 확장한다.
+
+### 성공했을 때 기대되는 효과
+
+- Initial Context 누락 때문에 작업이 멈추는 비율 감소
+- Gemini Worker 전체 재실행 횟수 감소
+- 단순 파일 탐색과 직접 dependency 처리에 사용하는 Codex 호출 감소
+- 첫 시도 완료율 상승
+- 평균 완료 시간과 AI 토큰 소비 감소
+- 저장소 전체 Write 권한 없이도 Repository-aware 구현 가능
+- 예상하지 않은 변경과 정책 위반은 증가하지 않음
+
+핵심 측정 지표는 다음 세 가지다.
+
+1. `Context-related Stop Rate` 감소
+2. `Codex Calls / Successful Task` 감소
+3. `Unexpected Scope Rate` 유지 또는 감소
+
+### 이번 인수인계 범위가 아닌 것
+
+협업자는 v2.1을 다음 기능으로 확대하지 않는다.
+
+- 로컬 AI 모델 학습 또는 Fine-tuning
+- Neural Router, 강화학습, Contextual Bandit
+- Repository Memory 전체 재설계
+- 무제한 Repository Write
+- 사용자 승인 없는 main 병합 또는 자동 remote push
+- 조직용 다중 사용자 협업 플랫폼
+
+v2.1은 Rule-based Orchestrator를 유지하면서 Filesystem Policy와 Scope Policy를 개선하는 작업이다.
+
+### v2.1 완료 시 목표 시스템
+
+아래 그림은 v2.1 구현이 끝났을 때 도달해야 하는 최종 구조다. 개별 함수나 파일 배치가 아니라, 사용자 요청이 어떤 책임 경계를 거쳐 안전한 Git 결과가 되는지를 나타낸다.
+
+```mermaid
+flowchart TB
+    USER[사용자<br/>자연어 요청 · 승인 · 최종 결정]
+
+    subgraph UI[사용자 인터페이스]
+        WEB[Web Workspace]
+        EXT[VS Code Extension]
+        VIEW[실시간 Run · Worker · Diff · Usage]
+        WEB --> VIEW
+        EXT --> VIEW
+    end
+
+    subgraph CORE[공용 Orchestrator Core]
+        TRIAGE[Task Triage]
+        STATE[Persistent Run / Event Store]
+        CONTRACT[Task Contract v2.1]
+        CONTEXT[Context Compiler<br/>Relevance Optimizer]
+        ROUTER[Adaptive Rule-based Router]
+        POLICY[Filesystem Policy Engine<br/>Read · Write · Merge]
+        RETRY[Failure Classifier<br/>Retry · Escalation]
+    end
+
+    subgraph AI[선택적으로 호출되는 AI]
+        CODEX[Codex<br/>Planning · Structural Diagnosis<br/>High-risk Review]
+        GEMINI[Gemini Worker<br/>Repository-aware Implementation]
+    end
+
+    subgraph EXEC[격리 실행 영역]
+        WT[Task Git Worktree]
+        READ[Broad Search / Read]
+        WRITE[Scoped Write]
+        EXPAND[Dynamic Write Expansion]
+        OWNER[Parallel Write Ownership]
+    end
+
+    subgraph VERIFY[AI와 분리된 결정적 검증]
+        SCOPE[Scope Verifier]
+        SNAP[Protected Test / Config Snapshot]
+        TEST[Test · Lint · Build]
+        RISK[Risk / Confidence Gate]
+    end
+
+    subgraph DELIVERY[안전한 Git 전달]
+        CANDIDATE[Candidate Commit]
+        REHEARSAL[Integration Rehearsal]
+        APPROVAL[Human Approval]
+        MAIN[main]
+        PUSH[Normal GitHub Push]
+    end
+
+    USER --> UI
+    UI --> TRIAGE
+    TRIAGE -->|계획 필요| CODEX
+    CODEX --> CONTRACT
+    TRIAGE -->|명확한 작업| CONTRACT
+    CONTRACT --> CONTEXT
+    CONTRACT --> POLICY
+    CONTEXT --> ROUTER
+    ROUTER --> GEMINI
+
+    GEMINI --> WT
+    WT --> READ
+    READ --> GEMINI
+    GEMINI --> WRITE
+    WRITE -->|범위 밖 수정 필요| EXPAND
+    EXPAND --> POLICY
+    POLICY -->|Derived 허용| WRITE
+    POLICY -->|Sensitive| CODEX
+    POLICY -->|Forbidden| RETRY
+    OWNER --> POLICY
+
+    WRITE --> SCOPE
+    SCOPE --> SNAP
+    SNAP --> TEST
+    TEST -->|실패| RETRY
+    RETRY -->|Simple| GEMINI
+    RETRY -->|Structural / High Risk| CODEX
+    TEST -->|통과| RISK
+    RISK -->|High| CODEX
+    RISK -->|Low / Mid| CANDIDATE
+    CODEX -->|검토 통과| CANDIDATE
+
+    CANDIDATE --> REHEARSAL
+    REHEARSAL --> APPROVAL
+    APPROVAL -->|승인| MAIN
+    APPROVAL -->|거절| RETRY
+    MAIN --> PUSH
+
+    TRIAGE --> STATE
+    CONTRACT --> STATE
+    GEMINI --> STATE
+    POLICY --> STATE
+    RISK --> STATE
+    REHEARSAL --> STATE
+    STATE --> VIEW
+```
+
+완료된 시스템에서 사용자가 체감해야 하는 결과는 다음과 같다.
+
+```text
+사용자는 한 번 요청하고 승인한다.
+        ↓
+Codex는 필요한 순간에만 계획·진단·검토한다.
+        ↓
+Gemini는 Repository를 탐색하며 구현을 끝까지 수행한다.
+        ↓
+추가 파일이 필요해도 전체 작업을 다시 시작하지 않는다.
+        ↓
+정책과 테스트는 AI의 주장과 독립적으로 검증된다.
+        ↓
+진행 상황은 Web 또는 Extension에서 자동으로 보인다.
+        ↓
+최종 승인 전에는 main과 GitHub가 변경되지 않는다.
+        ↓
+승인 후 충돌 검사와 rehearsal을 통과한 결과만 반영된다.
+```
+
+따라서 v2.1 완료의 의미는 “파일 권한 기능이 추가됨”이 아니라 다음 상태에 도달했다는 뜻이다.
+
+> **Gemini가 저장소를 이해하며 자율적으로 구현할 수 있지만, 수정 범위·검증·병합 결정은 deterministic policy와 사용자 통제 아래 있는 상태.**
+
 함께 읽을 문서:
 
 - [V2_ARCHITECTURE.md](V2_ARCHITECTURE.md): v2 전체 설계
