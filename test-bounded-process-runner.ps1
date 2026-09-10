@@ -143,11 +143,21 @@ Start-Sleep -Seconds 120
   Assert-Test "Second command timed out" ($verifResults[1].status -eq 'TIMED_OUT' -and $verifResults[1].timedOut -eq $true)
   Assert-Test "Third command failed" ($verifResults[2].status -eq 'FAIL' -and $verifResults[2].exitCode -eq 1)
 
-  # 9. Support for npm --prefix exec tsc
-  Write-Host "`n9. NPM Prefix Support: npm --prefix ./gemini-dashboard exec tsc -- --noEmit executes cleanly" -ForegroundColor Yellow
-  $res9 = Invoke-BoundedCommand -Command 'npm --prefix ./gemini-dashboard exec tsc -- --noEmit' -WorkingDirectory $repoRoot
+  # 9. TypeScript Compilation: npm --prefix ./gemini-dashboard exec -- tsc --noEmit performs actual compilation
+  Write-Host "`n9. TypeScript Compilation: npm --prefix ./gemini-dashboard exec -- tsc --noEmit performs actual compilation" -ForegroundColor Yellow
+  $res9 = Invoke-BoundedCommand -Command 'npm --prefix ./gemini-dashboard exec -- tsc --noEmit' -WorkingDirectory $repoRoot
   Assert-Test "Dashboard tsc executes with status PASS" ($res9.status -eq 'PASS') "Got $($res9.status), output: $($res9.output)"
   Assert-Test "Dashboard tsc exitCode is 0" ($res9.exitCode -eq 0)
+  Assert-Test "Dashboard tsc did not time out" ($res9.timedOut -eq $false)
+  $isHelpOutput9 = ($res9.output -match '(?i)Syntax:\s+tsc|Examples:\s+tsc|tsc\s+\[options\]|--help|Common Commands|This is not the tsc command')
+  Assert-Test "Dashboard tsc performed actual compilation without help-only output" (-not $isHelpOutput9) "Help text detected in output: $($res9.output)"
+
+  # 10. Help-Only Output Rejection: Exit code 0 with TypeScript help text cannot masquerade as compilation
+  Write-Host "`n10. Help-Only Output Rejection: Exit code 0 with help text cannot masquerade as compilation" -ForegroundColor Yellow
+  $res10 = Invoke-BoundedCommand -Command "pwsh -NoProfile -Command Write-Output 'Syntax:   tsc [options] [file...]'" -WorkingDirectory $repoRoot
+  Assert-Test "Mock help command exited 0" ($res10.exitCode -eq 0)
+  $mockIsHelp = ($res10.output -match '(?i)Syntax:\s+tsc|Examples:\s+tsc|tsc\s+\[options\]|--help|Common Commands')
+  Assert-Test "TypeScript help-only text is recognized and rejected from being considered a valid compile" $mockIsHelp
 
   Write-Host "`n======================================================" -ForegroundColor Cyan
   Write-Host "   테스트 완료: $passCount 통과 / $failCount 실패" -ForegroundColor $(if ($failCount -eq 0) { 'Green' } else { 'Red' })

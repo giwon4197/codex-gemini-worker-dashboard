@@ -612,6 +612,80 @@ try {
   $remoteFinal13 = (& git -C $case13.LocalDir rev-parse refs/remotes/origin/main).Trim()
   Assert-Test "Remote origin/main updated after recovery" ($remoteFinal13 -eq $candCommit13)
 
+  # 14. Verification Ordering & Pre-Delivery Non-Advancement: Multi-command failure preserves main and remote
+  Write-Host "`n14. Verification Ordering: Fallible verification strictly precedes local main advancement" -ForegroundColor Yellow
+  $case14Dir = Join-Path $testTempRoot 'case14-ordering'
+  $case14 = New-IsolatedTestRepo $case14Dir
+  $baseCommit14 = (& git -C $case14.LocalDir rev-parse HEAD).Trim()
+
+  $integBranch14 = 'integration/run-014'
+  & git -C $case14.LocalDir switch -c $integBranch14 $baseCommit14 2>$null | Out-Null
+  [IO.File]::WriteAllText((Join-Path $case14.LocalDir 'ordering.txt'), 'ordering test', [Text.Encoding]::UTF8)
+  & git -C $case14.LocalDir add ordering.txt
+  & git -C $case14.LocalDir commit -m "ordering commit" 2>$null | Out-Null
+  $candCommit14 = (& git -C $case14.LocalDir rev-parse HEAD).Trim()
+  & git -C $case14.LocalDir switch main 2>$null | Out-Null
+
+  # Command 1 passes and asserts local main ref has NOT advanced yet.
+  # Command 2 fails and also asserts local main ref has NOT advanced yet.
+  # If any fallible verification was deferred until after local main advances, local main would already be $candCommit14.
+  $case14RepoPath = $case14.LocalDir.Replace('\', '/')
+  $orderCmd1 = "pwsh -NoProfile -Command `"`$lm = (git -C '$case14RepoPath' rev-parse refs/heads/main).Trim(); if (`$lm -ne '$baseCommit14') { exit 91 } else { exit 0 }`""
+  $orderCmd2 = "pwsh -NoProfile -Command `"`$lm = (git -C '$case14RepoPath' rev-parse refs/heads/main).Trim(); if (`$lm -ne '$baseCommit14') { exit 92 } else { exit 42 }`""
+  $manifest14 = Setup-MockRun $case14.LocalDir 'run-014' $baseCommit14 $integBranch14 @('ordering.txt') @($orderCmd1, $orderCmd2) 'PASS'
+
+  $out14 = @(& pwsh -NoProfile -File $reviewScript -RunId 'run-014' -Repository $case14.LocalDir -AutoDeliver -SkipCodexReview 2>&1)
+  $exit14 = $LASTEXITCODE
+
+  Assert-Test "Delivery fails on second verification command" ($exit14 -ne 0)
+  $mainCurrent14 = (& git -C $case14.LocalDir rev-parse refs/heads/main).Trim()
+  Assert-Test "Local main remains at baseCommit when verification fails" ($mainCurrent14 -eq $baseCommit14)
+  $remoteMainCurrent14 = (& git -C $case14.LocalDir rev-parse refs/remotes/origin/main).Trim()
+  Assert-Test "Remote main remains at baseCommit when verification fails" ($remoteMainCurrent14 -eq $baseCommit14)
+  $diagObj14 = Get-Content -Raw -LiteralPath (Join-Path $case14.LocalDir '.agent\runs\run-014\delivery-diagnostic.json') | ConvertFrom-Json
+  Assert-Test "Diagnostic records failure of second command with exit code 42" ($diagObj14.details.exitCode -eq 42) "Got exitCode: $($diagObj14.details.exitCode)"
+  Assert-Test "No ordering violation (exit code was not 91 or 92)" ($diagObj14.details.exitCode -notin @(91, 92))
+
+  # 15. Multi-command Timeout Ordering: Earlier pass followed by timeout leaves refs unchanged
+  Write-Host "`n15. Multi-command Timeout Ordering: Pass followed by timeout preserves refs" -ForegroundColor Yellow
+  $case15Dir = Join-Path $testTempRoot 'case15-timeout-order'
+  $case15 = New-IsolatedTestRepo $case15Dir
+  $baseCommit15 = (& git -C $case15.LocalDir rev-parse HEAD).Trim()
+
+  $integBranch15 = 'integration/run-015'
+  & git -C $case15.LocalDir switch -c $integBranch15 $baseCommit15 2>$null | Out-Null
+  [IO.File]::WriteAllText((Join-Path $case15.LocalDir 'timeout-order.txt'), 'timeout order', [Text.Encoding]::UTF8)
+  & git -C $case15.LocalDir add timeout-order.txt
+  & git -C $case15.LocalDir commit -m "timeout order commit" 2>$null | Out-Null
+  $candCommit15 = (& git -C $case15.LocalDir rev-parse HEAD).Trim()
+  & git -C $case15.LocalDir switch main 2>$null | Out-Null
+
+  $cmdPass15 = "pwsh -NoProfile -Command exit 0"
+  $cmdTimeout15 = [pscustomobject]@{
+    command = "pwsh -NoProfile -Command Start-Sleep -Seconds 60"
+    timeoutSeconds = 2
+  }
+  $manifest15 = Setup-MockRun $case15.LocalDir 'run-015' $baseCommit15 $integBranch15 @('timeout-order.txt') @($cmdPass15, $cmdTimeout15) 'PASS'
+
+  $out15 = @(& pwsh -NoProfile -File $reviewScript -RunId 'run-015' -Repository $case15.LocalDir -AutoDeliver -SkipCodexReview 2>&1)
+  $exit15 = $LASTEXITCODE
+
+  Assert-Test "Multi-command delivery fails on timeout" ($exit15 -ne 0)
+  $mainCurrent15 = (& git -C $case15.LocalDir rev-parse refs/heads/main).Trim()
+  Assert-Test "Local main remains at baseCommit on multi-command timeout" ($mainCurrent15 -eq $baseCommit15)
+  $remoteMainCurrent15 = (& git -C $case15.LocalDir rev-parse refs/remotes/origin/main).Trim()
+  Assert-Test "Remote main remains at baseCommit on multi-command timeout" ($remoteMainCurrent15 -eq $baseCommit15)
+  $diagObj15 = Get-Content -Raw -LiteralPath (Join-Path $case15.LocalDir '.agent\runs\run-015\delivery-diagnostic.json') | ConvertFrom-Json
+  Assert-Test "Diagnostic records timeout failure" ($diagObj15.details.timedOut -eq $true)
+
+  # 16. Post-Main Invariant Only: No application verification after local main advances
+  Write-Host "`n16. Post-Main Invariants: Only deterministic Git invariants execute after main advances" -ForegroundColor Yellow
+  $reviewContent = Get-Content -Raw -LiteralPath $reviewScript
+  $mergeIndex = $reviewContent.IndexOf('merge --ff-only')
+  $postMergeContent = if ($mergeIndex -gt 0) { $reviewContent.Substring($mergeIndex) } else { '' }
+  $hasPostMergeAppVerify = ($postMergeContent -match 'Invoke-Verification')
+  Assert-Test "Zero application verification invocations after git merge --ff-only" (-not $hasPostMergeAppVerify)
+
   Write-Host "`n======================================================" -ForegroundColor Cyan
   Write-Host "   테스트 완료: $passCount 통과 / $failCount 실패" -ForegroundColor $(if ($failCount -eq 0) { 'Green' } else { 'Red' })
   Write-Host "======================================================" -ForegroundColor Cyan

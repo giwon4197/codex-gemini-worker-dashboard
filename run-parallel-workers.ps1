@@ -795,6 +795,11 @@ try {
     $worktree = Join-Path $worktreeRoot $safeId
     & git -C $repoRoot worktree add -b $branch $worktree $baseCommit
     if ($LASTEXITCODE -ne 0) { throw "worktree 생성 실패: $($task.id)" }
+    $srcNm = Join-Path $repoRoot 'gemini-dashboard\node_modules'
+    $dstNm = Join-Path $worktree 'gemini-dashboard\node_modules'
+    if ((Test-Path -LiteralPath $srcNm) -and (Test-Path -LiteralPath (Join-Path $worktree 'gemini-dashboard')) -and (-not (Test-Path -LiteralPath $dstNm))) {
+      try { New-Item -ItemType Junction -Path $dstNm -Target $srcNm -Force -ErrorAction SilentlyContinue | Out-Null } catch {}
+    }
     $wtRecord = [pscustomobject]@{ id = $task.id; branch = $branch; path = $worktree; baseCommit = $baseCommit }
     $worktrees += $wtRecord
     $manifest.worktrees = $worktrees; $manifest.updatedAt = (Get-Date).ToString('o'); Write-AtomicJson $manifestPath $manifest
@@ -899,17 +904,43 @@ try {
             taskId    = $task.id
             attempt   = $attempt
             type      = 'verification'
-            activity  = if ($testCmd.status -eq 'PASS') { 'PASS' } else { 'FAIL' }
+            activity  = if ($testCmd.status -eq 'PASS' -and $testCmd.exitCode -eq 0 -and -not $testCmd.timedOut) { 'PASS' } else { 'FAIL' }
             command   = $testCmd.command
             message   = "검증 실행: $($testCmd.status) ($($testCmd.command))"
           }
           Add-Content -LiteralPath $branchEvtPath -Value ($vRec | ConvertTo-Json -Compress) -Encoding utf8
         }
       }
-      $failureParts = @($state.error, $state.finalResponse) + @($tests | Where-Object status -eq 'FAIL' | ForEach-Object { $_.output })
-      $failureText = $failureParts -join "`n"
-      $classification = Get-FailureClassification $failureText
-      $decision = if ($wasCancelled) { 'CANCELLED' } elseif ($wasTimedOut) { 'TIMED_OUT' } elseif ($violations.Count -gt 0) { 'POLICY_VIOLATION' } elseif ($classification) { $classification } elseif ($state.status -ne 'completed') { 'WORKER_FAILED' } elseif (@($tests | Where-Object { $_.status -in @('FAIL', 'TIMED_OUT') }).Count -gt 0) { 'TEST_FAILED' } else { 'PASS' }
+      $hasTestFailures = @($tests | Where-Object { $_.status -in @('FAIL', 'TIMED_OUT') -or ($null -ne $_.exitCode -and $_.exitCode -ne 0) -or $_.timedOut }).Count -gt 0
+      $isWorkerFailed = ($state.status -ne 'completed')
+      $hasAnyFailure = $wasCancelled -or $wasTimedOut -or ($violations.Count -gt 0) -or $isWorkerFailed -or $hasTestFailures
+
+      $classification = $null
+      if ($hasAnyFailure) {
+        $failedTestOutputs = @($tests | Where-Object { $_.status -in @('FAIL', 'TIMED_OUT') -or ($null -ne $_.exitCode -and $_.exitCode -ne 0) -or $_.timedOut } | ForEach-Object { $_.output })
+        $failureParts = @($state.error) + $failedTestOutputs
+        if ($isWorkerFailed -and -not $state.error) {
+          $failureParts += $state.finalResponse
+        }
+        $failureText = ($failureParts | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join "`n"
+        $classification = Get-FailureClassification $failureText
+      }
+
+      $decision = if ($wasCancelled) {
+        'CANCELLED'
+      } elseif ($wasTimedOut) {
+        'TIMED_OUT'
+      } elseif ($violations.Count -gt 0) {
+        'POLICY_VIOLATION'
+      } elseif ($classification) {
+        $classification
+      } elseif ($isWorkerFailed) {
+        'WORKER_FAILED'
+      } elseif ($hasTestFailures) {
+        'TEST_FAILED'
+      } else {
+        'PASS'
+      }
 
       # Preserve attempt state file for current attempt
       $attFile = Join-Path $runRoot "attempts\$safeId.attempt-$attempt.json"
@@ -1021,6 +1052,11 @@ $compressed
       $integration = [pscustomobject]@{ branch=$integrationBranch; worktree=$integrationPath; decision='INTEGRATION_SETUP_FAILED'; approvalRequired=$true }
       $failed++
     } else {
+      $srcNm = Join-Path $repoRoot 'gemini-dashboard\node_modules'
+      $dstNm = Join-Path $integrationPath 'gemini-dashboard\node_modules'
+      if ((Test-Path -LiteralPath $srcNm) -and (Test-Path -LiteralPath (Join-Path $integrationPath 'gemini-dashboard')) -and (-not (Test-Path -LiteralPath $dstNm))) {
+        try { New-Item -ItemType Junction -Path $dstNm -Target $srcNm -Force -ErrorAction SilentlyContinue | Out-Null } catch {}
+      }
       $cherryPicks = @()
       $integrationDecision = 'AWAITING_CODEX_REVIEW'
       foreach ($task in $tasks) {
@@ -1039,7 +1075,7 @@ $compressed
         if ($integrationDecision -eq 'INTEGRATION_CONFLICT') { break }
       }
       $integrationTests = if ($integrationDecision -eq 'AWAITING_CODEX_REVIEW') { @(Invoke-Verification $integrationPath $integrationTestCommands) } else { @() }
-      if (@($integrationTests | Where-Object { $_.status -in @('FAIL', 'TIMED_OUT') }).Count -gt 0) { $integrationDecision = 'INTEGRATION_TEST_FAILED' }
+      if (@($integrationTests | Where-Object { $_.status -in @('FAIL', 'TIMED_OUT') -or ($null -ne $_.exitCode -and $_.exitCode -ne 0) -or $_.timedOut }).Count -gt 0) { $integrationDecision = 'INTEGRATION_TEST_FAILED' }
       $diffFiles = @(& git -C $integrationPath diff --name-only "$baseCommit...HEAD" | Where-Object { $_ })
       $diffStat = @(& git -C $integrationPath diff --stat "$baseCommit...HEAD") -join "`n"
       $integrationCommits = @(& git -C $integrationPath rev-list --reverse "$baseCommit..HEAD")

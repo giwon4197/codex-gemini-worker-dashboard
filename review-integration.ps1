@@ -510,22 +510,38 @@ $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
 $alreadyCandidateVerified = ($manifest.delivery -and $manifest.delivery.candidateVerifiedCommit -eq $candidateCommit)
 
 if (-not $alreadyCandidateVerified) {
-  $testWorktree = if ($manifest.integration.worktree -and (Test-Path -LiteralPath $manifest.integration.worktree)) {
-    $manifest.integration.worktree
-  } else {
-    $repoRoot
+  $rehearsalWorktree = Join-Path $runRoot 'verify-rehearsal'
+  if (Test-Path -LiteralPath $rehearsalWorktree) {
+    & git -C $repoRoot worktree remove $rehearsalWorktree --force 2>$null
+    if (Test-Path -LiteralPath $rehearsalWorktree) {
+      Remove-Item -LiteralPath $rehearsalWorktree -Recurse -Force -ErrorAction SilentlyContinue
+    }
   }
-  $curCommitInTest = (& git -C $testWorktree rev-parse HEAD 2>$null).Trim()
-  $tempWorktreeCreated = $false
-  if ($curCommitInTest -ne $candidateCommit) {
-    $tempWorktree = Join-Path $runRoot 'verify-cand'
-    & git -C $repoRoot worktree add --detach $tempWorktree $candidateCommit 2>&1 | Out-Null
-    $testWorktree = $tempWorktree
-    $tempWorktreeCreated = $true
+
+  & git -C $repoRoot worktree add --detach $rehearsalWorktree $candidateCommit 2>&1 | Out-Null
+  if ($LASTEXITCODE -ne 0) {
+    Record-Diagnostic 'rehearsal_worktree_failed' "Failed to create rehearsal worktree for candidate commit '$candidateCommit'."
+    exit 1
   }
+
+  $srcNm = Join-Path $repoRoot 'gemini-dashboard\node_modules'
+  $dstNm = Join-Path $rehearsalWorktree 'gemini-dashboard\node_modules'
+  if ((Test-Path -LiteralPath $srcNm) -and (Test-Path -LiteralPath (Join-Path $rehearsalWorktree 'gemini-dashboard')) -and (-not (Test-Path -LiteralPath $dstNm))) {
+    try { New-Item -ItemType Junction -Path $dstNm -Target $srcNm -Force -ErrorAction SilentlyContinue | Out-Null } catch {}
+  }
+
   try {
-    $candResults = @(Invoke-Verification $testWorktree $allVerifyCommands)
-    $candFails = @($candResults | Where-Object { $_.status -in @('FAIL', 'TIMED_OUT') })
+    $rehearsalHead = (& git -C $rehearsalWorktree rev-parse HEAD 2>$null).Trim()
+    if ($rehearsalHead -ne $candidateCommit) {
+      Record-Diagnostic 'rehearsal_head_mismatch' "Rehearsal worktree HEAD '$rehearsalHead' does not match candidate commit '$candidateCommit'." @{
+        rehearsalHead   = $rehearsalHead
+        candidateCommit = $candidateCommit
+      }
+      exit 1
+    }
+
+    $candResults = @(Invoke-Verification $rehearsalWorktree $allVerifyCommands)
+    $candFails = @($candResults | Where-Object { $_.status -in @('FAIL', 'TIMED_OUT') -or ($null -ne $_.exitCode -and $_.exitCode -ne 0) -or $_.timedOut })
     if ($candFails.Count -gt 0) {
       $failedItem = $candFails[0]
       Record-Diagnostic 'verification_failed' "Candidate commit verification failed: $($failedItem.command) (status $($failedItem.status), exit $($failedItem.exitCode))" @{
@@ -538,8 +554,11 @@ if (-not $alreadyCandidateVerified) {
       exit 1
     }
   } finally {
-    if ($tempWorktreeCreated -and (Test-Path -LiteralPath $testWorktree)) {
-      & git -C $repoRoot worktree remove $testWorktree --force 2>$null
+    if (Test-Path -LiteralPath $rehearsalWorktree) {
+      & git -C $repoRoot worktree remove $rehearsalWorktree --force 2>$null
+      if (Test-Path -LiteralPath $rehearsalWorktree) {
+        Remove-Item -LiteralPath $rehearsalWorktree -Recurse -Force -ErrorAction SilentlyContinue
+      }
     }
   }
 
@@ -548,6 +567,7 @@ if (-not $alreadyCandidateVerified) {
     Set-ObjectProperty $manifest 'delivery' ([pscustomobject]@{})
   }
   Set-ObjectProperty $manifest.delivery 'candidateVerifiedCommit' $candidateCommit
+  Set-ObjectProperty $manifest.delivery 'mainVerifiedCommit' $candidateCommit
   Set-ObjectProperty $manifest 'updatedAt' (Get-Date).ToString('o')
   Write-AtomicJson $manifestPath $manifest
 }
@@ -586,33 +606,49 @@ if (-not $alreadyIntegrated) {
   Write-AtomicJson $manifestPath $manifest
 }
 
-# Post-integration verification on target branch
-$manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
-$alreadyMainVerified = ($manifest.delivery -and $manifest.delivery.mainVerifiedCommit -eq $candidateCommit)
+# Post-integration deterministic Git invariants (no application verification after advancing real main)
+$targetRefCommit = (& git -C $repoRoot rev-parse "refs/heads/$TargetBranch" 2>$null).Trim()
+if ($targetRefCommit -ne $candidateCommit) {
+  Record-Diagnostic 'target_ref_mismatch' "Target branch '$TargetBranch' ref ($targetRefCommit) does not match candidate commit '$candidateCommit'." @{
+    targetBranch    = $TargetBranch
+    targetRefCommit = $targetRefCommit
+    candidateCommit = $candidateCommit
+  }
+  exit 1
+}
 
-if (-not $alreadyMainVerified) {
-  $postResults = @(Invoke-Verification $repoRoot $allVerifyCommands)
-  $postFails = @($postResults | Where-Object { $_.status -in @('FAIL', 'TIMED_OUT') })
-  if ($postFails.Count -gt 0) {
-    $failedItem = $postFails[0]
-    Record-Diagnostic 'verification_failed' "Post-integration verification failed on target branch '$TargetBranch': $($failedItem.command) (status $($failedItem.status), exit $($failedItem.exitCode))" @{
-      failedCommand = $failedItem.command
-      status        = $failedItem.status
-      exitCode      = $failedItem.exitCode
-      output        = $failedItem.output
-      timedOut      = $failedItem.timedOut
+$dirtyRepoPost = @(& git -C $repoRoot status --porcelain 2>$null | Where-Object { $_ -and ($_ -notmatch '^\?\?\s+\.agent(/|\\|$)') })
+if ($dirtyRepoPost.Count -gt 0) {
+  Record-Diagnostic 'dirty_worktree' "Repository worktree at '$repoRoot' is dirty after integration: $($dirtyRepoPost -join '; ')" @{
+    dirtyFiles = $dirtyRepoPost
+  }
+  exit 1
+}
+
+& git -C $repoRoot merge-base --is-ancestor $baseCommit "refs/heads/$TargetBranch"
+if ($LASTEXITCODE -ne 0) {
+  Record-Diagnostic 'invalid_ancestry' "Base commit '$baseCommit' is not an ancestor of target branch '$TargetBranch'."
+  exit 1
+}
+
+if ($remoteTargetCommit) {
+  & git -C $repoRoot merge-base --is-ancestor $remoteTargetCommit $candidateCommit
+  if ($LASTEXITCODE -ne 0) {
+    Record-Diagnostic 'divergence_detected' "Remote '$Remote/$TargetBranch' ($remoteTargetCommit) is not an ancestor of candidate commit '$candidateCommit'." @{
+      remoteCommit    = $remoteTargetCommit
+      candidateCommit = $candidateCommit
     }
     exit 1
   }
-
-  $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
-  if (-not $manifest.delivery) {
-    Set-ObjectProperty $manifest 'delivery' ([pscustomobject]@{})
-  }
-  Set-ObjectProperty $manifest.delivery 'mainVerifiedCommit' $candidateCommit
-  Set-ObjectProperty $manifest 'updatedAt' (Get-Date).ToString('o')
-  Write-AtomicJson $manifestPath $manifest
 }
+
+$manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
+if (-not $manifest.delivery) {
+  Set-ObjectProperty $manifest 'delivery' ([pscustomobject]@{})
+}
+Set-ObjectProperty $manifest.delivery 'mainVerifiedCommit' $candidateCommit
+Set-ObjectProperty $manifest 'updatedAt' (Get-Date).ToString('o')
+Write-AtomicJson $manifestPath $manifest
 
 # Normal remote push (never --force, -f, --force-with-lease)
 $alreadyPushed = $false

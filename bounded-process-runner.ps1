@@ -208,17 +208,6 @@ function Invoke-BoundedCommand {
   $execCommand = $Command
   $targetDir = if (Test-Path -LiteralPath $WorkingDirectory) { (Resolve-Path -LiteralPath $WorkingDirectory).Path } else { (Get-Location).Path }
 
-  # Support npm --prefix <dir> exec tsc by executing in prefix directory
-  if ($Command -match '(?i)^npm\s+--prefix\s+([^\s"''`]+|"[^"]*"|''[^'']*'')\s+exec\s+tsc(.*)$') {
-    $rawPrefix = $Matches[1].Trim('"', "'")
-    $tail = $Matches[2]
-    $resolvedPrefix = if ([System.IO.Path]::IsPathRooted($rawPrefix)) { $rawPrefix } else { Join-Path $targetDir $rawPrefix }
-    if (Test-Path -LiteralPath $resolvedPrefix) {
-      $targetDir = (Resolve-Path -LiteralPath $resolvedPrefix).Path
-      $execCommand = "npm exec tsc$tail"
-    }
-  }
-
   $fileName = if ($isWin) {
     if ($env:ComSpec) { $env:ComSpec } else { 'cmd.exe' }
   } else {
