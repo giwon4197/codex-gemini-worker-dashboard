@@ -247,6 +247,7 @@ Gemini는 Repository를 탐색하며 구현을 끝까지 수행한다.
 - [V2_ARCHITECTURE.md](V2_ARCHITECTURE.md): v2 전체 설계
 - [FAILURE_ANALYSIS_2026-09-09.md](FAILURE_ANALYSIS_2026-09-09.md): 기존 실패의 원인과 재발 방지 기준
 - [V2_1_FILESYSTEM_POLICY.md](V2_1_FILESYSTEM_POLICY.md): 다음 단계의 파일 접근·수정·병합 정책
+- [V2_2_V2_3_ROADMAP.md](V2_2_V2_3_ROADMAP.md): v2.1 이후 성능 적응 계층과 학습형 오케스트레이션 계획
 - [WEB_COMMUNICATION_PROBLEMS_AND_IMPROVEMENTS.md](WEB_COMMUNICATION_PROBLEMS_AND_IMPROVEMENTS.md): 실제 사용 중 발견된 웹 대화·관제 문제와 개선 우선순위
 
 ## 현재 기준선
