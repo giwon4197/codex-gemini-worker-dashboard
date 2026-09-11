@@ -21,6 +21,7 @@ $orchestratorRoot = $PSScriptRoot
 $workerScript = Join-Path $orchestratorRoot 'run-gemini-worker.ps1'
 . (Join-Path $orchestratorRoot 'bounded-process-runner.ps1')
 . (Join-Path $orchestratorRoot 'dashboard-dependency-bootstrap.ps1')
+. (Join-Path $orchestratorRoot 'filesystem-policy.ps1')
 
 function Resolve-SharedDashboardPaths {
   param(
@@ -611,15 +612,25 @@ if ($SyncStateRoot) {
   return
 }
 
-function Start-WorkerProcess($Task, $Worktree, [string]$Tier, [string]$RunId, [string]$RunRoot, [string]$BaseCommit, [string]$TimeoutValue, [int]$Attempt = 1) {
+function Start-WorkerProcess($Task, $Policy, $Worktree, [string]$Tier, [string]$RunId, [string]$RunRoot, [string]$BaseCommit, [string]$TimeoutValue, [int]$Attempt = 1) {
   $info = [Diagnostics.ProcessStartInfo]::new()
   $info.FileName = (Get-Command pwsh.exe).Source
   $info.UseShellExecute = $false
   $info.CreateNoWindow = $true
+  $policyJson = $Policy | ConvertTo-Json -Depth 8 -Compress
+  $workerPrompt = @"
+$([string]$Task.prompt)
+
+FILESYSTEM POLICY v2.1:
+$policyJson
+
+Repository search/read is allowed only inside this task worktree, except read_scope.deny paths. Modify only write_scope.expected or write_scope.derived_approved. Do not modify sensitive or forbidden paths unless they are explicitly present in write_scope.expected. The orchestrator independently verifies the final diff and merge scope.
+If another file is required, report a JSON object with action REQUEST_WRITE_EXPANSION, target, reason, and dependency evidence instead of silently expanding scope.
+"@
   foreach ($argument in @(
     '-NoProfile', '-File', $workerScript,
     '-Task', [string]$Task.name,
-    '-Prompt', [string]$Task.prompt,
+    '-Prompt', $workerPrompt,
     '-Model', $Tier,
     '-Workspace', [string]$Worktree.path,
     '-Timeout', $TimeoutValue,
@@ -662,17 +673,6 @@ function Get-ChangedFiles([string]$Worktree, [string]$BaseCommit) {
   $tracked = @(& git -C $Worktree diff --name-only $BaseCommit -- 2>$null)
   $untracked = @(& git -C $Worktree ls-files --others --exclude-standard 2>$null)
   return @($tracked + $untracked | Where-Object { $_ } | ForEach-Object { $_.Replace('\', '/') } | Sort-Object -Unique)
-}
-
-function Test-AllowedPath([string]$Path, $AllowedPatterns) {
-  foreach ($patternValue in @($AllowedPatterns)) {
-    $pattern = ([string]$patternValue).Replace('\', '/')
-    if ($pattern.EndsWith('/**')) {
-      $prefix = $pattern.Substring(0, $pattern.Length - 3).TrimEnd('/')
-      if ($Path -eq $prefix -or $Path.StartsWith("$prefix/", [StringComparison]::OrdinalIgnoreCase)) { return $true }
-    } elseif ($Path -like $pattern) { return $true }
-  }
-  return $false
 }
 
 function Invoke-Verification([string]$Worktree, $Commands, [int]$DefaultTimeoutSeconds = 120) {
@@ -775,8 +775,19 @@ if ($taskConfig -is [array]) {
 if ($tasks.Count -eq 0) { throw '작업 파일에 task가 없습니다.' }
 $ids = @($tasks | ForEach-Object { $_.id })
 if (($ids | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count -gt 0 -or ($ids | Select-Object -Unique).Count -ne $ids.Count) { throw '각 task에는 고유한 id가 필요합니다.' }
+$normalizedPolicies = @{}
+$ownership = [Collections.Generic.List[object]]::new()
 foreach ($task in $tasks) {
-  if (@($task.allowed_files).Count -eq 0) { throw "$($task.id): allowed_files가 최소 하나 필요합니다." }
+  $policy = Resolve-FilesystemPolicy $task
+  $normalizedPolicies[[string]$task.id] = $policy
+  foreach ($pattern in @($policy.write_scope.expected)) {
+    foreach ($existing in $ownership) {
+      if (Test-PolicyPatternOverlap -Left ([string]$existing.pattern) -Right ([string]$pattern)) {
+        throw "OWNERSHIP_OVERLAP: $pattern ($($existing.taskId), $($task.id))"
+      }
+    }
+    $ownership.Add([pscustomobject]@{ taskId = [string]$task.id; pattern = [string]$pattern })
+  }
 }
 
 $runId = (Get-Date).ToString('yyyyMMdd-HHmmss') + '-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
@@ -788,17 +799,48 @@ $baseCommit = (& git -C $repoRoot rev-parse HEAD).Trim()
 $manifest = [pscustomobject]@{
   runId = $runId; status = 'preparing'; createdAt = (Get-Date).ToString('o'); updatedAt = (Get-Date).ToString('o')
   repository = $repoRoot; baseCommit = $baseCommit; maxWorkers = $MaxWorkers; orchestratorProcessId = $PID
-  tasks = @($tasks | ForEach-Object { $_.id }); worktrees = @()
+  tasks = @($tasks | ForEach-Object { $_.id }); worktrees = @(); filesystemPolicy = 'v2.1'
   tasksFile = $tasksPath; integrationTestCommands = @($integrationTestCommands)
 }
 $manifestPath = Join-Path $runRoot 'run.json'
 $cancelPath = Join-Path $runRoot 'cancel.requested'
 Write-AtomicJson $manifestPath $manifest
 
+$dashboardPackage = Join-Path $repoRoot 'gemini-dashboard\package.json'
+if (Test-Path -LiteralPath $dashboardPackage) {
+  $toolchain = Invoke-NodeNpmPreflight -WorkingDirectory $repoRoot -PackageJsonPath $dashboardPackage
+  Set-ObjectProperty $manifest 'toolchain' ([pscustomobject]@{
+    status = $toolchain.status
+    nodePath = $toolchain.nodePath
+    npmPath = $toolchain.npmPath
+    nodeVersion = $toolchain.nodeVersion
+    npmVersion = $toolchain.npmVersion
+    requiredNodeVersion = $toolchain.requiredNodeVersion
+    missing = @($toolchain.missing)
+    error = $toolchain.error
+    checkedAt = (Get-Date).ToString('o')
+  })
+  if (-not $toolchain.success) {
+    $manifest.status = 'failed'
+    Set-ObjectProperty $manifest 'errorCategory' 'environment_error'
+    Set-ObjectProperty $manifest 'error' "ENVIRONMENT_ERROR: $($toolchain.error)"
+    $manifest.updatedAt = (Get-Date).ToString('o')
+    Write-AtomicJson $manifestPath $manifest
+    Write-Output "Run: $runId"
+    Write-Output "State: $runRoot"
+    Write-Output 'Status: failed'
+    exit 1
+  }
+  $env:PATH = $toolchain.augmentedPath
+  $env:CODEX_GEMINI_NODE_PATH = $toolchain.nodePath
+  $env:CODEX_GEMINI_NPM_PATH = $toolchain.npmPath
+}
+
 $worktrees = @()
 $jobRecords = @()
 try {
   foreach ($task in $tasks) {
+    $policy = $normalizedPolicies[[string]$task.id]
     $safeId = ([string]$task.id) -replace '[^A-Za-z0-9._-]', '-'
     $branch = "agent/$runId/$safeId"
     $worktree = Join-Path $worktreeRoot $safeId
@@ -811,7 +853,8 @@ try {
     $worktrees += $wtRecord
     $manifest.worktrees = $worktrees; $manifest.updatedAt = (Get-Date).ToString('o'); Write-AtomicJson $manifestPath $manifest
     Write-AtomicJson (Join-Path $runRoot "tasks\$safeId.json") ([pscustomobject]@{
-      id = $task.id; name = $task.name; prompt = $task.prompt; tier = $task.tier; allowedFiles = @($task.allowed_files)
+      id = $task.id; name = $task.name; prompt = $task.prompt; tier = $task.tier; allowedFiles = @($policy.write_scope.expected)
+      filesystemPolicy = $policy
       testCommands = @($task.test_commands); timeoutSeconds = if ($task.timeout_seconds) { [int]$task.timeout_seconds } else { $WorkerTimeoutSeconds }
       retryLimit = if ($null -ne $task.retry_limit) { [math]::Min(3, [math]::Max(0, [int]$task.retry_limit)) } else { 3 }
       branch = $branch; worktree = $worktree; baseCommit = $baseCommit
@@ -851,7 +894,8 @@ try {
         }
         Add-Content -LiteralPath $branchEvtPath -Value ($branchRecord | ConvertTo-Json -Compress) -Encoding utf8
       }
-      $process = Start-WorkerProcess $task $wt $tier $runId $runRoot $baseCommit $Timeout
+      $policy = $normalizedPolicies[[string]$task.id]
+      $process = Start-WorkerProcess $task $policy $wt $tier $runId $runRoot $baseCommit $Timeout
       $jobRecords += [pscustomobject]@{ Process = $process; Task = $task; SafeId = $safeId; Worktree = $wt; StartedAt = Get-Date; TimedOut = $false; Cancelled = $false; Attempt = 1 }
       $running++
     }
@@ -883,6 +927,7 @@ try {
   $failed = 0
   foreach ($task in $tasks) {
     $safeId = ([string]$task.id) -replace '[^A-Za-z0-9._-]', '-'; $wt = $worktrees | Where-Object id -eq $task.id | Select-Object -First 1
+    $policy = $normalizedPolicies[[string]$task.id]
     $statePath = Join-Path $runRoot "workers\$safeId.json"
     $record = $jobRecords | Where-Object { $_.Task.id -eq $task.id } | Select-Object -First 1
     $attempt = 1
@@ -896,7 +941,8 @@ try {
       $wasCancelled = Test-Path -LiteralPath $cancelPath
       $wasTimedOut = $record -and $record.TimedOut
       $changed = @(Get-ChangedFiles $wt.path $baseCommit)
-      $violations = @($changed | Where-Object { -not (Test-AllowedPath $_ @($task.allowed_files)) })
+      $scopeVerification = Get-FilesystemScopeVerification -ChangedFiles $changed -Policy $policy
+      $violations = @($scopeVerification.violations)
       $bootstrapFailed = $false
       $bootstrapError = $null
       if (-not $wasCancelled -and -not $wasTimedOut -and $state.status -eq 'completed' -and $violations.Count -eq 0) {
@@ -994,7 +1040,7 @@ FAILURE_LOG:
 $compressed
 "@
       $retryTask = [pscustomobject]@{ id=$task.id; name="$($task.name) (retry $($attempt - 1)/$retryLimit)"; prompt=$retryPrompt }
-      $process = Start-WorkerProcess $retryTask $wt $currentTier $runId $runRoot $baseCommit $Timeout $attempt
+      $process = Start-WorkerProcess $retryTask $policy $wt $currentTier $runId $runRoot $baseCommit $Timeout $attempt
       $record = [pscustomobject]@{ Process=$process; Task=$task; SafeId=$safeId; Worktree=$wt; StartedAt=Get-Date; TimedOut=$false; Cancelled=$false; Attempt=$attempt }
       $jobRecords += $record
       $limit = if ($task.timeout_seconds) { [int]$task.timeout_seconds } else { $WorkerTimeoutSeconds }
@@ -1052,7 +1098,17 @@ $compressed
     Set-ObjectProperty $state 'attempt' $attempt; Set-ObjectProperty $state 'retryLimit' $retryLimit; Set-ObjectProperty $state 'retryHistory' $history
     Set-ObjectProperty $state 'changedFiles' $changed
     Set-ObjectProperty $state 'commitHashes' $commitHashes
-    Set-ObjectProperty $state 'policy' ([pscustomobject]@{ allowedFiles=@($task.allowed_files); violations=$violations; status=if($violations.Count){'FAIL'}else{'PASS'} })
+    Set-ObjectProperty $state 'policy' ([pscustomobject]@{
+      filesystemPolicy = 'v2.1'
+      allowedFiles = @($policy.write_scope.expected)
+      readScope = $policy.read_scope
+      writeScope = $policy.write_scope
+      mergeScope = $policy.merge_scope
+      entries = @($scopeVerification.entries)
+      violations = $violations
+      sensitiveTouched = [int]$scopeVerification.sensitiveTouched
+      status = $scopeVerification.status
+    })
     Set-ObjectProperty $state 'verification' ([pscustomobject]@{ decision=$decision; commands=$tests; verifiedAt=(Get-Date).ToString('o') })
     Set-ObjectProperty $state 'escalation' $(if ($decision -eq 'PASS') { $null } else { [pscustomobject]@{ requiresCodex=$true; category=$decision; reason="자동 처리 중단: $decision" } })
     Set-ObjectProperty $state 'updatedAt' (Get-Date).ToString('o')

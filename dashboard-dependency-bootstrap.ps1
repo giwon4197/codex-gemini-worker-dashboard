@@ -180,7 +180,29 @@ function Ensure-DashboardDependencies {
 
   # Run npm ci through bounded process runner
   $npmTimeout = if ($TimeoutSeconds -gt 0) { $TimeoutSeconds } else { 180 }
-  $ciResult = Invoke-BoundedCommand -Command 'npm ci' -WorkingDirectory $dashDir -TimeoutSeconds $npmTimeout -MaxOutputChars 12000
+  $toolchain = Resolve-NodeNpmToolchain
+  if (-not $toolchain.success) {
+    $errMsg = "Node/npm toolchain preflight failed before dependency bootstrap: $($toolchain.error)"
+    if ($ThrowOnError) { throw $errMsg }
+    return [pscustomobject]@{
+      success       = $false
+      status        = 'ENVIRONMENT_ERROR'
+      reused        = $false
+      timedOut      = $false
+      exitCode      = 1
+      errorCategory = 'environment_error'
+      error         = $errMsg
+      output        = $errMsg
+      missingTools  = @($toolchain.missing)
+    }
+  }
+  $toolchainEnvironment = @{
+    PATH = $toolchain.augmentedPath
+    CODEX_GEMINI_NODE_PATH = $toolchain.nodePath
+    CODEX_GEMINI_NPM_PATH = $toolchain.npmPath
+  }
+  $npmCommand = '"' + $toolchain.npmPath + '" ci'
+  $ciResult = Invoke-BoundedCommand -Command $npmCommand -WorkingDirectory $dashDir -TimeoutSeconds $npmTimeout -MaxOutputChars 12000 -EnvironmentVariables $toolchainEnvironment
 
   if ($ciResult.timedOut) {
     $errMsg = "npm ci timed out after ${npmTimeout}s in '$dashDir'."

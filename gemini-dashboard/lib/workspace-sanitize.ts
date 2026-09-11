@@ -174,6 +174,32 @@ export function sanitizeWorkerData(
     sanitizedPolicy = {
       ...worker.policy,
       allowedFiles: worker.policy.allowedFiles?.map(f => sanitizePath(f, repoRoot)),
+      readScope: worker.policy.readScope
+        ? { ...worker.policy.readScope, deny: worker.policy.readScope.deny?.map(f => sanitizeText(f, repoRoot)) }
+        : undefined,
+      writeScope: worker.policy.writeScope
+        ? {
+            ...worker.policy.writeScope,
+            expected: worker.policy.writeScope.expected?.map(f => sanitizeText(f, repoRoot)),
+            derived_approved: worker.policy.writeScope.derived_approved?.map(f => sanitizeText(f, repoRoot)),
+            sensitive: worker.policy.writeScope.sensitive?.map(f => sanitizeText(f, repoRoot)),
+            forbidden: worker.policy.writeScope.forbidden?.map(f => sanitizeText(f, repoRoot)),
+          }
+        : undefined,
+      mergeScope: worker.policy.mergeScope
+        ? {
+            ...worker.policy.mergeScope,
+            expected: worker.policy.mergeScope.expected?.map(f => sanitizeText(f, repoRoot)),
+            deny: worker.policy.mergeScope.deny?.map(f => sanitizeText(f, repoRoot)),
+          }
+        : undefined,
+      entries: worker.policy.entries?.map(entry => ({
+        ...entry,
+        path: sanitizePath(entry.path, repoRoot),
+        matchedPattern: entry.matchedPattern
+          ? sanitizeText(entry.matchedPattern, repoRoot)
+          : entry.matchedPattern,
+      })),
       violations: worker.policy.violations?.map(f => sanitizePath(f, repoRoot)),
     };
   }

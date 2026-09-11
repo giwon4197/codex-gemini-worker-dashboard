@@ -11,6 +11,7 @@ param(
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'bounded-process-runner.ps1')
 . (Join-Path $PSScriptRoot 'dashboard-dependency-bootstrap.ps1')
+. (Join-Path $PSScriptRoot 'filesystem-policy.ps1')
 
 function Write-AtomicJson([string]$Path, $Data) {
   $parent = Split-Path -Parent $Path
@@ -34,17 +35,6 @@ function Write-AtomicJson([string]$Path, $Data) {
 function Set-ObjectProperty($Object, [string]$Name, $Value) {
   if ($Object.PSObject.Properties.Name -contains $Name) { $Object.$Name = $Value }
   else { $Object | Add-Member -NotePropertyName $Name -NotePropertyValue $Value }
-}
-
-function Test-AllowedPath([string]$Path, $AllowedPatterns) {
-  foreach ($patternValue in @($AllowedPatterns)) {
-    $pattern = ([string]$patternValue).Replace('\', '/')
-    if ($pattern.EndsWith('/**')) {
-      $prefix = $pattern.Substring(0, $pattern.Length - 3).TrimEnd('/')
-      if ($Path -eq $prefix -or $Path.StartsWith("$prefix/", [StringComparison]::OrdinalIgnoreCase)) { return $true }
-    } elseif ($Path -like $pattern) { return $true }
-  }
-  return $false
 }
 
 function Invoke-Verification([string]$Worktree, $Commands, [int]$DefaultTimeoutSeconds = 120) {
@@ -273,53 +263,65 @@ if ($diffFiles.Count -eq 0) {
   exit 1
 }
 
-# Validate expected-file policy
-$allAllowedFiles = [System.Collections.Generic.List[string]]::new()
+# Validate the candidate diff with the same v2.1 policy engine used by workers.
+$taskPolicies = [System.Collections.Generic.List[object]]::new()
 $tasksDir = Join-Path $runRoot 'tasks'
 if (Test-Path -LiteralPath $tasksDir) {
   foreach ($tFile in Get-ChildItem -LiteralPath $tasksDir -Filter '*.json') {
     try {
       $tObj = Get-Content -Raw -LiteralPath $tFile.FullName | ConvertFrom-Json
-      foreach ($af in @($tObj.allowedFiles)) { [void]$allAllowedFiles.Add($af) }
-    } catch {}
-  }
-}
-$resultsDir = Join-Path $runRoot 'results'
-if (Test-Path -LiteralPath $resultsDir) {
-  foreach ($rFile in Get-ChildItem -LiteralPath $resultsDir -Filter '*.json') {
-    try {
-      $rObj = Get-Content -Raw -LiteralPath $rFile.FullName | ConvertFrom-Json
-      if ($rObj.policy -and $rObj.policy.allowedFiles) {
-        foreach ($af in @($rObj.policy.allowedFiles)) { [void]$allAllowedFiles.Add($af) }
+      if ($tObj.filesystemPolicy) {
+        $taskPolicies.Add($tObj.filesystemPolicy)
+      } elseif ($tObj.allowedFiles) {
+        $taskPolicies.Add((Resolve-FilesystemPolicy ([pscustomobject]@{ id = $tObj.id; allowed_files = @($tObj.allowedFiles) })))
       }
     } catch {}
   }
 }
-if ($manifest.tasksFile -and (Test-Path -LiteralPath $manifest.tasksFile)) {
+$resultsDir = Join-Path $runRoot 'results'
+if ($taskPolicies.Count -eq 0 -and $manifest.tasksFile -and (Test-Path -LiteralPath $manifest.tasksFile)) {
   try {
     $planObj = Get-Content -Raw -LiteralPath $manifest.tasksFile | ConvertFrom-Json
     $taskList = if ($planObj -is [array]) { $planObj } elseif ($planObj.tasks) { $planObj.tasks } else { @() }
     foreach ($t in $taskList) {
-      foreach ($af in @($t.allowed_files)) { [void]$allAllowedFiles.Add($af) }
+      $taskPolicies.Add((Resolve-FilesystemPolicy $t))
     }
   } catch {}
 }
 
 $policyViolations = @()
+$scopeEntries = @()
 foreach ($f in $diffFiles) {
-  $fNorm = ([string]$f).Replace('\', '/')
-  if (-not (Test-AllowedPath $fNorm $allAllowedFiles)) {
-    $policyViolations += $fNorm
+  $candidateEntries = @()
+  foreach ($policy in $taskPolicies) {
+    $check = Get-FilesystemScopeVerification -ChangedFiles @([string]$f) -Policy $policy
+    $candidateEntries += @($check.entries)
+  }
+  $accepted = $candidateEntries | Where-Object authorized | Select-Object -First 1
+  $entry = if ($accepted) { $accepted } else { $candidateEntries | Select-Object -First 1 }
+  if ($entry) { $scopeEntries += $entry }
+  if (-not $accepted) {
+    $policyViolations += ([string]$f).Replace('\', '/')
   }
 }
 if ($policyViolations.Count -gt 0) {
   Record-Diagnostic 'policy_violation' "Policy violation: file(s) outside allowed scope: $($policyViolations -join ', ')" @{
     violations = $policyViolations
-    allowedPatterns = @($allAllowedFiles)
+    scopeEntries = @($scopeEntries)
     changedFiles = $diffFiles
   }
   exit 1
 }
+$scopeVerification = [pscustomobject]@{
+  filesystemPolicy = 'v2.1'
+  candidateCommit = $candidateCommit
+  status = 'PASS'
+  entries = @($scopeEntries)
+  verifiedAt = (Get-Date).ToString('o')
+}
+Set-ObjectProperty $manifest.integration 'scopeVerification' $scopeVerification
+Set-ObjectProperty $manifest 'updatedAt' (Get-Date).ToString('o')
+Write-AtomicJson $manifestPath $manifest
 
 # Validate test summaries
 $failedTasks = @()

@@ -7,6 +7,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$toolchainScript = Join-Path $PSScriptRoot 'toolchain.ps1'
+if (Test-Path -LiteralPath $toolchainScript) { . $toolchainScript }
 
 function Redact-Text([string]$text) {
   if ([string]::IsNullOrEmpty($text)) { return $text }
@@ -234,6 +236,16 @@ function Invoke-BoundedCommand {
     foreach ($k in $EnvironmentVariables.Keys) {
       $envDict[[string]$k] = [string]$EnvironmentVariables[$k]
     }
+  }
+
+  if ($Command -match '(?i)(^|[\s;&|])(node(?:\.exe)?|npm(?:\.cmd|\.exe)?)(?=\s|$)' -and (Get-Command Resolve-NodeNpmToolchain -ErrorAction SilentlyContinue)) {
+    $resolveEnvironment = @{}
+    foreach ($entry in $envDict.GetEnumerator()) { $resolveEnvironment[$entry.Key] = $entry.Value }
+    if (-not $resolveEnvironment.ContainsKey('PATH')) { $resolveEnvironment['PATH'] = $env:PATH }
+    $resolvedToolchain = Resolve-NodeNpmToolchain -Environment $resolveEnvironment
+    if ($resolvedToolchain.augmentedPath) { $envDict['PATH'] = $resolvedToolchain.augmentedPath }
+    if ($resolvedToolchain.nodePath) { $envDict['CODEX_GEMINI_NODE_PATH'] = $resolvedToolchain.nodePath }
+    if ($resolvedToolchain.npmPath) { $envDict['CODEX_GEMINI_NPM_PATH'] = $resolvedToolchain.npmPath }
   }
 
   $runner = [BoundedCommandRunner]::new()

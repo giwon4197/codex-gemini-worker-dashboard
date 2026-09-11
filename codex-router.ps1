@@ -9,6 +9,7 @@ $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 $schemaPath = Join-Path $root 'router-plan.schema.json'
 $orchestrator = Join-Path $root 'run-parallel-workers.ps1'
+. (Join-Path $root 'filesystem-policy.ps1')
 $repoRoot = (& git -C $Repository rev-parse --show-toplevel 2>$null)
 if ($LASTEXITCODE -ne 0 -or -not $repoRoot) { throw "Git 저장소가 아닙니다: $Repository" }
 $repoRoot = $repoRoot.Trim()
@@ -31,11 +32,11 @@ $Request
 Rules:
 1. Do not edit files, run the worker router, or implement the request yourself.
 2. Classify level 0-3. Use max_workers 2 only when tasks have disjoint file ownership and can execute against the same base commit.
-3. Every allowed_files path must be repository-relative and narrowly scoped. Never allow .git/**, .agent/**, **, or the repository root.
+3. Use the v2.1 read_scope/write_scope/merge_scope contract when useful. Legacy allowed_files remains supported as write_scope.expected. Every write or merge path must be repository-relative and narrowly scoped. Never allow .git/**, .agent/**, **, or the repository root.
 4. Tasks in this executable plan must be independent, so depends_on must be empty. If work has dependencies, combine that chain into one task.
 5. Prompts must include objective, allowed scope, acceptance criteria, and instructions to run the listed tests.
 6. Choose deterministic existing test/build/lint commands after inspecting package manifests and project configuration.
-7. Avoid overlapping allowed_files between workers. Shared manifests, lockfiles, schemas, and generated files belong to one task only.
+7. Avoid overlapping write_scope.expected (or legacy allowed_files) between workers. Shared manifests, lockfiles, schemas, and generated files belong to one task only.
 8. Use fast for trivial work, normal for ordinary implementation, advanced for complex implementation, and reasoning only for hard algorithms or deep ambiguity.
 9. Keep the plan minimal. Do not invent unrelated improvements.
 10. Set retry_limit to at least 2 for implementation tasks: after two failed attempts the orchestrator promotes the next attempt to advanced, and any failure on advanced is escalated to Codex.
@@ -50,20 +51,19 @@ $ids = @($plan.tasks | ForEach-Object { $_.id })
 if (($ids | Select-Object -Unique).Count -ne $ids.Count) { throw '중복 task id가 있습니다.' }
 foreach ($task in @($plan.tasks)) {
   if (@($task.depends_on).Count -gt 0) { throw "DEPENDENCY_PLAN_UNSUPPORTED: $($task.id)는 독립 작업으로 재계획해야 합니다." }
-  foreach ($pathValue in @($task.allowed_files)) {
-    $path = ([string]$pathValue).Replace('\', '/')
-    if ([IO.Path]::IsPathRooted($path) -or $path -match '(^|/)\.\.(/|$)' -or $path -match '^(\.git|\.agent)(/|$)' -or $path -in @('*', '**', '**/*', './')) {
-      throw "$($task.id): 안전하지 않은 allowed_files 경로: $path"
-    }
-  }
+  $null = Resolve-FilesystemPolicy $task
 }
 
-$allOwnership = @{}
+$ownership = [Collections.Generic.List[object]]::new()
 foreach ($task in @($plan.tasks)) {
-  foreach ($pathValue in @($task.allowed_files)) {
-    $key = ([string]$pathValue).Replace('\', '/').ToLowerInvariant()
-    if ($allOwnership.ContainsKey($key)) { throw "OWNERSHIP_OVERLAP: $key ($($allOwnership[$key]), $($task.id))" }
-    $allOwnership[$key] = $task.id
+  $policy = Resolve-FilesystemPolicy $task
+  foreach ($pathValue in @($policy.write_scope.expected)) {
+    foreach ($existing in $ownership) {
+      if (Test-PolicyPatternOverlap -Left ([string]$existing.pattern) -Right ([string]$pathValue)) {
+        throw "OWNERSHIP_OVERLAP: $pathValue ($($existing.taskId), $($task.id))"
+      }
+    }
+    $ownership.Add([pscustomobject]@{ taskId = [string]$task.id; pattern = [string]$pathValue })
   }
 }
 

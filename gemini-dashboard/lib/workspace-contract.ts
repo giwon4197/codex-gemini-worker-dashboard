@@ -58,8 +58,42 @@ export interface LiveWorkerLog {
 }
 
 export interface LiveWorkerPolicy {
+  filesystemPolicy?: 'v2.1' | string;
   allowedFiles?: string[];
+  readScope?: {
+    root?: 'task_worktree' | string;
+    mode?: 'project_wide_search' | string;
+    deny?: string[];
+  };
+  writeScope?: {
+    expected?: string[];
+    derived_auto_expand?: boolean;
+    derived_approved?: string[];
+    sensitive?: string[];
+    forbidden?: string[];
+  };
+  mergeScope?: {
+    expected?: string[];
+    deny?: string[];
+  };
+  entries?: Array<{
+    path: string;
+    classification:
+      | 'EXPECTED'
+      | 'DERIVED_APPROVED'
+      | 'DERIVED_UNAPPROVED'
+      | 'SENSITIVE_UNAPPROVED'
+      | 'FORBIDDEN'
+      | 'MERGE_DENIED'
+      | 'MERGE_SCOPE_VIOLATION'
+      | string;
+    authorized: boolean;
+    sensitive?: boolean;
+    matchedPattern?: string | null;
+    comparisonMode?: 'literal_exact' | 'policy_glob' | 'none' | string;
+  }>;
   violations?: string[];
+  sensitiveTouched?: number;
   status?: 'PASS' | 'FAIL';
 }
 

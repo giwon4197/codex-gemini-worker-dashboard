@@ -16,7 +16,11 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "name", "objective", "prompt", "depends_on", "allowed_files", "test_commands", "tier", "timeout_seconds", "retry_limit"],
+        "required": ["id", "name", "objective", "prompt", "depends_on", "test_commands", "tier", "timeout_seconds", "retry_limit"],
+        "anyOf": [
+          { "required": ["allowed_files"] },
+          { "required": ["write_scope"] }
+        ],
         "properties": {
           "id": { "type": "string", "pattern": "^TASK-[0-9]{3}$" },
           "name": { "type": "string", "minLength": 1 },
@@ -24,7 +28,52 @@
           "prompt": { "type": "string", "minLength": 1 },
           "depends_on": { "type": "array", "items": { "type": "string", "pattern": "^TASK-[0-9]{3}$" } },
           "allowed_files": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 },
+          "read_scope": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "root": { "type": "string", "enum": ["task_worktree"] },
+              "mode": { "type": "string", "enum": ["project_wide_search"] },
+              "deny": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+            }
+          },
+          "write_scope": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["expected"],
+            "properties": {
+              "expected": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 },
+              "derived_auto_expand": { "type": "boolean" },
+              "derived_approved": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+              "sensitive": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+              "forbidden": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+            }
+          },
+          "merge_scope": {
+            "anyOf": [
+              { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "expected": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 },
+                  "patterns": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 },
+                  "deny": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+                }
+              }
+            ]
+          },
+          "acceptance_criteria": { "type": "array", "items": { "type": "string", "minLength": 1 } },
           "test_commands": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1, "maxItems": 8 },
+          "forbidden_operations": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+          "expected_change_scope": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "files": { "type": "integer", "minimum": 0 },
+              "lines": { "type": "integer", "minimum": 0 }
+            }
+          },
           "tier": { "type": "string", "enum": ["fast", "normal", "advanced", "reasoning"] },
           "timeout_seconds": { "type": "integer", "minimum": 30, "maximum": 3600 },
           "retry_limit": { "type": "integer", "minimum": 0, "maximum": 3 }
