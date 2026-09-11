@@ -9,16 +9,23 @@ import type { CompactRunState } from './workspace-contract.ts';
 
 void describe('Workspace Store (Idempotency, Path Traversal, & Recovery)', () => {
   let testTempDir: string;
+  let savedAgyPath: string | undefined;
 
   beforeEach(() => {
+    savedAgyPath = process.env.AGY_PATH;
     testTempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'workspace-store-test-'));
     // Setup minimal .agent directories in test repo
     fs.mkdirSync(path.join(testTempDir, '.agent', 'runs'), { recursive: true });
     fs.mkdirSync(path.join(testTempDir, '.agent', 'dashboard-state', 'compact'), { recursive: true });
     fs.mkdirSync(path.join(testTempDir, '.agent', 'dashboard-state', 'idempotency'), { recursive: true });
+    const agyFixture = path.join(testTempDir, process.platform === 'win32' ? 'agy.exe' : 'agy');
+    fs.writeFileSync(agyFixture, 'test fixture', 'utf8');
+    process.env.AGY_PATH = agyFixture;
   });
 
   afterEach(() => {
+    if (savedAgyPath === undefined) delete process.env.AGY_PATH;
+    else process.env.AGY_PATH = savedAgyPath;
     try {
       fs.rmSync(testTempDir, { recursive: true, force: true });
     } catch {
@@ -270,7 +277,7 @@ void describe('Workspace Store (Idempotency, Path Traversal, & Recovery)', () =>
   });
 
   void describe('Tool Resolution & Safe Environment Propagation', () => {
-    void test('discovers PowerShell 7 and essential tools (codex, rg, agy) and prepends augmented PATH', () => {
+    void test('discovers PowerShell 7 and essential tools (codex, rg, agy fixture) and prepends augmented PATH', () => {
       const result = resolveRequiredTools();
       assert.strictEqual(result.ok, true);
       assert.ok(result.tools);

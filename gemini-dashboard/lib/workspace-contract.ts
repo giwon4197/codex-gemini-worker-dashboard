@@ -58,11 +58,11 @@ export interface LiveWorkerLog {
 }
 
 export interface LiveWorkerPolicy {
-  filesystemPolicy?: 'v2.1' | string;
+  filesystemPolicy?: 'v2.1';
   allowedFiles?: string[];
   readScope?: {
-    root?: 'task_worktree' | string;
-    mode?: 'project_wide_search' | string;
+    root?: 'task_worktree';
+    mode?: 'project_wide_search';
     deny?: string[];
   };
   writeScope?: {
@@ -85,12 +85,11 @@ export interface LiveWorkerPolicy {
       | 'SENSITIVE_UNAPPROVED'
       | 'FORBIDDEN'
       | 'MERGE_DENIED'
-      | 'MERGE_SCOPE_VIOLATION'
-      | string;
+      | 'MERGE_SCOPE_VIOLATION';
     authorized: boolean;
     sensitive?: boolean;
     matchedPattern?: string | null;
-    comparisonMode?: 'literal_exact' | 'policy_glob' | 'none' | string;
+    comparisonMode?: 'literal_exact' | 'policy_glob' | 'none';
   }>;
   violations?: string[];
   sensitiveTouched?: number;

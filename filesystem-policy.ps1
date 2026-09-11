@@ -25,6 +25,16 @@ $script:DefaultSensitive = @(
   '.github/**'
 )
 
+$script:DefaultProtected = @(
+  'filesystem-policy.ps1',
+  'toolchain.ps1',
+  'bounded-process-runner.ps1',
+  'codex-router.ps1',
+  'run-parallel-workers.ps1',
+  'review-integration.ps1',
+  'router-plan.schema.json'
+)
+
 $script:DefaultForbidden = @(
   '.env',
   '.env.*',
@@ -35,7 +45,7 @@ $script:DefaultForbidden = @(
   '**/*.p12',
   '.git/**',
   '.agent/**'
-)
+) + $script:DefaultProtected
 
 function ConvertTo-PolicyPath {
   [CmdletBinding()]
@@ -170,6 +180,13 @@ function Assert-SafePolicyPattern {
   }
   if (-not $AllowProtected -and ((Test-PolicyPath -Path '.git/config' -Patterns @($normalized)) -or (Test-PolicyPath -Path '.agent/run.json' -Patterns @($normalized)))) {
     throw "$prefix$Field 경로가 보호 영역을 포함합니다: $Pattern"
+  }
+  if (-not $AllowProtected) {
+    foreach ($protectedPath in $script:DefaultProtected) {
+      if (Test-PolicyPatternOverlap -Left $normalized -Right $protectedPath) {
+        throw "$prefix$Field 경로가 보호된 오케스트레이터 파일을 포함합니다: $Pattern"
+      }
+    }
   }
   return $normalized
 }

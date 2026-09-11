@@ -14,9 +14,11 @@ import { extractTimelineEvents } from './workspace-contract.ts';
 void describe('Codex Conversational Workspace & Decision Engine', () => {
   let testRepoDir: string;
   let savedAllowedRepo: string | undefined;
+  let savedAgyPath: string | undefined;
 
   beforeEach(() => {
     savedAllowedRepo = process.env.ALLOWED_REPO_ROOT;
+    savedAgyPath = process.env.AGY_PATH;
     testRepoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-conv-test-'));
     process.env.ALLOWED_REPO_ROOT = testRepoDir;
 
@@ -29,6 +31,9 @@ void describe('Codex Conversational Workspace & Decision Engine', () => {
 
     // Dummy router script
     fs.writeFileSync(path.join(testRepoDir, 'codex-router.ps1'), '# Dummy router\n', 'utf8');
+    const agyFixture = path.join(testRepoDir, process.platform === 'win32' ? 'agy.exe' : 'agy');
+    fs.writeFileSync(agyFixture, 'test fixture', 'utf8');
+    process.env.AGY_PATH = agyFixture;
   });
 
   afterEach(() => {
@@ -37,6 +42,8 @@ void describe('Codex Conversational Workspace & Decision Engine', () => {
     } else {
       delete process.env.ALLOWED_REPO_ROOT;
     }
+    if (savedAgyPath === undefined) delete process.env.AGY_PATH;
+    else process.env.AGY_PATH = savedAgyPath;
     try {
       fs.rmSync(testRepoDir, { recursive: true, force: true });
     } catch {

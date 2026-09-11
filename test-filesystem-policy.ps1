@@ -111,6 +111,12 @@ $protectedRejected = $false
 try { $null = Resolve-FilesystemPolicy ([pscustomobject]@{ id = 'TASK-004'; allowed_files = @('.agent/**') }) } catch { $protectedRejected = $true }
 Assert-PolicyTest 'protected orchestrator scope cannot be expected write scope' $protectedRejected
 
+$protectedScriptRejected = $false
+try {
+  [void](Resolve-FilesystemPolicy ([pscustomobject]@{ id = 'TASK-PROTECTED-SCRIPT'; allowed_files = @('run-parallel-workers.ps1') }))
+} catch { $protectedScriptRejected = $true }
+Assert-PolicyTest 'protected orchestrator script cannot be expected write scope' $protectedScriptRejected
+
 $unsupportedExpectedRejected = $false
 try { $null = Resolve-FilesystemPolicy ([pscustomobject]@{ id = 'TASK-005'; allowed_files = @('src/*.ts') }) } catch { $unsupportedExpectedRejected = $true }
 Assert-PolicyTest 'expected scope only accepts literal paths or /** recursion' $unsupportedExpectedRejected

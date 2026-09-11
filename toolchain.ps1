@@ -35,24 +35,30 @@ function Resolve-NodeNpmToolchain {
     $programFiles = [Environment]::GetFolderPath('ProgramFiles')
     $programFilesX86 = [Environment]::GetFolderPath('ProgramFilesX86')
     $localAppData = [Environment]::GetFolderPath('LocalApplicationData')
-    $nodeCandidates = @(
-      $nodeOverride,
-      $(if ($programFiles) { Join-Path $programFiles 'nodejs\node.exe' }),
-      $(if ($programFilesX86) { Join-Path $programFilesX86 'nodejs\node.exe' }),
-      $(if ($localAppData) { Join-Path $localAppData 'Programs\nodejs\node.exe' })
-    )
-    $node = Get-FirstExistingCommandPath -Names @('node.exe', 'node') -Candidates $nodeCandidates
+    if ($nodeOverride) {
+      $node = Get-FirstExistingCommandPath -Names @() -Candidates @($nodeOverride)
+    } else {
+      $nodeCandidates = @(
+        $(if ($programFiles) { Join-Path $programFiles 'nodejs\node.exe' }),
+        $(if ($programFilesX86) { Join-Path $programFilesX86 'nodejs\node.exe' }),
+        $(if ($localAppData) { Join-Path $localAppData 'Programs\nodejs\node.exe' })
+      )
+      $node = Get-FirstExistingCommandPath -Names @('node.exe', 'node') -Candidates $nodeCandidates
+    }
 
     $nodeDir = if ($node) { Split-Path -Parent $node } else { '' }
-    $npmCandidates = @(
-      $npmOverride,
-      $(if ($nodeDir) { Join-Path $nodeDir 'npm.cmd' }),
-      $(if ($programFiles) { Join-Path $programFiles 'nodejs\npm.cmd' }),
-      $(if ($programFilesX86) { Join-Path $programFilesX86 'nodejs\npm.cmd' }),
-      $(if ($localAppData) { Join-Path $localAppData 'Programs\nodejs\npm.cmd' })
-    )
-    $npmNames = if ($IsWindows -or $env:OS -like '*Windows*') { @('npm.cmd', 'npm.exe', 'npm') } else { @('npm') }
-    $npm = Get-FirstExistingCommandPath -Names $npmNames -Candidates $npmCandidates
+    if ($npmOverride) {
+      $npm = Get-FirstExistingCommandPath -Names @() -Candidates @($npmOverride)
+    } else {
+      $npmCandidates = @(
+        $(if ($nodeDir) { Join-Path $nodeDir 'npm.cmd' }),
+        $(if ($programFiles) { Join-Path $programFiles 'nodejs\npm.cmd' }),
+        $(if ($programFilesX86) { Join-Path $programFilesX86 'nodejs\npm.cmd' }),
+        $(if ($localAppData) { Join-Path $localAppData 'Programs\nodejs\npm.cmd' })
+      )
+      $npmNames = if ($IsWindows -or $env:OS -like '*Windows*') { @('npm.cmd', 'npm.exe', 'npm') } else { @('npm') }
+      $npm = Get-FirstExistingCommandPath -Names $npmNames -Candidates $npmCandidates
+    }
 
     $dirs = [Collections.Generic.List[string]]::new()
     foreach ($item in @($node, $npm)) {

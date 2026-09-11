@@ -132,9 +132,32 @@ void describe('Workspace Sanitization (Non-disclosure & Path Protection)', () =>
           ],
         },
         policy: {
+          filesystemPolicy: 'v2.1',
           allowedFiles: [
             'C:\\Users\\developer\\projects\\repo\\gemini-dashboard\\app\\page.tsx',
           ],
+          readScope: {
+            root: 'task_worktree',
+            mode: 'project_wide_search',
+            deny: ['C:\\Users\\developer\\projects\\repo\\.env'],
+          },
+          writeScope: {
+            expected: ['C:\\Users\\developer\\projects\\repo\\app\\[runId]\\page.tsx'],
+            derived_approved: ['C:\\Users\\developer\\projects\\repo\\app\\generated.ts'],
+            sensitive: ['C:\\Users\\developer\\projects\\repo\\.env*'],
+            forbidden: ['C:\\Users\\developer\\projects\\repo\\filesystem-policy.ps1'],
+          },
+          mergeScope: {
+            expected: ['C:\\Users\\developer\\projects\\repo\\app\\[runId]\\page.tsx'],
+            deny: ['C:\\Users\\developer\\projects\\repo\\.agent\\**'],
+          },
+          entries: [{
+            path: 'C:\\Users\\developer\\projects\\repo\\app\\[runId]\\page.tsx',
+            classification: 'EXPECTED',
+            authorized: true,
+            matchedPattern: 'C:\\Users\\developer\\projects\\repo\\app\\[runId]\\page.tsx',
+            comparisonMode: 'literal_exact',
+          }],
           violations: [],
           status: 'PASS',
         },
@@ -169,6 +192,10 @@ void describe('Workspace Sanitization (Non-disclosure & Path Protection)', () =>
       assert.deepStrictEqual(sanitized.policy?.allowedFiles, [
         'gemini-dashboard/app/page.tsx',
       ]);
+      assert.deepStrictEqual(sanitized.policy?.writeScope?.expected, ['app/[runId]/page.tsx']);
+      assert.strictEqual(sanitized.policy?.entries?.[0].path, 'app/[runId]/page.tsx');
+      assert.strictEqual(sanitized.policy?.entries?.[0].matchedPattern, 'app/[runId]/page.tsx');
+      assert.ok(!JSON.stringify(sanitized.policy).includes(mockRepoRoot));
 
       // Verify finalResponse and error are redacted
       assert.ok(!sanitized.finalResponse?.includes('AIzaSy'));
