@@ -126,6 +126,30 @@ $properties = $schema.properties.tasks.items.properties
 Assert-PolicyTest 'router schema exposes v2.1 scopes' ($properties.read_scope -and $properties.write_scope -and $properties.merge_scope)
 Assert-PolicyTest 'router schema preserves legacy allowed_files field' ($null -ne $properties.allowed_files)
 
+# The planner schema is intentionally stricter than the external runtime loader.
+$canonicalTask = [pscustomobject]@{
+  id='TASK-001'; name='canonical'; objective='fixture'; prompt='fixture'; depends_on=@()
+  allowed_files=@('src/a.ts', 'docs/[slug].md')
+  read_scope=[pscustomobject]@{root='task_worktree';mode='project_wide_search';deny=@()}
+  write_scope=[pscustomobject]@{expected=@('src/a.ts', 'docs/[slug].md');derived_auto_expand=$false;derived_approved=@();sensitive=@();forbidden=@()}
+  merge_scope=[pscustomobject]@{expected=@('src/a.ts', 'docs/[slug].md');patterns=@();deny=@()}
+  acceptance_criteria=@();test_commands=@('exit 0');forbidden_operations=@()
+  expected_change_scope=[pscustomobject]@{files=2;lines=2};tier='normal';timeout_seconds=30;retry_limit=2
+}
+$canonicalPlan = [pscustomobject]@{level=1;parallelizable=$false;max_workers=1;summary='fixture';integration_test_commands=@();tasks=@($canonicalTask)}
+$schemaPath = Join-Path $PSScriptRoot 'router-plan.schema.json'
+Assert-PolicyTest 'canonical planner output validates against actual schema' (Test-Json -Json ($canonicalPlan | ConvertTo-Json -Depth 12) -SchemaFile $schemaPath)
+$canonicalPolicy = Resolve-FilesystemPolicy $canonicalTask
+Assert-PolicyTest 'canonical normalization preserves expected scope' (($canonicalPolicy.write_scope.expected -join '|') -eq ($canonicalTask.allowed_files -join '|'))
+Assert-PolicyTest 'legacy normalization exactly maps expected and default merge' (($legacy.write_scope.expected -join '|') -eq ($legacyTask.allowed_files -join '|') -and ($legacy.merge_scope.expected -join '|') -eq ($legacyTask.allowed_files -join '|'))
+$canonicalPlan.tasks = @($legacyTask)
+Assert-PolicyTest 'legacy-only input is outside canonical planner schema' (-not (Test-Json -Json ($canonicalPlan | ConvertTo-Json -Depth 12) -SchemaFile $schemaPath -ErrorAction SilentlyContinue))
+foreach ($field in @('allowed_files', 'read_scope', 'write_scope', 'merge_scope')) {
+  $missing = $canonicalTask.PSObject.Copy(); $missing.PSObject.Properties.Remove($field)
+  $canonicalPlan.tasks = @($missing)
+  Assert-PolicyTest "planner cannot omit $field" (-not (Test-Json -Json ($canonicalPlan | ConvertTo-Json -Depth 12) -SchemaFile $schemaPath -ErrorAction SilentlyContinue))
+}
+
 function Test-StrictObjectSchema($Node) {
   if ($null -eq $Node) { return $true }
   if ($Node.type -eq 'object') {

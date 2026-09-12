@@ -7,6 +7,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
+# Canonical planner output only. External legacy task files are normalized by
+# Resolve-FilesystemPolicy in the runtime loader without this planner schema.
 $schemaPath = Join-Path $root 'router-plan.schema.json'
 $orchestrator = Join-Path $root 'run-parallel-workers.ps1'
 . (Join-Path $root 'filesystem-policy.ps1')
@@ -32,7 +34,7 @@ $Request
 Rules:
 1. Do not edit files, run the worker router, or implement the request yourself.
 2. Classify level 0-3. Use max_workers 2 only when tasks have disjoint file ownership and can execute against the same base commit.
-3. Always return both legacy allowed_files and the v2.1 read_scope/write_scope/merge_scope contract. Set allowed_files equal to write_scope.expected. Return every schema field, using empty arrays when no values apply. For merge_scope, set expected to the merge paths, patterns to an empty array, and deny to an empty array unless a narrow deny is needed. Every write or merge path must be repository-relative and narrowly scoped. Never allow .git/**, .agent/**, **, or the repository root.
+3. This schema is the canonical v2.1 planner output contract, not a legacy task input schema. Always return allowed_files plus read_scope/write_scope/merge_scope. Set allowed_files equal to write_scope.expected. Legacy allowed_files-only task files remain supported by runtime normalization outside this schema. Return every schema field, using empty arrays when no values apply. For merge_scope, set expected to the merge paths, patterns to an empty array, and deny to an empty array unless a narrow deny is needed. Every write or merge path must be repository-relative and narrowly scoped. Never allow .git/**, .agent/**, **, or the repository root.
 4. Tasks in this executable plan must be independent, so depends_on must be empty. If work has dependencies, combine that chain into one task.
 5. Prompts must include objective, allowed scope, acceptance criteria, and instructions to run the listed tests.
 6. Choose deterministic existing test/build/lint commands after inspecting package manifests and project configuration.

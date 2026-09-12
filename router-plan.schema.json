@@ -1,5 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Canonical v2.1 planner output",
+  "description": "Internal executable planner output requires allowed_files plus read_scope, write_scope and merge_scope. allowed_files mirrors write_scope.expected. Legacy allowed_files-only task files are supported by runtime normalization outside this schema.",
   "type": "object",
   "additionalProperties": false,
   "required": ["level", "parallelizable", "max_workers", "summary", "integration_test_commands", "tasks"],
