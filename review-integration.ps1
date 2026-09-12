@@ -257,7 +257,7 @@ if ($review.verdict -ne 'PASS') {
 }
 
 # Validate integration diff
-$diffFiles = @(& git -C $repoRoot diff --name-only "$baseCommit...$candidateCommit" | Where-Object { $_ })
+$diffFiles = @(& git -c core.quotepath=false -C $repoRoot diff --name-only "$baseCommit...$candidateCommit" | Where-Object { $_ })
 if ($diffFiles.Count -eq 0) {
   Record-Diagnostic 'diff_empty' "Integration diff between base commit '$baseCommit' and candidate commit '$candidateCommit' is empty."
   exit 1

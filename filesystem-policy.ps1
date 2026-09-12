@@ -299,7 +299,7 @@ function Resolve-FilesystemPolicy {
 function Get-FilesystemScopeVerification {
   [CmdletBinding()]
   param(
-    [Parameter(Mandatory = $true)][string[]]$ChangedFiles,
+    [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$ChangedFiles,
     [Parameter(Mandatory = $true)]$Policy
   )
 
@@ -392,6 +392,71 @@ function Get-WriteExpansionDecision {
   }
 
   return [pscustomobject]@{ decision = 'ALLOW_DERIVED'; target = $target; matchedPattern = $null; reason = $relation }
+}
+
+# The response must be one JSON object (an optional JSON code fence is accepted).
+# Ordinary prose is never classified by searching for decision/action keywords.
+function ConvertFrom-WriteExpansionResponse([string]$Response) {
+  if ([string]::IsNullOrWhiteSpace($Response)) { return $null }
+  $json = $Response.Trim()
+  if ($json -match '(?s)^```(?:json)?\s*\r?\n(.*?)\r?\n```$') { $json = $Matches[1] }
+  try { $request = ConvertFrom-Json -InputObject $json -ErrorAction Stop } catch { return $null }
+  if ($request -is [pscustomobject] -and $request.action -ceq 'REQUEST_WRITE_EXPANSION') { return $request }
+  return $null
+}
+
+function Invoke-TaskWriteExpansion {
+  param(
+    [Parameter(Mandatory = $true)]$Request,
+    [Parameter(Mandatory = $true)]$Policy,
+    [int]$ExpansionCount = 0,
+    [ValidateRange(1, 10)][int]$ExpansionLimit = 3,
+    [object[]]$OtherPolicies = @()
+  )
+  try {
+    if ($Request.target -isnot [string] -or $Request.reason -isnot [string] -or [string]::IsNullOrWhiteSpace($Request.reason)) {
+      throw 'target and reason must be nonempty strings'
+    }
+    # Keep the existing target/evidence contract and decision precedence.
+    $answer = Get-WriteExpansionDecision $Request $Policy
+    if ($answer.decision -eq 'ALLOW_DERIVED') {
+      if ($Request.evidence -isnot [pscustomobject] -or $Request.evidence.source_file -isnot [string]) { throw 'invalid dependency evidence' }
+      $null = ConvertTo-PolicyPath $Request.evidence.source_file
+      $mergeDeny = Get-PolicyPathMatch $answer.target $Policy.merge_scope.deny
+      if ($mergeDeny.matched) {
+        $answer.decision = 'DENY_DERIVED'; $answer.reason = 'target is denied by merge scope'; $answer.matchedPattern = $mergeDeny.matchedPattern
+      } elseif ((Test-PolicyPath $answer.target $Policy.write_scope.expected) -or (Test-PolicyPath $answer.target $Policy.write_scope.derived_approved)) {
+        $answer.decision = 'DENY_DERIVED'; $answer.reason = 'target already approved; duplicate expansion request'
+      } elseif ($ExpansionCount -ge $ExpansionLimit) {
+        $answer.decision = 'DENY_DERIVED'; $answer.reason = 'write expansion limit reached'
+      } else {
+        foreach ($other in $OtherPolicies) {
+          $overlap = Get-PolicyPathMatch $answer.target (@($other.write_scope.expected) + @($other.write_scope.derived_approved))
+          if ($overlap.matched) {
+            $answer.decision = 'REQUIRE_REVIEW'; $answer.reason = 'target overlaps another task write scope'; $answer.matchedPattern = $overlap.matchedPattern
+            break
+          }
+        }
+      }
+    }
+  } catch {
+    $answer = [pscustomobject]@{ decision = 'DENY_DERIVED'; target = [string]$Request.target; matchedPattern = $null; reason = "invalid expansion request: $($_.Exception.Message)" }
+  }
+  $approved = $answer.decision -eq 'ALLOW_DERIVED'
+  if ($approved) {
+    $Policy.write_scope.derived_approved = @($Policy.write_scope.derived_approved) + @($answer.target)
+    if (-not (Test-PolicyPath $answer.target $Policy.merge_scope.expected)) {
+      $Policy.merge_scope.expected = @($Policy.merge_scope.expected) + @($answer.target)
+    }
+  }
+  return [pscustomobject]@{
+    target = $answer.target; decision = $answer.decision; reason = $answer.reason
+    requestReason = $Request.reason; evidence = $Request.evidence; matchedPattern = $answer.matchedPattern
+    approvedAt = if ($approved) { (Get-Date).ToString('o') } else { $null }
+    deniedAt = if (-not $approved) { (Get-Date).ToString('o') } else { $null }
+    expansionCount = $ExpansionCount + [int]$approved
+    derived_approved = @($Policy.write_scope.derived_approved)
+  }
 }
 
 function Test-PolicyPatternOverlap {

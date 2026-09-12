@@ -625,7 +625,9 @@ FILESYSTEM POLICY v2.1:
 $policyJson
 
 Repository search/read is allowed only inside this task worktree, except read_scope.deny paths. Modify only write_scope.expected or write_scope.derived_approved. Do not modify sensitive or forbidden paths unless they are explicitly present in write_scope.expected. The orchestrator independently verifies the final diff and merge scope.
-If another file is required, report a JSON object with action REQUEST_WRITE_EXPANSION, target, reason, and dependency evidence instead of silently expanding scope.
+If another file is required, stop before editing it and return ONLY a JSON object such as:
+{"action":"REQUEST_WRITE_EXPANSION","target":"src/dependency.ts","reason":"required by direct import dependency","evidence":{"relation":"direct_import","source_file":"src/original.ts"}}
+evidence.source_file must be inside approved write scope. Supported relations: direct_import, direct_export, direct_symbol_dependency, interface_implementation, feature_implementation_dependency, new_unit_test. Sensitive targets require review; forbidden targets are denied. At most 3 expansions are approved per task. Do not repeat an approved target.
 "@
   foreach ($argument in @(
     '-NoProfile', '-File', $workerScript,
@@ -670,8 +672,8 @@ function Sync-LiveWorkers([string]$RunRoot) {
 }
 
 function Get-ChangedFiles([string]$Worktree, [string]$BaseCommit) {
-  $tracked = @(& git -C $Worktree diff --name-only $BaseCommit -- 2>$null)
-  $untracked = @(& git -C $Worktree ls-files --others --exclude-standard 2>$null)
+  $tracked = @(& git -c core.quotepath=false -C $Worktree diff --name-only $BaseCommit -- 2>$null)
+  $untracked = @(& git -c core.quotepath=false -C $Worktree ls-files --others --exclude-standard 2>$null)
   return @($tracked + $untracked | Where-Object { $_ } | ForEach-Object { $_.Replace('\', '/') } | Sort-Object -Unique)
 }
 
@@ -855,6 +857,7 @@ try {
     Write-AtomicJson (Join-Path $runRoot "tasks\$safeId.json") ([pscustomobject]@{
       id = $task.id; name = $task.name; prompt = $task.prompt; tier = $task.tier; allowedFiles = @($policy.write_scope.expected)
       filesystemPolicy = $policy
+      expansionRequests = @(); expansionCount = 0; expansionLimit = 3; testRetryCount = 0
       testCommands = @($task.test_commands); timeoutSeconds = if ($task.timeout_seconds) { [int]$task.timeout_seconds } else { $WorkerTimeoutSeconds }
       retryLimit = if ($null -ne $task.retry_limit) { [math]::Min(3, [math]::Max(0, [int]$task.retry_limit)) } else { 3 }
       branch = $branch; worktree = $worktree; baseCommit = $baseCommit
@@ -931,6 +934,11 @@ try {
     $statePath = Join-Path $runRoot "workers\$safeId.json"
     $record = $jobRecords | Where-Object { $_.Task.id -eq $task.id } | Select-Object -First 1
     $attempt = 1
+    $testRetryCount = 0
+    $expansionCount = 0
+    $expansionLimit = 3
+    $expansionRequests = @()
+    $taskStatePath = Join-Path $runRoot "tasks\$safeId.json"
     $retryLimit = if ($null -ne $task.retry_limit) { [math]::Min(3, [math]::Max(2, [int]$task.retry_limit)) } else { 3 }
     $history = @()
     $fingerprints = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
@@ -943,9 +951,29 @@ try {
       $changed = @(Get-ChangedFiles $wt.path $baseCommit)
       $scopeVerification = Get-FilesystemScopeVerification -ChangedFiles $changed -Policy $policy
       $violations = @($scopeVerification.violations)
+      $expansion = $null
+      if (-not $wasCancelled -and -not $wasTimedOut -and $state.status -eq 'completed' -and $violations.Count -eq 0) {
+        $request = ConvertFrom-WriteExpansionResponse ([string]$state.finalResponse)
+        if ($request) {
+          $others = @($tasks | Where-Object { $_.id -ne $task.id } | ForEach-Object { $normalizedPolicies[[string]$_.id] })
+          $expansion = Invoke-TaskWriteExpansion -Request $request -Policy $policy -ExpansionCount $expansionCount -ExpansionLimit $expansionLimit -OtherPolicies $others
+          $expansionCount = $expansion.expansionCount
+          $expansionRequests += $expansion
+          $taskSnapshot = Get-Content -Raw -LiteralPath $taskStatePath | ConvertFrom-Json
+          Set-ObjectProperty $taskSnapshot 'filesystemPolicy' $policy
+          Set-ObjectProperty $taskSnapshot 'expansionRequests' $expansionRequests
+          Set-ObjectProperty $taskSnapshot 'expansionCount' $expansionCount
+          Write-AtomicJson $taskStatePath $taskSnapshot
+        }
+      }
+      Set-ObjectProperty $state 'expansionRequests' $expansionRequests
+      Set-ObjectProperty $state 'expansionCount' $expansionCount
+      Set-ObjectProperty $state 'expansionLimit' $expansionLimit
+      Set-ObjectProperty $state 'testRetryCount' $testRetryCount
+      Set-ObjectProperty $state 'filesystemPolicy' $policy
       $bootstrapFailed = $false
       $bootstrapError = $null
-      if (-not $wasCancelled -and -not $wasTimedOut -and $state.status -eq 'completed' -and $violations.Count -eq 0) {
+      if (-not $expansion -and -not $wasCancelled -and -not $wasTimedOut -and $state.status -eq 'completed' -and $violations.Count -eq 0) {
         if (Test-Path -LiteralPath (Join-Path $wt.path 'gemini-dashboard')) {
           $bootWt = Ensure-DashboardDependencies -Worktree $wt.path -SourceWorktree $repoRoot
           if (-not $bootWt.success) {
@@ -955,7 +983,7 @@ try {
           }
         }
       }
-      $tests = if (-not $wasCancelled -and -not $wasTimedOut -and -not $bootstrapFailed -and $state.status -eq 'completed' -and $violations.Count -eq 0) { @(Invoke-Verification $wt.path @($task.test_commands)) } else { @() }
+      $tests = if (-not $expansion -and -not $wasCancelled -and -not $wasTimedOut -and -not $bootstrapFailed -and $state.status -eq 'completed' -and $violations.Count -eq 0) { @(Invoke-Verification $wt.path @($task.test_commands)) } else { @() }
       $branchEvtPath = Join-Path $runRoot "events\$safeId.ndjson"
       if ($tests -and $tests.Count -gt 0 -and (Test-Path -LiteralPath $branchEvtPath)) {
         $vSeq = 0
@@ -997,6 +1025,13 @@ try {
         'TIMED_OUT'
       } elseif ($violations.Count -gt 0) {
         'POLICY_VIOLATION'
+      } elseif ($expansion) {
+        switch ($expansion.decision) {
+          'ALLOW_DERIVED' { 'WRITE_EXPANSION_APPROVED' }
+          'REQUIRE_REVIEW' { 'WRITE_EXPANSION_REVIEW_REQUIRED' }
+          'DENY_FORBIDDEN' { 'DENY_FORBIDDEN' }
+          default { 'DENY_DERIVED' }
+        }
       } elseif ($bootstrapFailed) {
         'ENVIRONMENT_ERROR'
       } elseif ($classification) {
@@ -1013,33 +1048,48 @@ try {
       $attFile = Join-Path $runRoot "attempts\$safeId.attempt-$attempt.json"
       try { Write-AtomicJson $attFile $state } catch {}
 
-      if ($decision -ne 'TEST_FAILED') { break }
-      $fingerprint = Get-FailureFingerprint $tests $decision
-      $compressed = Get-CompressedFailureLog $tests
-      $history += [pscustomobject]@{ attempt=$attempt; decision=$decision; fingerprint=$fingerprint; failureLog=$compressed; verifiedAt=(Get-Date).ToString('o') }
-      $isHighTier = $currentTier -in @('advanced', 'reasoning')
-      if ($isHighTier) { $decision = 'HIGH_MODEL_FAILED'; break }
-      $isRepeated = $fingerprints.Contains($fingerprint)
-      $null = $fingerprints.Add($fingerprint)
-      if (($attempt - 1) -ge $retryLimit) { $decision = 'RETRY_EXHAUSTED'; break }
+      if ($decision -notin @('TEST_FAILED', 'WRITE_EXPANSION_APPROVED')) { break }
+      if ($decision -eq 'TEST_FAILED') {
+        $fingerprint = Get-FailureFingerprint $tests $decision
+        $compressed = Get-CompressedFailureLog $tests
+        $history += [pscustomobject]@{ attempt=$attempt; decision=$decision; fingerprint=$fingerprint; failureLog=$compressed; verifiedAt=(Get-Date).ToString('o') }
+        $isHighTier = $currentTier -in @('advanced', 'reasoning')
+        if ($isHighTier) { $decision = 'HIGH_MODEL_FAILED'; break }
+        $isRepeated = $fingerprints.Contains($fingerprint)
+        $null = $fingerprints.Add($fingerprint)
+        if ($testRetryCount -ge $retryLimit) { $decision = 'RETRY_EXHAUSTED'; break }
 
-      # Two failed attempts (including the same fingerprint twice) promote the
-      # next invocation to High. A failure on High is handed back to Codex.
-      if ($history.Count -ge 2 -or $isRepeated) { $currentTier = 'advanced' }
-
-      $attempt++
-      $retryPrompt = @"
+        # Two failed attempts (including the same fingerprint twice) promote the
+        # next invocation to High. A failure on High is handed back to Codex.
+        if ($history.Count -ge 2 -or $isRepeated) { $currentTier = 'advanced' }
+        $testRetryCount++
+        $retryPrompt = @"
 $($task.prompt)
 
 이전 구현은 오케스트레이터의 결정론적 검증에 실패했습니다. 현재 worktree의 기존 변경을 유지하고 아래 실패만 수정하세요.
 허용된 파일 외에는 수정하지 마세요. 테스트를 직접 실행해 통과시킨 뒤 결과를 보고하세요.
 
-ATTEMPT: $attempt
+ATTEMPT: $($attempt + 1)
 CHANGED_FILES: $($changed -join ', ')
 FAILURE_LOG:
 $compressed
 "@
-      $retryTask = [pscustomobject]@{ id=$task.id; name="$($task.name) (retry $($attempt - 1)/$retryLimit)"; prompt=$retryPrompt }
+      } else {
+        $retryPrompt = @"
+$($task.prompt)
+
+WRITE_EXPANSION_APPROVED: $($expansion.target)
+Approved derived scope: $($policy.write_scope.derived_approved -join ', ')
+Continue the existing work in this same worktree. Preserve all existing changes; do not restart or reset. Complete the original task using the updated policy below, then run its tests.
+"@
+      }
+      $attempt++ # Invocation identity for usage accounting, independent of test retries.
+      $taskSnapshot = Get-Content -Raw -LiteralPath $taskStatePath | ConvertFrom-Json
+      Set-ObjectProperty $taskSnapshot 'testRetryCount' $testRetryCount
+      Write-AtomicJson $taskStatePath $taskSnapshot
+      $retryTask = $task.PSObject.Copy()
+      Set-ObjectProperty $retryTask 'name' "$($task.name) (invocation $attempt)"
+      Set-ObjectProperty $retryTask 'prompt' $retryPrompt
       $process = Start-WorkerProcess $retryTask $policy $wt $currentTier $runId $runRoot $baseCommit $Timeout $attempt
       $record = [pscustomobject]@{ Process=$process; Task=$task; SafeId=$safeId; Worktree=$wt; StartedAt=Get-Date; TimedOut=$false; Cancelled=$false; Attempt=$attempt }
       $jobRecords += $record
@@ -1096,6 +1146,7 @@ $compressed
     Set-ObjectProperty $state 'workerReportedStatus' $state.status; Set-ObjectProperty $state 'status' $finalStatus
     Set-ObjectProperty $state 'baseCommit' $baseCommit; Set-ObjectProperty $state 'branch' $wt.branch; Set-ObjectProperty $state 'worktree' $wt.path
     Set-ObjectProperty $state 'attempt' $attempt; Set-ObjectProperty $state 'retryLimit' $retryLimit; Set-ObjectProperty $state 'retryHistory' $history
+    Set-ObjectProperty $state 'testRetryCount' $testRetryCount
     Set-ObjectProperty $state 'changedFiles' $changed
     Set-ObjectProperty $state 'commitHashes' $commitHashes
     Set-ObjectProperty $state 'policy' ([pscustomobject]@{
@@ -1110,7 +1161,7 @@ $compressed
       status = $scopeVerification.status
     })
     Set-ObjectProperty $state 'verification' ([pscustomobject]@{ decision=$decision; commands=$tests; verifiedAt=(Get-Date).ToString('o') })
-    Set-ObjectProperty $state 'escalation' $(if ($decision -eq 'PASS') { $null } else { [pscustomobject]@{ requiresCodex=$true; category=$decision; reason="자동 처리 중단: $decision" } })
+    Set-ObjectProperty $state 'escalation' $(if ($decision -eq 'PASS') { $null } else { [pscustomobject]@{ requiresCodex=$true; category=$decision; reason=$(if ($expansion) { $expansion.reason } else { "자동 처리 중단: $decision" }) } })
     Set-ObjectProperty $state 'updatedAt' (Get-Date).ToString('o')
     Write-AtomicJson $statePath $state; Write-AtomicJson (Join-Path $runRoot "results\$safeId-result.json") $state
     $finalAttPath = Join-Path $runRoot "attempts\$safeId.attempt-$attempt.json"
@@ -1144,10 +1195,18 @@ $compressed
         $failed++
       } else {
         $cherryPicks = @()
+        $integrationPolicies = @()
         $integrationDecision = 'AWAITING_CODEX_REVIEW'
         foreach ($task in $tasks) {
           $safeId = ([string]$task.id) -replace '[^A-Za-z0-9._-]', '-'
-          $result = Get-Content -Raw (Join-Path $runRoot "results\$safeId-result.json") | ConvertFrom-Json
+          $result = Get-Content -Raw -LiteralPath (Join-Path $runRoot "results\$safeId-result.json") | ConvertFrom-Json
+          $savedTask = Get-Content -Raw -LiteralPath (Join-Path $runRoot "tasks\$safeId.json") | ConvertFrom-Json
+          $candidateFiles = if (@($result.commitHashes).Count -gt 0) {
+            @(& git -c core.quotepath=false -C $repoRoot diff --name-only $baseCommit $result.commitHashes[-1] --)
+          } else { @() }
+          $candidateScope = Get-FilesystemScopeVerification -ChangedFiles $candidateFiles -Policy $savedTask.filesystemPolicy
+          $integrationPolicies += [pscustomobject]@{ taskId=$task.id; filesystemPolicy=$savedTask.filesystemPolicy; verification=$candidateScope }
+          if ($candidateScope.status -ne 'PASS') { $integrationDecision = 'INTEGRATION_POLICY_VIOLATION'; break }
           foreach ($commitHash in @($result.commitHashes)) {
             & git -C $integrationPath cherry-pick $commitHash
             $pickStatus = if ($LASTEXITCODE -eq 0) { 'PASS' } else { 'CONFLICT' }
@@ -1162,7 +1221,7 @@ $compressed
         }
         $integrationTests = if ($integrationDecision -eq 'AWAITING_CODEX_REVIEW') { @(Invoke-Verification $integrationPath $integrationTestCommands) } else { @() }
         if (@($integrationTests | Where-Object { $_.status -in @('FAIL', 'TIMED_OUT') -or ($null -ne $_.exitCode -and $_.exitCode -ne 0) -or $_.timedOut }).Count -gt 0) { $integrationDecision = 'INTEGRATION_TEST_FAILED' }
-        $diffFiles = @(& git -C $integrationPath diff --name-only "$baseCommit...HEAD" | Where-Object { $_ })
+        $diffFiles = @(& git -c core.quotepath=false -C $integrationPath diff --name-only "$baseCommit...HEAD" | Where-Object { $_ })
         $diffStat = @(& git -C $integrationPath diff --stat "$baseCommit...HEAD") -join "`n"
         $integrationCommits = @(& git -C $integrationPath rev-list --reverse "$baseCommit..HEAD")
         $integration = [pscustomobject]@{
@@ -1170,6 +1229,7 @@ $compressed
           branch=$integrationBranch; worktree=$integrationPath; baseCommit=$baseCommit; headCommit=(& git -C $integrationPath rev-parse HEAD).Trim()
           decision=$integrationDecision; approvalRequired=$true; mainModified=$false; cherryPicks=$cherryPicks
           tests=$integrationTests; changedFiles=$diffFiles; diffStat=$diffStat; commits=$integrationCommits
+          taskPolicies=$integrationPolicies
           reviewArtifact=(Join-Path $runRoot 'integration-review.md')
         }
         Write-AtomicJson (Join-Path $runRoot 'integration.json') $integration

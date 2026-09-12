@@ -9,7 +9,8 @@ param(
   [string]$TaskId = '',
   [string]$StateRoot = '',
   [string]$BaseCommit = '',
-  [ValidateRange(1, 4)][int]$Attempt = 1,
+  # Initial invocation + at most three test retries + three write expansions.
+  [ValidateRange(1, 7)][int]$Attempt = 1,
   [string]$DashboardPath = '',
   [string]$DataDir = '',
   [string[]]$MockOutputLines = @(),
@@ -373,6 +374,18 @@ function Sync-LiveWorker {
     error          = if ($Err) { Redact-Secrets -Text $Err } else { $null }
   }
 
+  if ($isParallelWorker) {
+    $safeTaskId = $workerKey -replace '[^A-Za-z0-9._-]', '-'
+    $taskPolicyPath = Join-Path $StateRoot "tasks\$safeTaskId.json"
+    if (Test-Path -LiteralPath $taskPolicyPath) {
+      $taskPolicy = Get-Content -Raw -LiteralPath $taskPolicyPath | ConvertFrom-Json
+      foreach ($field in @('filesystemPolicy', 'expansionRequests', 'expansionCount', 'expansionLimit', 'testRetryCount')) {
+        if ($taskPolicy.PSObject.Properties.Name -contains $field) {
+          $liveObj | Add-Member -NotePropertyName $field -NotePropertyValue $taskPolicy.$field
+        }
+      }
+    }
+  }
   Write-AtomicJson -Path $liveWorkerPath -Data $liveObj
   if ($attemptStatePath) {
     try { Write-AtomicJson -Path $attemptStatePath -Data $liveObj } catch {}
