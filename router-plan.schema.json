@@ -16,11 +16,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "name", "objective", "prompt", "depends_on", "test_commands", "tier", "timeout_seconds", "retry_limit"],
-        "anyOf": [
-          { "required": ["allowed_files"] },
-          { "required": ["write_scope"] }
-        ],
+        "required": ["id", "name", "objective", "prompt", "depends_on", "allowed_files", "read_scope", "write_scope", "merge_scope", "acceptance_criteria", "test_commands", "forbidden_operations", "expected_change_scope", "tier", "timeout_seconds", "retry_limit"],
         "properties": {
           "id": { "type": "string", "pattern": "^TASK-[0-9]{3}$" },
           "name": { "type": "string", "minLength": 1 },
@@ -31,6 +27,7 @@
           "read_scope": {
             "type": "object",
             "additionalProperties": false,
+            "required": ["root", "mode", "deny"],
             "properties": {
               "root": { "type": "string", "enum": ["task_worktree"] },
               "mode": { "type": "string", "enum": ["project_wide_search"] },
@@ -40,7 +37,7 @@
           "write_scope": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["expected"],
+            "required": ["expected", "derived_auto_expand", "derived_approved", "sensitive", "forbidden"],
             "properties": {
               "expected": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 },
               "derived_auto_expand": { "type": "boolean" },
@@ -50,18 +47,14 @@
             }
           },
           "merge_scope": {
-            "anyOf": [
-              { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 },
-              {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                  "expected": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 },
-                  "patterns": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 },
-                  "deny": { "type": "array", "items": { "type": "string", "minLength": 1 } }
-                }
-              }
-            ]
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["expected", "patterns", "deny"],
+            "properties": {
+              "expected": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 },
+              "patterns": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+              "deny": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+            }
           },
           "acceptance_criteria": { "type": "array", "items": { "type": "string", "minLength": 1 } },
           "test_commands": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1, "maxItems": 8 },
@@ -69,6 +62,7 @@
           "expected_change_scope": {
             "type": "object",
             "additionalProperties": false,
+            "required": ["files", "lines"],
             "properties": {
               "files": { "type": "integer", "minimum": 0 },
               "lines": { "type": "integer", "minimum": 0 }

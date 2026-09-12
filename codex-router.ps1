@@ -32,7 +32,7 @@ $Request
 Rules:
 1. Do not edit files, run the worker router, or implement the request yourself.
 2. Classify level 0-3. Use max_workers 2 only when tasks have disjoint file ownership and can execute against the same base commit.
-3. Use the v2.1 read_scope/write_scope/merge_scope contract when useful. Legacy allowed_files remains supported as write_scope.expected. Every write or merge path must be repository-relative and narrowly scoped. Never allow .git/**, .agent/**, **, or the repository root.
+3. Always return both legacy allowed_files and the v2.1 read_scope/write_scope/merge_scope contract. Set allowed_files equal to write_scope.expected. Return every schema field, using empty arrays when no values apply. For merge_scope, set expected to the merge paths, patterns to an empty array, and deny to an empty array unless a narrow deny is needed. Every write or merge path must be repository-relative and narrowly scoped. Never allow .git/**, .agent/**, **, or the repository root.
 4. Tasks in this executable plan must be independent, so depends_on must be empty. If work has dependencies, combine that chain into one task.
 5. Prompts must include objective, allowed scope, acceptance criteria, and instructions to run the listed tests.
 6. Choose deterministic existing test/build/lint commands after inspecting package manifests and project configuration.

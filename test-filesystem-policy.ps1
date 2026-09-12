@@ -124,7 +124,36 @@ Assert-PolicyTest 'expected scope only accepts literal paths or /** recursion' $
 $schema = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'router-plan.schema.json') | ConvertFrom-Json
 $properties = $schema.properties.tasks.items.properties
 Assert-PolicyTest 'router schema exposes v2.1 scopes' ($properties.read_scope -and $properties.write_scope -and $properties.merge_scope)
-Assert-PolicyTest 'router schema preserves legacy allowed_files' ($properties.allowed_files -and $schema.properties.tasks.items.anyOf.Count -eq 2)
+Assert-PolicyTest 'router schema preserves legacy allowed_files field' ($null -ne $properties.allowed_files)
+
+function Test-StrictObjectSchema($Node) {
+  if ($null -eq $Node) { return $true }
+  if ($Node.type -eq 'object') {
+    if ($Node.additionalProperties -ne $false) { return $false }
+    $propertyNames = @($Node.properties.PSObject.Properties.Name)
+    $requiredNames = @($Node.required)
+    foreach ($name in $propertyNames) {
+      if ($requiredNames -notcontains $name) { return $false }
+    }
+  }
+  if ($Node.properties) {
+    foreach ($property in $Node.properties.PSObject.Properties) {
+      if (-not (Test-StrictObjectSchema $property.Value)) { return $false }
+    }
+  }
+  if ($Node.items -and -not (Test-StrictObjectSchema $Node.items)) { return $false }
+  foreach ($branchName in @('anyOf', 'oneOf', 'allOf')) {
+    foreach ($branch in @($Node.$branchName)) {
+      if ($branch -and -not (Test-StrictObjectSchema $branch)) { return $false }
+    }
+  }
+  return $true
+}
+
+Assert-PolicyTest 'router schema satisfies strict object requirements' (Test-StrictObjectSchema $schema)
+$reviewSchema = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'codex-review.schema.json') | ConvertFrom-Json
+Assert-PolicyTest 'review schema requires candidate commit binding' (@($reviewSchema.required) -contains 'candidateCommit')
+Assert-PolicyTest 'review schema satisfies strict object requirements' (Test-StrictObjectSchema $reviewSchema)
 
 Write-Host "`nFilesystem Policy tests: $passed passed / $failed failed" -ForegroundColor Cyan
 if ($failed -gt 0) { exit 1 }

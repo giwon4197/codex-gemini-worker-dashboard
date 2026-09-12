@@ -246,6 +246,8 @@ try {
     Assert-Test 'worker-dashboard.cmd가 dashboard-launcher.cmd로 위임함' $cmdDelegates
     $ps1Delegates = [bool]($installContent -like '*dashboard-launcher.cmd*')
     Assert-Test 'worker-dashboard.ps1이 dashboard-launcher.cmd로 위임함' $ps1Delegates
+    Assert-Test 'install.ps1이 PowerShell 7 절대 경로를 결정함' ($installContent -like '*Resolve-PowerShell7*' -and $installContent -like '*$pwshPath*')
+    Assert-Test '생성 워커 CMD가 Windows PowerShell 5.1 대신 pwsh를 사용함' ($installContent -like '*"__PWSH_PATH__" -NoProfile -File*' -and $installContent -notlike '*powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0gemini-worker.ps1"*')
 
 } finally {
     if (Test-Path -LiteralPath $testTempRoot) {

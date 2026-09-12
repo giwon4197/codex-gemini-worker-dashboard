@@ -508,6 +508,37 @@ void describe('Workspace Node Bridge (Vite Dev/Server Middleware & App Route Bri
       assert.ok(!data.error.includes('Error:'));
       assert.ok(!data.error.includes('at '));
     });
+
+    void test('returns a sanitized actionable launcher error and run ID instead of a generic message', async () => {
+      const req = new Request('http://localhost:3000/api/runs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: '실행기 오류 원인 표시 테스트' }),
+      });
+
+      const res = await handleWorkspaceBridgeRequest(req, {
+        repoRoot: testRepoDir,
+        spawner: () => {
+          throw new Error(`spawn failed at ${testRepoDir} with token sk-abcdefghijklmnopqrstuvwxyz123456`);
+        },
+      });
+
+      assert.strictEqual(res.status, 500);
+      const data = (await res.json()) as {
+        ok: boolean;
+        error: string;
+        errorCategory?: string;
+        runId?: string;
+      };
+      assert.strictEqual(data.ok, false);
+      assert.strictEqual(data.errorCategory, 'launcher_error');
+      assert.ok(data.runId);
+      assert.ok(data.error.includes('실행기 오류:'));
+      assert.ok(data.error.includes('spawn failed'));
+      assert.ok(!data.error.includes('작업 요청 처리 중 오류가 발생했습니다'));
+      assert.ok(!data.error.includes(testRepoDir));
+      assert.ok(!data.error.includes('sk-abcdefghijklmnopqrstuvwxyz123456'));
+    });
   });
 
   void describe('8. Korean UTF-8 Handling (한글 경로 및 프롬프트)', () => {

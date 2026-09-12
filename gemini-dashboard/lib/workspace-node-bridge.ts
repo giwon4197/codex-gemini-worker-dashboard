@@ -142,12 +142,14 @@ export async function handleWorkspaceBridgeRequest(
       const root = repoValidation.repoRoot;
       const rawMsg = err instanceof Error ? err.message : String(err);
       const sanitizedMsg = sanitizeText(rawMsg, root);
+      const launcherError = err as Error & { runId?: string; errorCategory?: string };
+      const publicReason = sanitizedMsg.trim() || '알 수 없는 실행기 오류';
       return Response.json(
         {
           ok: false,
-          error: sanitizedMsg.includes('필수 실행 도구')
-            ? sanitizedMsg
-            : '작업 요청 처리 중 오류가 발생했습니다.',
+          error: `실행기 오류: ${publicReason}`,
+          errorCategory: launcherError.errorCategory || 'launcher_error',
+          runId: launcherError.runId,
         },
         { status: 500, headers: JSON_HEADERS }
       );

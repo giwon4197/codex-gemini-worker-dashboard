@@ -44,6 +44,20 @@ function Ensure-Antigravity {
     if (-not (Test-Path -LiteralPath $agy)) { throw 'Antigravity CLI 설치를 확인할 수 없습니다.' }
 }
 
+function Resolve-PowerShell7 {
+    $command = Get-Command pwsh.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($command -and $command.Source -and (Test-Path -LiteralPath $command.Source)) {
+        return [IO.Path]::GetFullPath($command.Source)
+    }
+    foreach ($candidate in @(
+        'C:\Program Files\PowerShell\7\pwsh.exe',
+        'C:\Program Files\PowerShell\7-preview\pwsh.exe'
+    )) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+    }
+    throw 'PowerShell 7(pwsh.exe)이 필요합니다. PowerShell 7을 설치한 뒤 다시 실행하세요.'
+}
+
 function Add-UserPath([string]$PathToAdd) {
     $current = [Environment]::GetEnvironmentVariable('Path', 'User')
     $parts = @($current -split ';' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
@@ -66,6 +80,7 @@ function Initialize-RuntimeFile([string]$Example, [string]$Target) {
 Require-Windows
 Ensure-Node
 Ensure-Antigravity
+$pwshPath = Resolve-PowerShell7
 
 $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("codex-gemini-install-" + [guid]::NewGuid())
 $zipPath = Join-Path $tempRoot 'source.zip'
@@ -198,30 +213,31 @@ param(
 exit $LASTEXITCODE
 '@
     Set-Content -LiteralPath (Join-Path $launcherDir 'worker-dashboard.ps1') -Value $dashboardLauncherPs -Encoding utf8
+    $escapedPwsh = $pwshPath.Replace('%', '%%')
     $workerCmd = @'
 @echo off
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0gemini-worker.ps1" %*
-'@
+"__PWSH_PATH__" -NoProfile -File "%~dp0gemini-worker.ps1" %*
+'@.Replace('__PWSH_PATH__', $escapedPwsh)
     $dashboardCmd = @'
 @echo off
 "%~dp0dashboard-launcher.cmd" %*
 '@
     $parallelCmd = @'
 @echo off
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0parallel-gemini-workers.ps1" %*
-'@
+"__PWSH_PATH__" -NoProfile -File "%~dp0parallel-gemini-workers.ps1" %*
+'@.Replace('__PWSH_PATH__', $escapedPwsh)
     $stopParallelCmd = @'
 @echo off
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0stop-parallel-run.ps1" %*
-'@
+"__PWSH_PATH__" -NoProfile -File "%~dp0stop-parallel-run.ps1" %*
+'@.Replace('__PWSH_PATH__', $escapedPwsh)
     $codexRouterCmd = @'
 @echo off
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0codex-route.ps1" %*
-'@
+"__PWSH_PATH__" -NoProfile -File "%~dp0codex-route.ps1" %*
+'@.Replace('__PWSH_PATH__', $escapedPwsh)
     $reviewIntegrationCmd = @'
 @echo off
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0review-integration.ps1" %*
-'@
+"__PWSH_PATH__" -NoProfile -File "%~dp0review-integration.ps1" %*
+'@.Replace('__PWSH_PATH__', $escapedPwsh)
     Set-Content -LiteralPath (Join-Path $launcherDir 'gemini-worker.cmd') -Value $workerCmd -Encoding ascii
     Set-Content -LiteralPath (Join-Path $launcherDir 'worker-dashboard.cmd') -Value $dashboardCmd -Encoding ascii
     Set-Content -LiteralPath (Join-Path $launcherDir 'parallel-gemini-workers.cmd') -Value $parallelCmd -Encoding ascii
@@ -229,6 +245,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0review-integration
     Set-Content -LiteralPath (Join-Path $launcherDir 'codex-route.cmd') -Value $codexRouterCmd -Encoding ascii
     Set-Content -LiteralPath (Join-Path $launcherDir 'review-integration.cmd') -Value $reviewIntegrationCmd -Encoding ascii
     Add-UserPath $launcherDir
+    Add-UserPath (Split-Path -Parent $pwshPath)
     [Environment]::SetEnvironmentVariable('CODEX_GEMINI_INSTALL_ROOT', $InstallRoot, 'User')
     $env:CODEX_GEMINI_INSTALL_ROOT = $InstallRoot
 
