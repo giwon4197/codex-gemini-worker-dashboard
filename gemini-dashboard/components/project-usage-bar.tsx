@@ -112,35 +112,60 @@ export interface ProjectUsageBarProps {
 }
 
 export function ProjectUsageBar({ tracker }: ProjectUsageBarProps = {}) {
-  const [codex, setCodex] = useState<CodexState>(() => {
-    if (typeof window !== 'undefined') {
-      try {
-        const raw = window.sessionStorage?.getItem(STORAGE_KEY_CODEX) || window.localStorage?.getItem(STORAGE_KEY_CODEX);
-        if (raw) {
-          const parsed = JSON.parse(raw) as CodexState;
-          if (parsed && parsed.status === 'success' && parsed.percent !== null) {
-            return parsed;
-          }
-        }
-      } catch {}
-    }
-    return { status: 'idle', percent: null, lastSyncedAt: null, rateLimits: null };
+  const [codex, setCodex] = useState<CodexState>({
+    status: 'idle',
+    percent: null,
+    lastSyncedAt: null,
+    rateLimits: null,
+  });
+  const [gemini, setGemini] = useState<GeminiState>({
+    status: 'idle',
+    percent: null,
+    lastSyncedAt: null,
+    quota: null,
   });
 
-  const [gemini, setGemini] = useState<GeminiState>(() => {
+  useEffect(() => {
+    let cancelled = false;
+    let cachedCodex: CodexState | null = null;
+    let cachedGemini: GeminiState | null = null;
+
     if (typeof window !== 'undefined') {
       try {
-        const raw = window.sessionStorage?.getItem(STORAGE_KEY_GEMINI) || window.localStorage?.getItem(STORAGE_KEY_GEMINI);
-        if (raw) {
-          const parsed = JSON.parse(raw) as GeminiState;
+        const rawCodex =
+          window.sessionStorage?.getItem(STORAGE_KEY_CODEX) ||
+          window.localStorage?.getItem(STORAGE_KEY_CODEX);
+        if (rawCodex) {
+          const parsed = JSON.parse(rawCodex) as CodexState;
           if (parsed && parsed.status === 'success' && parsed.percent !== null) {
-            return parsed;
+            cachedCodex = parsed;
+          }
+        }
+      } catch {}
+
+      try {
+        const rawGemini =
+          window.sessionStorage?.getItem(STORAGE_KEY_GEMINI) ||
+          window.localStorage?.getItem(STORAGE_KEY_GEMINI);
+        if (rawGemini) {
+          const parsed = JSON.parse(rawGemini) as GeminiState;
+          if (parsed && parsed.status === 'success' && parsed.percent !== null) {
+            cachedGemini = parsed;
           }
         }
       } catch {}
     }
-    return { status: 'idle', percent: null, lastSyncedAt: null, quota: null };
-  });
+
+    queueMicrotask(() => {
+      if (cancelled) return;
+      if (cachedCodex) setCodex(cachedCodex);
+      if (cachedGemini) setGemini(cachedGemini);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const [activeTooltip, setActiveTooltip] = useState<'codex' | 'gemini' | null>(null);
 
