@@ -105,3 +105,48 @@ Orchestrator는 성공 종료한 worker의 현재 diff가 기존 정책을 통�
 - 기존 filesystem 정책은 worker prompt와 최종 diff 검증에 기반한다. OS 수준의 파일 읽기·쓰기 sandbox를 새로 구현하지 않았다.
 - Build는 성공했지만 vinext의 route 정적 분류 한계 안내가 남는다. 기존 dependency audit 문제의 재평가나 dependency upgrade는 이번 범위에 포함하지 않았다.
 - 현재 결정론적 검증에서 미해결 실패는 없다. 로컬 코드 리뷰 및 검증 기준으로 main 병합 검토가 가능한 상태이며, main 병합은 수행하지 않았다.
+
+## ver3 — stabilization verification (2026-09-14)
+
+검증은 진행 중이며 아래에는 실제 실행 결과만 누적한다. Gemini/Codex 온라인 모델 호출은 수행하지 않았다.
+
+### Git baseline
+
+- 기준: origin/hjw-v2.1-ver2 = 924639ede7833b45913d02329c85114b014562fd (로컬 ver2 브랜치 없음)
+- 생성 브랜치: hjw-v2.1-ver3, 위 기준 SHA에서 생성
+- main: a57323acf1a24897e55db986552486c56741291b
+- origin/main (요청한 fetch 이후): f6e954b59377843f893707badee7b3986486b14b
+- fetch 이전 origin/main: aa179e0f7f054e02266af69feb8933664118ca2c
+- 시작 working tree: clean; 기존 ver3 로컬/원격 브랜치 없음
+- 기존 Author/Committer: 허주완 <eric5519@naver.com>; 변경하지 않음
+- 실행 환경: Windows, Node v24.15.0. Node 22 실행 검증은 아직 수행하지 않음.
+
+### 검증 결과
+
+기존 ver2의 npm test 202/202 PASS는 실행된 테스트의 성공 기록이다. 당시 15개 중 13개 파일만 수동 나열되어 test-file discovery coverage는 불완전했다.
+
+| 작업 영역 | command | test/file count | pass/fail | exit code | 비고 |
+|---|---|---|---|---|---|
+| A discovery | npm --prefix gemini-dashboard run test | 15 files / 219 cases | PASS | 0 | skipped 0, todo 0; 누락 2개 및 [projectId] 포함 |
+
+A의 첫 sandbox 실행은 spawn EPERM으로 실패(exit 1)했다. sandbox 외부 재실행에서 Node 자체의 glob 해석으로 동적 route 파일이 빠지는 문제를 확인했다(212 cases). Node에 전달하는 경로의 대괄호까지 escape한 최종 실행은 219/219 PASS였다. 파일 발견은 shell glob이 아닌 filesystem traversal이며 lexical sort 후 전체 목록과 count를 출력한다.
+
+발견된 기존 15개 파일:
+
+```text
+app/api/codex-usage/route.test.ts
+app/api/gemini-quota/route.test.ts
+app/api/projects/[projectId]/workers/route.test.ts
+app/api/runs/route.test.ts
+lib/codex-conversation.test.ts
+lib/codex-usage.test.ts
+lib/daily-token-stats.test.ts
+lib/gemini-quota.test.ts
+lib/process-liveness.test.ts
+lib/project-event-graph.test.ts
+lib/run-tracking.test.ts
+lib/workspace-contract.test.ts
+lib/workspace-node-bridge.test.ts
+lib/workspace-sanitize.test.ts
+lib/workspace-store.test.ts
+```
