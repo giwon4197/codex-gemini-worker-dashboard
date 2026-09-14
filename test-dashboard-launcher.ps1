@@ -1,4 +1,4 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param()
 
 $ErrorActionPreference = 'Stop'
@@ -19,18 +19,7 @@ New-Item -ItemType Directory -Path $testTempRoot -Force | Out-Null
 $passCount = 0
 $failCount = 0
 
-function Assert-Test([string]$testName, [bool]$condition, [string]$detail = '') {
-    if ($condition) {
-        Write-Host "  [PASS] $testName" -ForegroundColor Green
-        $script:passCount++
-    } else {
-        Write-Host "  [FAIL] $testName" -ForegroundColor Red
-        if ($detail) {
-            Write-Host "         상세: $detail" -ForegroundColor Yellow
-        }
-        $script:failCount++
-    }
-}
+. (Join-Path $PSScriptRoot 'test-common.ps1')
 
 function Invoke-Launcher([string[]]$launcherArgs, [hashtable]$envOverrides = @{}) {
     $pinfo = New-Object System.Diagnostics.ProcessStartInfo
