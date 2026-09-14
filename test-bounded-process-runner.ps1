@@ -74,7 +74,8 @@ try {
   $childScriptFile = Join-Path $testTempRoot 'child.ps1'
   $childScript = @'
 param($pidFile)
-$gc = Start-Process pwsh -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 120') -PassThru
+$windowOptions = if ($IsWindows) { @{ WindowStyle = 'Hidden' } } else { @{} }
+$gc = Start-Process pwsh -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 120') -PassThru @windowOptions
 Add-Content -LiteralPath $pidFile -Value $gc.Id
 Start-Sleep -Seconds 120
 '@
@@ -84,13 +85,16 @@ Start-Sleep -Seconds 120
   $parentScript = @'
 param($pidFile, $childScript)
 Add-Content -LiteralPath $pidFile -Value $PID
-$child = Start-Process pwsh -ArgumentList @('-NoProfile', '-File', $childScript, $pidFile) -PassThru
+$windowOptions = if ($IsWindows) { @{ WindowStyle = 'Hidden' } } else { @{} }
+$child = Start-Process pwsh -ArgumentList @('-NoProfile', '-File', $childScript, $pidFile) -PassThru @windowOptions
 Add-Content -LiteralPath $pidFile -Value $child.Id
 Start-Sleep -Seconds 120
 '@
   [IO.File]::WriteAllText($parentScriptFile, $parentScript, [Text.Encoding]::UTF8)
 
-  $res5 = Invoke-BoundedCommand -Command "pwsh -NoProfile -File `"$parentScriptFile`" `"$pidFile`" `"$childScriptFile`"" -WorkingDirectory $testTempRoot -TimeoutSeconds 3
+  # Allow all three PowerShell processes to initialize on a loaded Windows host.
+  # The separate timeout-speed test above still enforces its original bound.
+  $res5 = Invoke-BoundedCommand -Command "pwsh -NoProfile -File `"$parentScriptFile`" `"$pidFile`" `"$childScriptFile`"" -WorkingDirectory $testTempRoot -TimeoutSeconds 10
   Assert-Test "Tree command timed out" ($res5.timedOut -eq $true)
 
   Start-Sleep -Milliseconds 500
@@ -98,7 +102,7 @@ Start-Sleep -Seconds 120
     @(Get-Content -LiteralPath $pidFile | Where-Object { $_ -match '^\d+$' } | ForEach-Object { [int]$_ })
   } else { @() }
 
-  Assert-Test "Spawned PIDs were recorded" ($recordedPids.Count -ge 2) "Found $($recordedPids.Count) PIDs: $($recordedPids -join ', ')"
+  Assert-Test "Spawned PIDs were recorded" ($recordedPids.Count -ge 3) "Found $($recordedPids.Count) PIDs: $($recordedPids -join ', ')"
   $leakedPids = @()
   foreach ($pidToCheck in $recordedPids) {
     $proc = Get-Process -Id $pidToCheck -ErrorAction SilentlyContinue
