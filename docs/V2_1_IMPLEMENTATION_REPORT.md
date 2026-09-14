@@ -150,3 +150,10 @@ lib/workspace-node-bridge.test.ts
 lib/workspace-sanitize.test.ts
 lib/workspace-store.test.ts
 ```
+
+| 작업 영역 | command | test/file count | pass/fail | exit code | 비고 |
+|---|---|---|---|---|---|
+| B model tiers | npm --prefix gemini-dashboard run test | 16 files / 229 cases | PASS | 0 | 신규 model-tiers.test.ts 10 cases 자동 발견; README drift 초기 실패 수정 후 PASS |
+| B PS loader | dot-source orchestration-common.ps1; Get-ModelTierConfiguration | 4 tiers / normal default | PASS | 0 | 기존 4 model ID 보존 |
+
+모델 출처는 루트 model-tiers.json이다. TS는 같은 JSON을 bundle에 포함하고 explicit file loader도 제공한다. PowerShell은 공용 모듈의 PSScriptRoot에서 JSON을 직접 읽는다. worker-settings.example.json의 model은 기존 model-only fallback 계약을 위해 유지하며 자동 일치 검증한다. 설치 검증은 아직 수행하지 않았다.

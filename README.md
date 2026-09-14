@@ -101,12 +101,14 @@ git switch main
 git merge --ff-only integration/<run-id>
 ```
 
+출처: model-tiers.json
+
 | 등급 | 모델 | 권장 용도 |
 |---|---|---|
-| `fast` | Gemini 3.8 Flash Low | 문구 수정, 간단한 확인 |
-| `normal` | Gemini 3.8 Flash Medium | 일반 기능 구현과 버그 수정 |
-| `advanced` | Gemini 3.8 Flash High | 복합 기능과 정밀 분석 |
-| `reasoning` | Gemini 3.1 Pro High | 심층 설계와 어려운 알고리즘 |
+| `fast` | gemini-3.8-flash-low | 문구 수정, 간단한 확인 |
+| `normal` | gemini-3.8-flash-medium | 일반 기능 구현과 버그 수정 |
+| `advanced` | gemini-3.8-flash-high | 복합 기능과 정밀 분석 |
+| `reasoning` | gemini-3.1-pro-high | 심층 설계와 어려운 알고리즘 |
 
 기본 등급은 `normal`입니다. Codex는 작업 난이도에 따라 더 가볍거나 강한 등급을 선택할 수 있습니다.
 

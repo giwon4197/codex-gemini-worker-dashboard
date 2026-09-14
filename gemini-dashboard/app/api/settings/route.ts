@@ -2,14 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import fs from 'node:fs';
 import path from 'node:path';
 
-export const TIER_MAP: Record<string, string> = {
-  fast: 'gemini-3.8-flash-low',
-  normal: 'gemini-3.8-flash-medium',
-  advanced: 'gemini-3.8-flash-high',
-  reasoning: 'gemini-3.1-pro-high',
-};
-
-export const DEFAULT_TIER = 'normal';
+import { TIER_MAP, DEFAULT_TIER } from '../../../lib/model-tiers.ts';
 
 function getSettingsPath(): string {
   // worker-settings.json located in the project root (parent directory of gemini-dashboard)

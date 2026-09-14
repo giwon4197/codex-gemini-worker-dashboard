@@ -24,14 +24,12 @@ if (-not $isMockRun -and -not (Test-Path -LiteralPath $antigravity)) {
   throw 'Antigravity CLI를 찾을 수 없습니다.'
 }
 
-# 4-tier model mapping
-$TierMap = @{
-  'fast'      = 'gemini-3.8-flash-low'
-  'normal'    = 'gemini-3.8-flash-medium'
-  'advanced'  = 'gemini-3.8-flash-high'
-  'reasoning' = 'gemini-3.1-pro-high'
-}
-$DefaultTier = 'normal'
+$commonModule = Join-Path $PSScriptRoot 'orchestration-common.ps1'
+if (-not (Test-Path -LiteralPath $commonModule -PathType Leaf)) { throw "Required orchestration module not found: $commonModule" }
+. $commonModule
+$modelTierConfig = Get-ModelTierConfiguration
+$TierMap = $modelTierConfig.TierMap
+$DefaultTier = $modelTierConfig.DefaultTier
 $DefaultModel = $TierMap[$DefaultTier]
 $settingsPath = Join-Path $PSScriptRoot 'worker-settings.json'
 

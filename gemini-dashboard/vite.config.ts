@@ -17,14 +17,7 @@ const { d1, r2 } = hostingConfig;
 // macOS Seatbelt blocks FSEvents, so Codex previews need polling for HMR.
 const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === 'seatbelt';
 
-const TIER_MAP: Record<string, string> = {
-  fast: 'gemini-3.8-flash-low',
-  normal: 'gemini-3.8-flash-medium',
-  advanced: 'gemini-3.8-flash-high',
-  reasoning: 'gemini-3.1-pro-high',
-};
-
-const DEFAULT_TIER = 'normal';
+import { TIER_MAP, DEFAULT_TIER } from './lib/model-tiers.ts';
 
 function codexUsagePlugin(): Plugin {
   return {
