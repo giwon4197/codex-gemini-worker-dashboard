@@ -173,3 +173,20 @@ lib/workspace-store.test.ts
 |---|---|---|---|---|---|
 | D module regression | pwsh -NoProfile -File test-toolchain.ps1 | baseline 9 → 23 | PASS | 0 | missing-module, write failure/cleanup, canonical redaction |
 | D/E worker regression | pwsh -NoProfile -File test-parallel-usage.ps1 | baseline 95 → 95 | PASS | 0 | 기존 assertion 보존 |
+
+### API 호출 경로 조사
+
+기존 dev: workspaceBridgePlugin이 codex-usage/gemini-quota를 먼저 처리하며 settings는 workerSettingsPlugin이 처리한다. 뒤의 codexUsagePlugin은 GET에 도달하지 않는 dead middleware였다. build/start에서는 app route가 직접 처리한다. dev PID 21228/port 43181와 Wrangler CLI PID 10080/workerd PID 20500/port 43182의 readiness와 curl.exe GET 응답을 확인한 뒤 두 프로세스 트리를 종료했다.
+
+기존 직접 Wrangler 응답은 HTTP 200이어도 host filesystem이 없어 Codex not_found/Gemini unavailable이었고 dev에서는 active/available이었다. 단순 status code 성공으로 parity를 주장하지 않는다. ver3 start-local.mjs는 로컬 Node bridge가 같은 shared handler를 실행하고 UI 요청을 빌드된 Wrangler runtime으로 전달한다. production 배포 기능을 추가한 것이 아니다. settings의 POST/PUT와 app route error contract를 보존하며 dev에도 동일하게 적용한다.
+
+| 작업 영역 | command | test/file count | pass/fail | exit code | 비고 |
+|---|---|---|---|---|---|
+| C baseline build | npm run build (gemini-dashboard) | vinext 5 stages | PASS | 0 | 변경 전 runtime 경로 조사 |
+| C API regression (initial) | npm --prefix gemini-dashboard run test | 17 files / 233 passed, 1 failed | FAIL | 1 | 기존 bridge pass-through 테스트가 settings를 non-workspace로 가정; adapter 통합 계약에 맞춘 regression 보완 필요 |
+| C lint | npm --prefix gemini-dashboard run lint | vite.config.ts 포함 | PASS | 0 | ignore 제거; 신규 import/type lint 오류 수정 후 재실행 |
+
+| 작업 영역 | command | test/file count | pass/fail | exit code | 비고 |
+|---|---|---|---|---|---|
+| C API regression (corrected) | npm --prefix gemini-dashboard run test | 17 files / 235 cases | PASS | 0 | non-workspace 통과 assertion 유지, settings interception assertion 추가 |
+| C lint (corrected) | npm --prefix gemini-dashboard run lint | vite.config.ts 포함 | PASS | 0 | 신규 test response type 보완 |

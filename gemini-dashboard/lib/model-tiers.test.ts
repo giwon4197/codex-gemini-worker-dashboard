@@ -2,26 +2,27 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
+// @ts-expect-error TS5097 allowed for test runner
 import { ALLOWED_TIERS, DEFAULT_TIER, loadModelTiers, modelForTier, parseModelTiers } from './model-tiers.ts';
 
 const valid = () => ({ default_tier: 'normal', tiers: [{ tier: 'normal', model: 'example', description: 'Example' }] });
-test('model tier configuration rejects malformed JSON', () => assert.throws(() => parseModelTiers('{')));
-test('model tier configuration rejects unknown default', () => assert.throws(() => parseModelTiers(JSON.stringify({ ...valid(), default_tier: 'missing' }))));
-test('model tier configuration rejects duplicate tier', () => {
+void test('model tier configuration rejects malformed JSON', () => assert.throws(() => parseModelTiers('{')));
+void test('model tier configuration rejects unknown default', () => assert.throws(() => parseModelTiers(JSON.stringify({ ...valid(), default_tier: 'missing' }))));
+void test('model tier configuration rejects duplicate tier', () => {
   const config = valid(); config.tiers.push({ ...config.tiers[0] });
   assert.throws(() => parseModelTiers(JSON.stringify(config)));
 });
 for (const field of ['tier', 'model', 'description'] as const) {
-  test(`model tier configuration rejects empty ${field}`, () => {
+  void test(`model tier configuration rejects empty ${field}`, () => {
     const config = valid(); config.tiers[0][field] = ' ';
     assert.throws(() => parseModelTiers(JSON.stringify(config)));
   });
-  test(`model tier configuration rejects missing ${field}`, () => {
+  void test(`model tier configuration rejects missing ${field}`, () => {
     const config = valid(); delete (config.tiers[0] as Partial<typeof config.tiers[0]>)[field];
     assert.throws(() => parseModelTiers(JSON.stringify(config)));
   });
 }
-test('root config, bundled config, settings example and README agree', () => {
+void test('root config, bundled config, settings example and README agree', () => {
   const root = new URL('../../', import.meta.url);
   const config = loadModelTiers(fileURLToPath(new URL('model-tiers.json', root)));
   assert.deepEqual(config, loadModelTiers());

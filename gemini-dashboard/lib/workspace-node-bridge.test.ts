@@ -59,7 +59,7 @@ void describe('Workspace Node Bridge (Vite Dev/Server Middleware & App Route Bri
       let nextCalled = false;
 
       const req = {
-        url: '/api/settings',
+        url: '/favicon.ico',
         method: 'GET',
         headers: {},
       } as unknown as http.IncomingMessage;
@@ -74,6 +74,21 @@ void describe('Workspace Node Bridge (Vite Dev/Server Middleware & App Route Bri
       });
 
       assert.strictEqual(nextCalled, true);
+    });
+
+    void test('settings is owned by the shared middleware after API consolidation', async () => {
+      const middleware = createWorkspaceBridgeMiddleware({ repoRoot: testRepoDir });
+      let nextCalled = false;
+      const req = { url: '/api/settings', method: 'DELETE', headers: {} } as http.IncomingMessage;
+      const body = await new Promise<string>(resolve => {
+        const res = { statusCode: 0, setHeader: () => {}, end: (text: string) => {
+          assert.equal(res.statusCode, 405);
+          resolve(text);
+        } };
+        middleware(req, res as unknown as http.ServerResponse, () => { nextCalled = true; resolve(''); });
+      });
+      assert.equal(nextCalled, false);
+      assert.match(JSON.parse(body).error as string, /지원하지 않는/);
     });
 
     void test('rejects unsupported HTTP methods on workspace endpoints with status 405', async () => {

@@ -8,8 +8,8 @@
   "scripts": {
     "dev": "vinext dev",
     "build": "vinext build",
-    "start": "wrangler dev --config dist/server/wrangler.json",
-    "lint": "oxlint --ignore-pattern \"components/ui/**\" --ignore-pattern \"hooks/**\" --ignore-pattern \"vite.config.ts\"",
+    "start": "node --experimental-strip-types scripts/start-local.mjs",
+    "lint": "oxlint --ignore-pattern \"components/ui/**\" --ignore-pattern \"hooks/**\"",
     "format": "oxfmt",
     "test": "node scripts/run-tests.mjs"
   },
