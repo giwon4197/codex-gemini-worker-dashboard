@@ -61,7 +61,7 @@ $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('expansion-' + [guid]::NewGuid
 $scripts = Join-Path $testRoot 'scripts'
 New-Item -ItemType Directory -Path $scripts -Force | Out-Null
 try {
-  foreach ($file in @('run-parallel-workers.ps1', 'review-integration.ps1', 'filesystem-policy.ps1', 'bounded-process-runner.ps1', 'dashboard-dependency-bootstrap.ps1', 'toolchain.ps1')) {
+  foreach ($file in @('orchestration-common.ps1', 'model-tiers.json', 'run-parallel-workers.ps1', 'review-integration.ps1', 'filesystem-policy.ps1', 'bounded-process-runner.ps1', 'dashboard-dependency-bootstrap.ps1', 'toolchain.ps1')) {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot $file) -Destination $scripts
   }
   $fakeWorker = @'

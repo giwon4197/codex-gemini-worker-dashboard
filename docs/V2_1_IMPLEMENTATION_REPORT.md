@@ -157,3 +157,19 @@ lib/workspace-store.test.ts
 | B PS loader | dot-source orchestration-common.ps1; Get-ModelTierConfiguration | 4 tiers / normal default | PASS | 0 | 기존 4 model ID 보존 |
 
 모델 출처는 루트 model-tiers.json이다. TS는 같은 JSON을 bundle에 포함하고 explicit file loader도 제공한다. PowerShell은 공용 모듈의 PSScriptRoot에서 JSON을 직접 읽는다. worker-settings.example.json의 model은 기존 model-only fallback 계약을 위해 유지하며 자동 일치 검증한다. 설치 검증은 아직 수행하지 않았다.
+
+### 공용 PowerShell contract 비교 및 통합
+
+| 함수 | 기존 차이 | ver3 계약 |
+|---|---|---|
+| Write-AtomicJson | worker depth 8, 실패 무시; parallel/review depth 16, 실패 throw. 모두 move/copy fallback와 임시 파일 cleanup 사용 | 기본 depth 16/throw, worker만 명시적 -Depth 8 -BestEffort. fallback와 finally cleanup 유지 |
+| Resolve-SharedDashboardPaths | worker/parallel 구현 동일 | orchestration-common.ps1의 동일 우선순위, 같은 루트 위치 유지 |
+| Set-ObjectProperty / Invoke-Verification | parallel/review 구현 동일 | 공용 함수로 이동, bounded verification 위임 유지 |
+| Redact-Text / Redact-Secrets | bounded runner가 GitHub/PAT/Google/Bearer/Authorization/URL/query/private key까지 보호. worker는 sk-/standalone key=value도 보호 | bounded 구현에 worker 추가 패턴을 합침. Redact-Secrets는 wrapper. failure compression은 절단 전에 같은 redactor 적용 |
+| Record-Diagnostic | 이미 Redact-Text 사용 | 호출 유지; 새 보호 기능으로 주장하지 않음 |
+| Assert-Test | 4개 파일의 출력/집계 동일; Detail/상세 label 차이 | test-common.ps1로 이동, label 매개변수로 기존 출력 보존 |
+
+| 작업 영역 | command | test/file count | pass/fail | exit code | 비고 |
+|---|---|---|---|---|---|
+| D module regression | pwsh -NoProfile -File test-toolchain.ps1 | baseline 9 → 23 | PASS | 0 | missing-module, write failure/cleanup, canonical redaction |
+| D/E worker regression | pwsh -NoProfile -File test-parallel-usage.ps1 | baseline 95 → 95 | PASS | 0 | 기존 assertion 보존 |

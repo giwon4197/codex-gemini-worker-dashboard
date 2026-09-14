@@ -57,6 +57,29 @@ exit /b 0
   Assert-ToolchainTest 'missing tools return ENVIRONMENT_ERROR' (-not $missing.success -and $missing.status -eq 'ENVIRONMENT_ERROR' -and $missing.errorCategory -eq 'environment_error')
   Assert-ToolchainTest 'missing tool evidence names node and npm' (($missing.missing -contains 'node') -and ($missing.missing -contains 'npm'))
 
+  $moduleProbe = Join-Path $tempRoot 'bounded-process-runner.ps1'
+  Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'bounded-process-runner.ps1') -Destination $moduleProbe
+  $moduleFailure = & pwsh -NoProfile -File $moduleProbe 2>&1
+  Assert-ToolchainTest 'missing orchestration module fails explicitly' ($LASTEXITCODE -ne 0 -and ($moduleFailure -join "`n") -match 'Required orchestration module not found:')
+  $jsonTarget = Join-Path $tempRoot 'atomic.json'
+  Write-AtomicJson $jsonTarget ([pscustomobject]@{ nested = @{ value = 42 } })
+  Assert-ToolchainTest 'common JSON writer preserves nested values' ((Get-Content -Raw -LiteralPath $jsonTarget | ConvertFrom-Json).nested.value -eq 42)
+  $blockedTarget = Join-Path $tempRoot 'directory-target'
+  New-Item -ItemType Directory -Path $blockedTarget | Out-Null
+  $writeThrew = $false
+  try { Write-AtomicJson $blockedTarget @{ value = 1 } } catch { $writeThrew = $true }
+  Assert-ToolchainTest 'common JSON writer propagates failures by default' $writeThrew
+  Write-AtomicJson $blockedTarget @{ value = 1 } -Depth 8 -BestEffort
+  Assert-ToolchainTest 'best effort JSON failure removes temporary file' (@(Get-ChildItem -LiteralPath $tempRoot -Filter '*.tmp').Count -eq 0)
+  foreach ($secret in @(
+    ('ghp_' + ('a' * 30)), ('github_pat_' + ('b' * 30)), ('AIza' + ('c' * 35)),
+    'Bearer token.value', 'Authorization: Basic abcdefg', 'https://user:password@example.invalid',
+    '?token=hidden-value', '-----BEGIN RSA PRIVATE KEY-----secret-----END RSA PRIVATE KEY-----',
+    ('sk-' + ('d' * 25)), 'password=abcdefghij'
+  )) {
+    $redacted = Redact-Text $secret
+    Assert-ToolchainTest 'canonical redaction protects legacy and broader patterns' ($redacted -ne $secret -and (Redact-Secrets $secret) -eq $redacted)
+  }
   Write-Host "`nToolchain tests: $passed passed / $failed failed" -ForegroundColor Cyan
   if ($failed -gt 0) { exit 1 }
 } finally {

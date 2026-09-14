@@ -6,23 +6,16 @@ param(
   [Parameter(Mandatory = $false)][int]$MaxOutputChars = 12000
 )
 
+$commonModule = Join-Path $PSScriptRoot 'orchestration-common.ps1'
+if (-not (Test-Path -LiteralPath $commonModule -PathType Leaf)) { throw "Required orchestration module not found: $commonModule" }
+. $commonModule
+
+
 $ErrorActionPreference = 'Stop'
 $toolchainScript = Join-Path $PSScriptRoot 'toolchain.ps1'
 if (Test-Path -LiteralPath $toolchainScript) { . $toolchainScript }
 
-function Redact-Text([string]$text) {
-  if ([string]::IsNullOrEmpty($text)) { return $text }
-  $result = $text
-  $result = [regex]::Replace($result, '(?i)(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{16,}', '[REDACTED_TOKEN]')
-  $result = [regex]::Replace($result, '(?i)github_pat_[A-Za-z0-9_]{20,}', '[REDACTED_TOKEN]')
-  $result = [regex]::Replace($result, 'AIza[0-9A-Za-z-_]{30,40}', '[REDACTED_API_KEY]')
-  $result = [regex]::Replace($result, '(?i)Bearer\s+[A-Za-z0-9\-._~+/]+=*', 'Bearer [REDACTED]')
-  $result = [regex]::Replace($result, '(?i)Authorization:\s*[^\r\n]+', 'Authorization: [REDACTED]')
-  $result = [regex]::Replace($result, 'https?://[^/@\s\r\n]+(?::[^/@\s\r\n]+)?@', 'https://[REDACTED_CREDENTIALS]@')
-  $result = [regex]::Replace($result, '([?&](?:token|access_token|secret|password|api_key|apiKey)=)[^&\s\r\n]+', '$1[REDACTED]')
-  $result = [regex]::Replace($result, '-----BEGIN [A-Z ]+ PRIVATE KEY-----[\s\S]*?-----END [A-Z ]+ PRIVATE KEY-----', '[REDACTED_PRIVATE_KEY]')
-  return $result
-}
+
 
 if (-not ([System.Management.Automation.PSTypeName]'BoundedCommandRunner').Type) {
   Add-Type -TypeDefinition @"

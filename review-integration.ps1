@@ -8,38 +8,21 @@ param(
   [switch]$SkipCodexReview
 )
 
+$commonModule = Join-Path $PSScriptRoot 'orchestration-common.ps1'
+if (-not (Test-Path -LiteralPath $commonModule -PathType Leaf)) { throw "Required orchestration module not found: $commonModule" }
+. $commonModule
+
+
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'bounded-process-runner.ps1')
 . (Join-Path $PSScriptRoot 'dashboard-dependency-bootstrap.ps1')
 . (Join-Path $PSScriptRoot 'filesystem-policy.ps1')
 
-function Write-AtomicJson([string]$Path, $Data) {
-  $parent = Split-Path -Parent $Path
-  if (-not (Test-Path -LiteralPath $parent)) {
-    New-Item -ItemType Directory -Path $parent -Force | Out-Null
-  }
-  $temp = "$Path.$([guid]::NewGuid().ToString('N')).tmp"
-  try {
-    [IO.File]::WriteAllText($temp, ($Data | ConvertTo-Json -Depth 16), [Text.Encoding]::UTF8)
-    try {
-      [IO.File]::Move($temp, $Path, $true)
-    } catch {
-      [IO.File]::Copy($temp, $Path, $true)
-      [IO.File]::Delete($temp)
-    }
-  } finally {
-    if (Test-Path -LiteralPath $temp) { try { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue } catch {} }
-  }
-}
 
-function Set-ObjectProperty($Object, [string]$Name, $Value) {
-  if ($Object.PSObject.Properties.Name -contains $Name) { $Object.$Name = $Value }
-  else { $Object | Add-Member -NotePropertyName $Name -NotePropertyValue $Value }
-}
 
-function Invoke-Verification([string]$Worktree, $Commands, [int]$DefaultTimeoutSeconds = 120) {
-  return @(Invoke-BoundedVerification -Worktree $Worktree -Commands $Commands -DefaultTimeoutSeconds $DefaultTimeoutSeconds)
-}
+
+
+
 
 $repoRoot = (& git -C $Repository rev-parse --show-toplevel 2>$null)
 if ($LASTEXITCODE -ne 0 -or -not $repoRoot) { throw "Git 저장소가 아닙니다: $Repository" }

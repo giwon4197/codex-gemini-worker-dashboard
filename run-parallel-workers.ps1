@@ -16,6 +16,11 @@ param(
   [string]$SyncStateRoot = ''
 )
 
+$commonModule = Join-Path $PSScriptRoot 'orchestration-common.ps1'
+if (-not (Test-Path -LiteralPath $commonModule -PathType Leaf)) { throw "Required orchestration module not found: $commonModule" }
+. $commonModule
+
+
 $ErrorActionPreference = 'Stop'
 $orchestratorRoot = $PSScriptRoot
 $workerScript = Join-Path $orchestratorRoot 'run-gemini-worker.ps1'
@@ -23,88 +28,16 @@ $workerScript = Join-Path $orchestratorRoot 'run-gemini-worker.ps1'
 . (Join-Path $orchestratorRoot 'dashboard-dependency-bootstrap.ps1')
 . (Join-Path $orchestratorRoot 'filesystem-policy.ps1')
 
-function Resolve-SharedDashboardPaths {
-  param(
-    [string]$ExplicitDataDir = '',
-    [string]$ExplicitDashboardPath = '',
-    [string]$RepoPath = ''
-  )
-  if (-not [string]::IsNullOrWhiteSpace($ExplicitDashboardPath)) {
-    $dash = [System.IO.Path]::GetFullPath($ExplicitDashboardPath)
-    return [pscustomobject]@{ DataDir = Split-Path -Parent $dash; DashboardPath = $dash }
-  }
-  if (-not [string]::IsNullOrWhiteSpace($ExplicitDataDir)) {
-    $dDir = [System.IO.Path]::GetFullPath($ExplicitDataDir)
-    return [pscustomobject]@{ DataDir = $dDir; DashboardPath = (Join-Path $dDir 'dashboard.json') }
-  }
-  if (-not [string]::IsNullOrWhiteSpace($env:CODEX_GEMINI_DASHBOARD_PATH)) {
-    $dash = [System.IO.Path]::GetFullPath($env:CODEX_GEMINI_DASHBOARD_PATH)
-    return [pscustomobject]@{ DataDir = Split-Path -Parent $dash; DashboardPath = $dash }
-  }
-  if (-not [string]::IsNullOrWhiteSpace($env:CODEX_GEMINI_DATA_DIR)) {
-    $dDir = [System.IO.Path]::GetFullPath($env:CODEX_GEMINI_DATA_DIR)
-    return [pscustomobject]@{ DataDir = $dDir; DashboardPath = (Join-Path $dDir 'dashboard.json') }
-  }
-  $checkDirs = @($PSScriptRoot, $RepoPath) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and (Test-Path -LiteralPath $_) }
-  foreach ($dir in $checkDirs) {
-    $commonDir = (& git -C $dir rev-parse --git-common-dir 2>$null)
-    if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($commonDir)) {
-      $commonTrim = $commonDir.Trim()
-      $mainGitRoot = if ([System.IO.Path]::IsPathRooted($commonTrim)) {
-        [System.IO.Path]::GetFullPath((Join-Path $commonTrim '..'))
-      } else {
-        [System.IO.Path]::GetFullPath((Join-Path $dir (Join-Path $commonTrim '..')))
-      }
-      $candData = Join-Path $mainGitRoot 'gemini-dashboard\public\data'
-      if (Test-Path -LiteralPath $candData) {
-        return [pscustomobject]@{ DataDir = $candData; DashboardPath = (Join-Path $candData 'dashboard.json') }
-      }
-    }
-  }
-  if (-not [string]::IsNullOrWhiteSpace($env:CODEX_GEMINI_INSTALL_ROOT)) {
-    $candData = Join-Path $env:CODEX_GEMINI_INSTALL_ROOT 'gemini-dashboard\public\data'
-    if (Test-Path -LiteralPath $candData) {
-      return [pscustomobject]@{ DataDir = $candData; DashboardPath = (Join-Path $candData 'dashboard.json') }
-    }
-  }
-  if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
-    $candData = Join-Path $env:LOCALAPPDATA 'codex-gemini-worker-dashboard\gemini-dashboard\public\data'
-    if (Test-Path -LiteralPath $candData) {
-      return [pscustomobject]@{ DataDir = $candData; DashboardPath = (Join-Path $candData 'dashboard.json') }
-    }
-  }
-  $fallbackData = Join-Path $PSScriptRoot 'gemini-dashboard\public\data'
-  return [pscustomobject]@{ DataDir = $fallbackData; DashboardPath = (Join-Path $fallbackData 'dashboard.json') }
-}
+
 
 $targetRepo = if ($Repository) { $Repository } else { $PSScriptRoot }
 $resolvedPaths = Resolve-SharedDashboardPaths -ExplicitDataDir $DataDir -ExplicitDashboardPath $DashboardPath -RepoPath $targetRepo
 $publicData = $resolvedPaths.DataDir
 $dashboardPath = $resolvedPaths.DashboardPath
 
-function Write-AtomicJson([string]$Path, $Data) {
-  $parent = Split-Path -Parent $Path
-  if (-not (Test-Path -LiteralPath $parent)) {
-    New-Item -ItemType Directory -Path $parent -Force | Out-Null
-  }
-  $temp = "$Path.$([guid]::NewGuid().ToString('N')).tmp"
-  try {
-    [IO.File]::WriteAllText($temp, ($Data | ConvertTo-Json -Depth 16), [Text.Encoding]::UTF8)
-    try {
-      [IO.File]::Move($temp, $Path, $true)
-    } catch {
-      [IO.File]::Copy($temp, $Path, $true)
-      [IO.File]::Delete($temp)
-    }
-  } finally {
-    if (Test-Path -LiteralPath $temp) { try { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue } catch {} }
-  }
-}
 
-function Set-ObjectProperty($Object, [string]$Name, $Value) {
-  if ($Object.PSObject.Properties.Name -contains $Name) { $Object.$Name = $Value }
-  else { $Object | Add-Member -NotePropertyName $Name -NotePropertyValue $Value }
-}
+
+
 
 function Test-ProcessAlive($ProcessId) {
   if (-not $ProcessId) { return $false }
@@ -677,9 +610,7 @@ function Get-ChangedFiles([string]$Worktree, [string]$BaseCommit) {
   return @($tracked + $untracked | Where-Object { $_ } | ForEach-Object { $_.Replace('\', '/') } | Sort-Object -Unique)
 }
 
-function Invoke-Verification([string]$Worktree, $Commands, [int]$DefaultTimeoutSeconds = 120) {
-  return @(Invoke-BoundedVerification -Worktree $Worktree -Commands $Commands -DefaultTimeoutSeconds $DefaultTimeoutSeconds)
-}
+
 
 function Get-FailureClassification([string]$Text) {
   if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
@@ -710,9 +641,9 @@ function Get-FailureFingerprint($Tests, [string]$Classification) {
 
 function Get-CompressedFailureLog($Tests) {
   $parts = @($Tests | Where-Object { $_.status -in @('FAIL', 'TIMED_OUT') } | ForEach-Object {
-    $output = [string]$_.output
+    $output = Redact-Text ([string]$_.output)
     if ($output.Length -gt 2500) { $output = $output.Substring($output.Length - 2500) }
-    "COMMAND: $($_.command)`nSTATUS: $($_.status)`nEXIT_CODE: $($_.exitCode)`nOUTPUT:`n$output"
+    "COMMAND: $(Redact-Text ([string]$_.command))`nSTATUS: $($_.status)`nEXIT_CODE: $($_.exitCode)`nOUTPUT:`n$output"
   })
   $text = $parts -join "`n---`n"
   if ($text.Length -gt 5000) { $text = $text.Substring($text.Length - 5000) }
