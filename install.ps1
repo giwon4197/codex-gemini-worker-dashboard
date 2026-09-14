@@ -2,13 +2,16 @@
 param(
     [string]$InstallRoot = (Join-Path $env:LOCALAPPDATA 'codex-gemini-worker-dashboard'),
     [string]$SourcePath = '',
-    [switch]$NoStart
+    [switch]$NoStart,
+    [switch]$NoRegister
 )
 
 $ErrorActionPreference = 'Stop'
+$InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
 $repoZip = 'https://github.com/giwon4197/codex-gemini-worker-dashboard/archive/refs/heads/main.zip'
 $agyInstaller = 'https://antigravity.google/cli/install.ps1'
 $launcherDir = Join-Path $env:LOCALAPPDATA 'agy\bin'
+if ($NoRegister) { $launcherDir = Join-Path $InstallRoot 'bin' }
 
 function Require-Windows {
     if ($env:OS -ne 'Windows_NT') { throw '이 설치기는 Windows PowerShell 전용입니다.' }
@@ -35,13 +38,27 @@ function Ensure-Node {
 }
 
 function Ensure-Antigravity {
-    $agy = Join-Path $launcherDir 'agy.exe'
+    $agy = Join-Path $env:LOCALAPPDATA 'agy\bin\agy.exe'
     if (Test-Path -LiteralPath $agy) { return }
     Write-Host 'Google Antigravity CLI를 공식 설치기로 설치합니다...' -ForegroundColor Cyan
     $script = (Invoke-WebRequest -UseBasicParsing $agyInstaller).Content
     if ($script -is [byte[]]) { $script = [Text.Encoding]::UTF8.GetString($script) }
     Invoke-Expression $script
     if (-not (Test-Path -LiteralPath $agy)) { throw 'Antigravity CLI 설치를 확인할 수 없습니다.' }
+}
+
+function Resolve-PowerShell7 {
+    $command = Get-Command pwsh.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($command -and $command.Source -and (Test-Path -LiteralPath $command.Source)) {
+        return [IO.Path]::GetFullPath($command.Source)
+    }
+    foreach ($candidate in @(
+        'C:\Program Files\PowerShell\7\pwsh.exe',
+        'C:\Program Files\PowerShell\7-preview\pwsh.exe'
+    )) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+    }
+    throw 'PowerShell 7(pwsh.exe)이 필요합니다. PowerShell 7을 설치한 뒤 다시 실행하세요.'
 }
 
 function Add-UserPath([string]$PathToAdd) {
@@ -66,6 +83,7 @@ function Initialize-RuntimeFile([string]$Example, [string]$Target) {
 Require-Windows
 Ensure-Node
 Ensure-Antigravity
+$pwshPath = Resolve-PowerShell7
 
 $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("codex-gemini-install-" + [guid]::NewGuid())
 $zipPath = Join-Path $tempRoot 'source.zip'
@@ -73,11 +91,15 @@ $extractPath = Join-Path $tempRoot 'source'
 New-Item -ItemType Directory -Path $tempRoot, $extractPath -Force | Out-Null
 
 try {
-    if ($SourcePath -and (Test-Path -LiteralPath $SourcePath)) {
+    if ($SourcePath) {
+        if (-not (Test-Path -LiteralPath $SourcePath -PathType Container)) { throw "SourcePath not found: $SourcePath" }
         $sourceResolved = (Resolve-Path -LiteralPath $SourcePath).Path
         Write-Host "지정된 소스 경로에서 복사합니다: $sourceResolved" -ForegroundColor Cyan
         New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
-        Copy-Item -Path (Join-Path $sourceResolved '*') -Destination $InstallRoot -Recurse -Force
+        $syncModule = Join-Path $sourceResolved 'installer-common.ps1'
+        if (-not (Test-Path -LiteralPath $syncModule)) { throw "Required installer module not found: $syncModule" }
+        . $syncModule
+        Sync-InstalledProgramFiles -SourceRoot $sourceResolved -InstallRoot $InstallRoot
     } else {
         Write-Host '공개 저장소에서 최신 버전을 내려받습니다...' -ForegroundColor Cyan
         Invoke-WebRequest -UseBasicParsing $repoZip -OutFile $zipPath
@@ -86,7 +108,10 @@ try {
         if (-not $sourceRoot) { throw '다운로드한 저장소의 압축 구조를 확인할 수 없습니다.' }
 
         New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
-        Copy-Item -Path (Join-Path $sourceRoot.FullName '*') -Destination $InstallRoot -Recurse -Force
+        $syncModule = Join-Path $sourceRoot.FullName 'installer-common.ps1'
+        if (-not (Test-Path -LiteralPath $syncModule)) { throw "Required installer module not found: $syncModule" }
+        . $syncModule
+        Sync-InstalledProgramFiles -SourceRoot $sourceRoot.FullName -InstallRoot $InstallRoot
     }
 
     $dataDir = Join-Path $InstallRoot 'gemini-dashboard\public\data'
@@ -194,46 +219,56 @@ param(
   [Parameter(ValueFromRemainingArguments=$true)]
   [string[]]$RemainingArgs
 )
+$env:CODEX_GEMINI_INSTALL_ROOT = '__INSTALL_ROOT__'
 & (Join-Path $PSScriptRoot 'dashboard-launcher.cmd') @RemainingArgs
 exit $LASTEXITCODE
-'@
+'@.Replace('__INSTALL_ROOT__', $escapedRoot)
     Set-Content -LiteralPath (Join-Path $launcherDir 'worker-dashboard.ps1') -Value $dashboardLauncherPs -Encoding utf8
+    $escapedPwsh = $pwshPath.Replace('%', '%%')
     $workerCmd = @'
 @echo off
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0gemini-worker.ps1" %*
-'@
+"__PWSH_PATH__" -NoProfile -File "%~dp0gemini-worker.ps1" %*
+'@.Replace('__PWSH_PATH__', $escapedPwsh)
     $dashboardCmd = @'
 @echo off
+set "CODEX_GEMINI_INSTALL_ROOT=__INSTALL_ROOT_CMD__"
 "%~dp0dashboard-launcher.cmd" %*
-'@
+'@.Replace('__INSTALL_ROOT_CMD__', $InstallRoot.Replace('%', '%%'))
     $parallelCmd = @'
 @echo off
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0parallel-gemini-workers.ps1" %*
-'@
+"__PWSH_PATH__" -NoProfile -File "%~dp0parallel-gemini-workers.ps1" %*
+'@.Replace('__PWSH_PATH__', $escapedPwsh)
     $stopParallelCmd = @'
 @echo off
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0stop-parallel-run.ps1" %*
-'@
+"__PWSH_PATH__" -NoProfile -File "%~dp0stop-parallel-run.ps1" %*
+'@.Replace('__PWSH_PATH__', $escapedPwsh)
     $codexRouterCmd = @'
 @echo off
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0codex-route.ps1" %*
-'@
+"__PWSH_PATH__" -NoProfile -File "%~dp0codex-route.ps1" %*
+'@.Replace('__PWSH_PATH__', $escapedPwsh)
     $reviewIntegrationCmd = @'
 @echo off
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0review-integration.ps1" %*
-'@
+"__PWSH_PATH__" -NoProfile -File "%~dp0review-integration.ps1" %*
+'@.Replace('__PWSH_PATH__', $escapedPwsh)
     Set-Content -LiteralPath (Join-Path $launcherDir 'gemini-worker.cmd') -Value $workerCmd -Encoding ascii
     Set-Content -LiteralPath (Join-Path $launcherDir 'worker-dashboard.cmd') -Value $dashboardCmd -Encoding ascii
     Set-Content -LiteralPath (Join-Path $launcherDir 'parallel-gemini-workers.cmd') -Value $parallelCmd -Encoding ascii
     Set-Content -LiteralPath (Join-Path $launcherDir 'stop-parallel-run.cmd') -Value $stopParallelCmd -Encoding ascii
     Set-Content -LiteralPath (Join-Path $launcherDir 'codex-route.cmd') -Value $codexRouterCmd -Encoding ascii
     Set-Content -LiteralPath (Join-Path $launcherDir 'review-integration.cmd') -Value $reviewIntegrationCmd -Encoding ascii
-    Add-UserPath $launcherDir
-    [Environment]::SetEnvironmentVariable('CODEX_GEMINI_INSTALL_ROOT', $InstallRoot, 'User')
+    if (-not $NoRegister) {
+      Add-UserPath $launcherDir
+      Add-UserPath (Split-Path -Parent $pwshPath)
+      [Environment]::SetEnvironmentVariable('CODEX_GEMINI_INSTALL_ROOT', $InstallRoot, 'User')
+    }
     $env:CODEX_GEMINI_INSTALL_ROOT = $InstallRoot
 
     Write-Host "설치 완료: $InstallRoot" -ForegroundColor Green
-    Write-Host '새 터미널에서는 gemini-worker와 worker-dashboard 명령을 사용할 수 있습니다.' -ForegroundColor Green
+    if ($NoRegister) {
+      Write-Host "격리 설치: 전역 등록 없이 $launcherDir 에 launcher를 생성했습니다." -ForegroundColor Green
+    } else {
+      Write-Host '새 터미널에서는 gemini-worker와 worker-dashboard 명령을 사용할 수 있습니다.' -ForegroundColor Green
+    }
     Write-Host '설치 폴더 또는 어디서든 dashboard-launcher.cmd를 더블클릭하여 대시보드를 실행할 수 있습니다.' -ForegroundColor Green
     if (-not $NoStart) { & (Join-Path $launcherDir 'worker-dashboard.ps1') }
 }

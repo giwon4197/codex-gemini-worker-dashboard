@@ -12,9 +12,9 @@ import { sanitizeText } from './workspace-sanitize.ts';
 import { evaluateCodexConversation } from './codex-conversation.ts';
 import type { CodexRunnerFn } from './codex-conversation.ts';
 // @ts-expect-error TS5097 allowed for test runner
-import { getCodexDailyUsage } from './codex-usage.ts';
+import { handleCodexUsage, handleGeminiQuota } from './usage-handlers.ts';
 // @ts-expect-error TS5097 allowed for test runner
-import { getGeminiQuota } from './gemini-quota.ts';
+import { GET as getSettings, POST as saveSettings } from './worker-settings.ts';
 
 export interface WorkspaceBridgeOptions {
   repoRoot?: string;
@@ -142,12 +142,14 @@ export async function handleWorkspaceBridgeRequest(
       const root = repoValidation.repoRoot;
       const rawMsg = err instanceof Error ? err.message : String(err);
       const sanitizedMsg = sanitizeText(rawMsg, root);
+      const launcherError = err as Error & { runId?: string; errorCategory?: string };
+      const publicReason = sanitizedMsg.trim() || '알 수 없는 실행기 오류';
       return Response.json(
         {
           ok: false,
-          error: sanitizedMsg.includes('필수 실행 도구')
-            ? sanitizedMsg
-            : '작업 요청 처리 중 오류가 발생했습니다.',
+          error: `실행기 오류: ${publicReason}`,
+          errorCategory: launcherError.errorCategory || 'launcher_error',
+          runId: launcherError.runId,
         },
         { status: 500, headers: JSON_HEADERS }
       );
@@ -604,6 +606,12 @@ export async function handleWorkspaceBridgeRequest(
     return Response.json({ ok: true, session }, { status: 200, headers: JSON_HEADERS });
   }
 
+  if (pathname === '/api/settings') {
+    if (method === 'GET') return getSettings();
+    if (method === 'POST' || method === 'PUT') return saveSettings(request);
+    return Response.json({ ok: false, error: `지원하지 않는 HTTP 메서드입니다: ${method}` }, { status: 405, headers: JSON_HEADERS });
+  }
+
   // 10. GET /api/codex-usage
   if (pathname === '/api/codex-usage') {
     if (method !== 'GET') {
@@ -612,9 +620,7 @@ export async function handleWorkspaceBridgeRequest(
         { status: 405, headers: JSON_HEADERS }
       );
     }
-    const bypassCache = url.searchParams.get('refresh') === 'true';
-    const result = getCodexDailyUsage({ bypassCache });
-    return Response.json(result, { status: 200, headers: JSON_HEADERS });
+    return handleCodexUsage(request);
   }
 
   // 11. GET /api/gemini-quota
@@ -625,9 +631,7 @@ export async function handleWorkspaceBridgeRequest(
         { status: 405, headers: JSON_HEADERS }
       );
     }
-    const bypassCache = url.searchParams.get('refresh') === 'true';
-    const result = await getGeminiQuota({ bypassCache });
-    return Response.json(result, { status: 200, headers: JSON_HEADERS });
+    return handleGeminiQuota(request);
   }
 
   // Check for known route prefixes with invalid method
@@ -680,7 +684,7 @@ export function createWorkspaceBridgeMiddleware(options?: WorkspaceBridgeOptions
       pathname === '/api/conversations' ||
       pathname.startsWith('/api/conversations/') ||
       pathname === '/api/codex-usage' ||
-      pathname === '/api/gemini-quota';
+      pathname === '/api/gemini-quota' || pathname === '/api/settings';
 
     if (!isWorkspaceRoute) {
       return next();

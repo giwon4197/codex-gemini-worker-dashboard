@@ -9,7 +9,8 @@ param(
   [string]$TaskId = '',
   [string]$StateRoot = '',
   [string]$BaseCommit = '',
-  [ValidateRange(1, 4)][int]$Attempt = 1,
+  # Initial invocation + at most three test retries + three write expansions.
+  [ValidateRange(1, 7)][int]$Attempt = 1,
   [string]$DashboardPath = '',
   [string]$DataDir = '',
   [string[]]$MockOutputLines = @(),
@@ -23,14 +24,12 @@ if (-not $isMockRun -and -not (Test-Path -LiteralPath $antigravity)) {
   throw 'Antigravity CLI를 찾을 수 없습니다.'
 }
 
-# 4-tier model mapping
-$TierMap = @{
-  'fast'      = 'gemini-3.8-flash-low'
-  'normal'    = 'gemini-3.8-flash-medium'
-  'advanced'  = 'gemini-3.8-flash-high'
-  'reasoning' = 'gemini-3.1-pro-high'
-}
-$DefaultTier = 'normal'
+$commonModule = Join-Path $PSScriptRoot 'orchestration-common.ps1'
+if (-not (Test-Path -LiteralPath $commonModule -PathType Leaf)) { throw "Required orchestration module not found: $commonModule" }
+. $commonModule
+$modelTierConfig = Get-ModelTierConfiguration
+$TierMap = $modelTierConfig.TierMap
+$DefaultTier = $modelTierConfig.DefaultTier
 $DefaultModel = $TierMap[$DefaultTier]
 $settingsPath = Join-Path $PSScriptRoot 'worker-settings.json'
 
@@ -135,59 +134,7 @@ if (-not ([System.Management.Automation.PSTypeName]'AgyProcessRunner').Type) {
 "@
 }
 
-function Resolve-SharedDashboardPaths {
-  param(
-    [string]$ExplicitDataDir = '',
-    [string]$ExplicitDashboardPath = '',
-    [string]$RepoPath = ''
-  )
-  if (-not [string]::IsNullOrWhiteSpace($ExplicitDashboardPath)) {
-    $dash = [System.IO.Path]::GetFullPath($ExplicitDashboardPath)
-    return [pscustomobject]@{ DataDir = Split-Path -Parent $dash; DashboardPath = $dash }
-  }
-  if (-not [string]::IsNullOrWhiteSpace($ExplicitDataDir)) {
-    $dDir = [System.IO.Path]::GetFullPath($ExplicitDataDir)
-    return [pscustomobject]@{ DataDir = $dDir; DashboardPath = (Join-Path $dDir 'dashboard.json') }
-  }
-  if (-not [string]::IsNullOrWhiteSpace($env:CODEX_GEMINI_DASHBOARD_PATH)) {
-    $dash = [System.IO.Path]::GetFullPath($env:CODEX_GEMINI_DASHBOARD_PATH)
-    return [pscustomobject]@{ DataDir = Split-Path -Parent $dash; DashboardPath = $dash }
-  }
-  if (-not [string]::IsNullOrWhiteSpace($env:CODEX_GEMINI_DATA_DIR)) {
-    $dDir = [System.IO.Path]::GetFullPath($env:CODEX_GEMINI_DATA_DIR)
-    return [pscustomobject]@{ DataDir = $dDir; DashboardPath = (Join-Path $dDir 'dashboard.json') }
-  }
-  $checkDirs = @($PSScriptRoot, $RepoPath) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and (Test-Path -LiteralPath $_) }
-  foreach ($dir in $checkDirs) {
-    $commonDir = (& git -C $dir rev-parse --git-common-dir 2>$null)
-    if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($commonDir)) {
-      $commonTrim = $commonDir.Trim()
-      $mainGitRoot = if ([System.IO.Path]::IsPathRooted($commonTrim)) {
-        [System.IO.Path]::GetFullPath((Join-Path $commonTrim '..'))
-      } else {
-        [System.IO.Path]::GetFullPath((Join-Path $dir (Join-Path $commonTrim '..')))
-      }
-      $candData = Join-Path $mainGitRoot 'gemini-dashboard\public\data'
-      if (Test-Path -LiteralPath $candData) {
-        return [pscustomobject]@{ DataDir = $candData; DashboardPath = (Join-Path $candData 'dashboard.json') }
-      }
-    }
-  }
-  if (-not [string]::IsNullOrWhiteSpace($env:CODEX_GEMINI_INSTALL_ROOT)) {
-    $candData = Join-Path $env:CODEX_GEMINI_INSTALL_ROOT 'gemini-dashboard\public\data'
-    if (Test-Path -LiteralPath $candData) {
-      return [pscustomobject]@{ DataDir = $candData; DashboardPath = (Join-Path $candData 'dashboard.json') }
-    }
-  }
-  if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
-    $candData = Join-Path $env:LOCALAPPDATA 'codex-gemini-worker-dashboard\gemini-dashboard\public\data'
-    if (Test-Path -LiteralPath $candData) {
-      return [pscustomobject]@{ DataDir = $candData; DashboardPath = (Join-Path $candData 'dashboard.json') }
-    }
-  }
-  $fallbackData = Join-Path $PSScriptRoot 'gemini-dashboard\public\data'
-  return [pscustomobject]@{ DataDir = $fallbackData; DashboardPath = (Join-Path $fallbackData 'dashboard.json') }
-}
+
 
 $resolvedDashboard = Resolve-SharedDashboardPaths -ExplicitDataDir $DataDir -ExplicitDashboardPath $DashboardPath -RepoPath $Workspace
 $dashboardPath = $resolvedDashboard.DashboardPath
@@ -216,41 +163,9 @@ $eventPath = if ($isParallelWorker) {
 $runnerProcessId = $PID
 $agentProcessId = $null
 
-function Write-AtomicJson {
-  param(
-    [Parameter(Mandatory = $true)][string]$Path,
-    [Parameter(Mandatory = $true)]$Data
-  )
-  $dir = Split-Path -Parent $Path
-  if (-not (Test-Path -LiteralPath $dir)) {
-    New-Item -ItemType Directory -Path $dir -Force | Out-Null
-  }
-  $tempPath = "$Path.$([System.Guid]::NewGuid().ToString('N')).tmp"
-  try {
-    $json = $Data | ConvertTo-Json -Depth 8
-    [System.IO.File]::WriteAllText($tempPath, $json, [System.Text.Encoding]::UTF8)
-    [System.IO.File]::Move($tempPath, $Path, $true)
-  } catch {
-    try {
-      [System.IO.File]::Copy($tempPath, $Path, $true)
-      [System.IO.File]::Delete($tempPath)
-    } catch {}
-  } finally {
-    if (Test-Path -LiteralPath $tempPath) {
-      try { [System.IO.File]::Delete($tempPath) } catch {}
-    }
-  }
-}
 
-function Redact-Secrets {
-  param([string]$Text)
-  if ([string]::IsNullOrEmpty($Text)) { return "" }
-  $redacted = $Text -replace '(?i)(bearer\s+)[a-zA-Z0-9_\-\.]{10,}', '$1[REDACTED]'
-  $redacted = $redacted -replace 'AIza[0-9A-Za-z-_]{35}', '[REDACTED_API_KEY]'
-  $redacted = $redacted -replace 'sk-[a-zA-Z0-9]{20,}', '[REDACTED_SECRET]'
-  $redacted = $redacted -replace '(?i)(key|token|secret|password|auth)=([a-zA-Z0-9_\-\.]{8,})', '$1=[REDACTED]'
-  return $redacted
-}
+
+
 
 $workerRunId = [System.Guid]::NewGuid().ToString('d')
 $started = Get-Date
@@ -373,13 +288,25 @@ function Sync-LiveWorker {
     error          = if ($Err) { Redact-Secrets -Text $Err } else { $null }
   }
 
-  Write-AtomicJson -Path $liveWorkerPath -Data $liveObj
+  if ($isParallelWorker) {
+    $safeTaskId = $workerKey -replace '[^A-Za-z0-9._-]', '-'
+    $taskPolicyPath = Join-Path $StateRoot "tasks\$safeTaskId.json"
+    if (Test-Path -LiteralPath $taskPolicyPath) {
+      $taskPolicy = Get-Content -Raw -LiteralPath $taskPolicyPath | ConvertFrom-Json
+      foreach ($field in @('filesystemPolicy', 'expansionRequests', 'expansionCount', 'expansionLimit', 'testRetryCount')) {
+        if ($taskPolicy.PSObject.Properties.Name -contains $field) {
+          $liveObj | Add-Member -NotePropertyName $field -NotePropertyValue $taskPolicy.$field
+        }
+      }
+    }
+  }
+  Write-AtomicJson -Depth 8 -BestEffort -Path $liveWorkerPath -Data $liveObj
   if ($attemptStatePath) {
-    try { Write-AtomicJson -Path $attemptStatePath -Data $liveObj } catch {}
+    try { Write-AtomicJson -Depth 8 -BestEffort -Path $attemptStatePath -Data $liveObj } catch {}
   }
   try {
     if (-not $liveWorkerRootPath) { return }
-    Write-AtomicJson -Path $liveWorkerRootPath -Data $liveObj
+    Write-AtomicJson -Depth 8 -BestEffort -Path $liveWorkerRootPath -Data $liveObj
   } catch {}
 }
 
@@ -856,7 +783,7 @@ try {
 
   $data.updatedAt = (Get-Date).ToString('o')
   $data.processedKeys = @($data.processedKeys) + @($usageKey, $taskKey) | Select-Object -Unique
-  Write-AtomicJson -Path $dashboardPath -Data $data
+  Write-AtomicJson -Depth 8 -BestEffort -Path $dashboardPath -Data $data
 } finally {
   if ($hasLock) {
     try { $mutex.ReleaseMutex() } catch {}

@@ -25,18 +25,7 @@ New-Item -ItemType Directory -Path $testTempRoot -Force | Out-Null
 $passCount = 0
 $failCount = 0
 
-function Assert-Test([string]$testName, [bool]$condition, [string]$detail = '') {
-  if ($condition) {
-    Write-Host "  [PASS] $testName" -ForegroundColor Green
-    $script:passCount++
-  } else {
-    Write-Host "  [FAIL] $testName" -ForegroundColor Red
-    if ($detail) {
-      Write-Host "         Detail: $detail" -ForegroundColor Yellow
-    }
-    $script:failCount++
-  }
-}
+. (Join-Path $PSScriptRoot 'test-common.ps1') -AssertDetailLabel 'Detail'
 
 function New-MockNpmEnv([string]$MockDir, [string]$Behavior = 'success') {
   if (-not (Test-Path -LiteralPath $MockDir)) {
@@ -292,15 +281,10 @@ try {
     Assert-Test "Manifest records failure status" ($runManifest8.status -in @('failed', 'escalated')) "Status: $($runManifest8.status)"
     Assert-Test "Manifest records environment_error category" ($runManifest8.errorCategory -eq 'environment_error') "Category: $($runManifest8.errorCategory)"
 
+    Assert-Test "Manifest records failed toolchain preflight" ($runManifest8.toolchain.status -eq 'ENVIRONMENT_ERROR') "Toolchain: $($runManifest8.toolchain.status)"
+    Assert-Test "Toolchain preflight occurs before worktree creation" (@($runManifest8.worktrees).Count -eq 0)
     $taskResultPath8 = Join-Path $runDirs8[0].FullName 'results\TASK-001-result.json'
-    if (Test-Path -LiteralPath $taskResultPath8) {
-      $taskResult8 = Get-Content -Raw -LiteralPath $taskResultPath8 | ConvertFrom-Json
-      Assert-Test "Worker decision is ENVIRONMENT_ERROR" ($taskResult8.verification.decision -eq 'ENVIRONMENT_ERROR') "Got: $($taskResult8.verification.decision)"
-      Assert-Test "Attempt count remains 1 (no retries)" ($taskResult8.attempt -eq 1) "Attempt was: $($taskResult8.attempt)"
-      Assert-Test "Retry history is empty" (@($taskResult8.retryHistory).Count -eq 0)
-    } else {
-      Assert-Test "Task result file exists" $false
-    }
+    Assert-Test "No AI worker result is created after failed preflight" (-not (Test-Path -LiteralPath $taskResultPath8))
   }
 
   $mainRef8 = (& git -C $case8.LocalDir rev-parse refs/heads/main).Trim()

@@ -6,7 +6,7 @@ Codex가 요구사항을 설계하고 작업 난이도에 맞는 Gemini 모델�
 
 ## 한 줄 설치 및 실행
 
-Windows PowerShell에서 실행하세요.
+Windows의 PowerShell 7에서 실행하세요.
 
 ```powershell
 irm https://raw.githubusercontent.com/giwon4197/codex-gemini-worker-dashboard/main/install.ps1 | iex
@@ -101,12 +101,14 @@ git switch main
 git merge --ff-only integration/<run-id>
 ```
 
+출처: model-tiers.json
+
 | 등급 | 모델 | 권장 용도 |
 |---|---|---|
-| `fast` | Gemini 3.8 Flash Low | 문구 수정, 간단한 확인 |
-| `normal` | Gemini 3.8 Flash Medium | 일반 기능 구현과 버그 수정 |
-| `advanced` | Gemini 3.8 Flash High | 복합 기능과 정밀 분석 |
-| `reasoning` | Gemini 3.1 Pro High | 심층 설계와 어려운 알고리즘 |
+| `fast` | gemini-3.8-flash-low | 문구 수정, 간단한 확인 |
+| `normal` | gemini-3.8-flash-medium | 일반 기능 구현과 버그 수정 |
+| `advanced` | gemini-3.8-flash-high | 복합 기능과 정밀 분석 |
+| `reasoning` | gemini-3.1-pro-high | 심층 설계와 어려운 알고리즘 |
 
 기본 등급은 `normal`입니다. Codex는 작업 난이도에 따라 더 가볍거나 강한 등급을 선택할 수 있습니다.
 
@@ -153,7 +155,7 @@ Codex review가 깨끗하면 최종 상태는 `awaiting_human_approval`, 수정 
 
 ## 요구사항
 
-- Windows 10/11 및 PowerShell
+- Windows 10/11 및 PowerShell 7
 - Node.js LTS
 - Google AI Pro 사용이 가능한 Google 계정
 - Google Antigravity CLI 로그인
@@ -180,3 +182,56 @@ Antigravity는 선택한 작업 폴더의 파일을 읽고 수정할 수 있습�
 ## License
 
 [MIT](LICENSE)
+
+## 설치 명령과 로컬 검증
+
+설치기에서 생성하는 명령은 다음과 같다. 기본 등록 위치는 `%LOCALAPPDATA%\agy\bin`이다.
+
+| 명령 | 설치 파일 | 역할 |
+|---|---|---|
+| gemini-worker | gemini-worker.ps1 / .cmd | 단일 Gemini worker |
+| worker-dashboard | worker-dashboard.ps1 / .cmd | 대시보드 launcher 위임 |
+| parallel-gemini-workers | parallel-gemini-workers.ps1 / .cmd | 최대 두 독립 worker 실행 |
+| stop-parallel-run | stop-parallel-run.ps1 / .cmd | 실행 중단 요청 |
+| codex-route | codex-route.ps1 / .cmd | 읽기 전용 계획과 worker orchestration |
+| review-integration | review-integration.ps1 / .cmd | integration 검토 |
+| dashboard-launcher.cmd | dashboard-launcher.cmd | 설치 루트/checkout에서 대시보드 실행 |
+
+`agy`는 이 프로젝트가 구현하는 명령이 아니라 Google Antigravity dependency CLI다. PowerShell 7(`pwsh.exe`)과 Node.js >=22.13.0이 필요하다.
+
+현재 checkout을 별도 폴더에 검증 설치할 때는 다음처럼 실행한다. `-NoRegister`는 launcher를 해당 InstallRoot의 bin에만 만들며 사용자 PATH와 영구 CODEX_GEMINI_INSTALL_ROOT를 바꾸지 않는다.
+
+```powershell
+pwsh -NoProfile -File install.ps1 -SourcePath . -InstallRoot "$env:TEMP\codex-gemini-ver3-check" -NoStart -NoRegister
+```
+
+업데이트는 `.installed-program-files.json`에 기록한 프로그램 파일만 동기화한다. worker-settings.json, dashboard runtime data, .agent 및 사용자 local state는 보존한다. manifest가 없는 기존 설치에서는 알려진 폐기 파일(next.config.ts와 빈 Sites hosting.json)만 정리하며 이름을 알 수 없는 사용자 파일은 삭제하지 않는다. 잘못된 SourcePath는 원격 다운로드로 대체하지 않고 실패한다.
+## v2.1 filesystem 및 실행 계약
+
+`read_scope`는 task worktree의 검색 범위와 deny를, `write_scope`는 expected/derived_approved/sensitive/forbidden을, `merge_scope`는 통합 가능한 expected/patterns/deny를 정의한다. legacy `allowed_files` 입력은 runtime에서 expected로 정규화한다. canonical planner output은 세 scope와 allowed_files를 모두 요구한다.
+
+`parallel-tasks.example.json`은 명시적 scope task와 legacy allowed_files task를 함께 보여 주는 mixed compatibility 예제다. 완전한 planner schema 예제는 [parallel-tasks.v2_1.example.json](parallel-tasks.v2_1.example.json)이며 두 예제 모두 runtime policy 검증을 거친다.
+
+Dynamic Write Expansion은 worker가 추가 파일을 수정하기 전에 evidence와 함께 요청한다. 승인 최대 3회와 test retry 예산은 분리되며 Attempt 최대 7을 유지한다. 민감 파일의 review 요구나 금지 범위를 자동 승인으로 우회하지 않는다. 계획은 `.agent/plans`, 실행·검증·integration 결과는 `.agent/runs`에 기록한다. 상세 내용은 [v2.1 Filesystem Policy](docs/V2_1_FILESYSTEM_POLICY.md)를 참조한다.
+
+| 상태 | 의미 |
+|---|---|
+| awaiting_review | 결정론적 검증 완료, integration review 대기 |
+| awaiting_human_approval | 리뷰 후 사람의 병합 승인 대기 |
+| changes_requested | 리뷰에서 수정 필요 |
+| requiresCodex | 자동 처리 대신 Codex 판단이 필요한 escalation 표시 |
+| POLICY_VIOLATION | 파일 범위 또는 정책 위반 |
+| TEST_FAILED | 결정론적 검증 실패 |
+| TIMED_OUT | 실행 제한 시간 초과 |
+| RETRY_EXHAUSTED | 허용된 retry 예산 소진 |
+| WRITE_EXPANSION_REVIEW_REQUIRED | 추가 write scope에 사람의 검토 필요 |
+
+Level은 v2.1 planning complexity 분류이며 실행 pipeline을 바꾸지 않는다. Level 0은 shared contract 변경 없는 매우 작은 결정론적 변경(one worker), Level 1은 소수 파일의 일반 구현/bug fix(기본 one worker), Level 2는 component 수준의 여러 파일/contract 조정(명확히 독립된 ownership일 때만 최대 2 worker), Level 3은 architecture/algorithm/높은 모호성·위험도의 reasoning tier 후보(명확한 독립성이 있을 때만 병렬화)다. v2.2 Execution Profile과는 별개다.
+
+### vinext 및 로컬 runtime
+
+next/server, next/font/google, next/link, Metadata type은 vinext의 Next compatibility surface로 해석되므로 유지한다. 빈 next.config.ts만 제거했다. `npm run dev`는 Vite Node bridge를, `npm run build` 후 `npm start`는 같은 Node handler와 빌드된 Wrangler runtime을 사용한다. 직접 `wrangler dev`만 실행하면 host filesystem API의 데이터에 접근할 수 없으므로 로컬 사용은 `npm start`로 실행한다.
+
+Cloudflare/Wrangler는 로컬 runtime adapter로 사용하며, 이 프로젝트는 Cloudflare production deployment를 지원한다고 보장하지 않는다. 사용하지 않는 OpenAI Sites plugin과 null D1/R2 placeholder는 제거했다. UI 디자인과 나머지 dependency version은 유지한다.
+
+기본 모델 tier와 model ID의 출처는 루트 model-tiers.json이다. PowerShell은 공용 모듈의 PSScriptRoot에서 읽고, dashboard는 동일 JSON을 bundle한다. 설정 파일은 CODEX_GEMINI_INSTALL_ROOT가 있으면 설치 루트에서, 없으면 dashboard의 상위 폴더에서 읽는다. dashboard-launcher.cmd는 설치 루트 환경 변수와 자신의 위치를 사용해 대시보드를 찾는다.

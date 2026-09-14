@@ -17,10 +17,12 @@ import { STALE_PROCESS_MISMATCH_REASON, setGlobalLivenessOptions, resetGlobalLiv
 void describe('/api/runs API Route Handlers', () => {
   let testRepoDir: string;
   let savedAllowedRepo: string | undefined;
+  let savedAgyPath: string | undefined;
 
   beforeEach(() => {
     resetGlobalLivenessOptions();
     savedAllowedRepo = process.env.ALLOWED_REPO_ROOT;
+    savedAgyPath = process.env.AGY_PATH;
     testRepoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'runs-api-test-'));
     process.env.ALLOWED_REPO_ROOT = testRepoDir;
 
@@ -28,6 +30,9 @@ void describe('/api/runs API Route Handlers', () => {
     fs.mkdirSync(path.join(testRepoDir, '.agent', 'runs'), { recursive: true });
     fs.mkdirSync(path.join(testRepoDir, '.agent', 'dashboard-state', 'compact'), { recursive: true });
     fs.mkdirSync(path.join(testRepoDir, '.agent', 'dashboard-state', 'idempotency'), { recursive: true });
+    const agyFixture = path.join(testRepoDir, process.platform === 'win32' ? 'agy.exe' : 'agy');
+    fs.writeFileSync(agyFixture, 'test fixture', 'utf8');
+    process.env.AGY_PATH = agyFixture;
   });
 
   afterEach(() => {
@@ -37,6 +42,8 @@ void describe('/api/runs API Route Handlers', () => {
     } else {
       delete process.env.ALLOWED_REPO_ROOT;
     }
+    if (savedAgyPath === undefined) delete process.env.AGY_PATH;
+    else process.env.AGY_PATH = savedAgyPath;
     try {
       fs.rmSync(testRepoDir, { recursive: true, force: true });
     } catch {

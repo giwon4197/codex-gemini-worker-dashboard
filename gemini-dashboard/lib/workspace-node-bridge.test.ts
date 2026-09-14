@@ -14,9 +14,11 @@ import { getCompactRunState, getAliasRecord, resolveRequiredTools, saveConversat
 void describe('Workspace Node Bridge (Vite Dev/Server Middleware & App Route Bridge)', () => {
   let testRepoDir: string;
   let savedAllowedRepo: string | undefined;
+  let savedAgyPath: string | undefined;
 
   beforeEach(() => {
     savedAllowedRepo = process.env.ALLOWED_REPO_ROOT;
+    savedAgyPath = process.env.AGY_PATH;
     testRepoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bridge-test-'));
     process.env.ALLOWED_REPO_ROOT = testRepoDir;
 
@@ -28,6 +30,9 @@ void describe('Workspace Node Bridge (Vite Dev/Server Middleware & App Route Bri
 
     // Dummy codex-router.ps1 in repository root
     fs.writeFileSync(path.join(testRepoDir, 'codex-router.ps1'), '# Dummy router\n', 'utf8');
+    const agyFixture = path.join(testRepoDir, process.platform === 'win32' ? 'agy.exe' : 'agy');
+    fs.writeFileSync(agyFixture, 'test fixture', 'utf8');
+    process.env.AGY_PATH = agyFixture;
 
     resetWorkspaceBridgeOptions();
   });
@@ -39,6 +44,8 @@ void describe('Workspace Node Bridge (Vite Dev/Server Middleware & App Route Bri
     } else {
       delete process.env.ALLOWED_REPO_ROOT;
     }
+    if (savedAgyPath === undefined) delete process.env.AGY_PATH;
+    else process.env.AGY_PATH = savedAgyPath;
     try {
       fs.rmSync(testRepoDir, { recursive: true, force: true });
     } catch {
@@ -52,7 +59,7 @@ void describe('Workspace Node Bridge (Vite Dev/Server Middleware & App Route Bri
       let nextCalled = false;
 
       const req = {
-        url: '/api/settings',
+        url: '/favicon.ico',
         method: 'GET',
         headers: {},
       } as unknown as http.IncomingMessage;
@@ -67,6 +74,21 @@ void describe('Workspace Node Bridge (Vite Dev/Server Middleware & App Route Bri
       });
 
       assert.strictEqual(nextCalled, true);
+    });
+
+    void test('settings is owned by the shared middleware after API consolidation', async () => {
+      const middleware = createWorkspaceBridgeMiddleware({ repoRoot: testRepoDir });
+      let nextCalled = false;
+      const req = { url: '/api/settings', method: 'DELETE', headers: {} } as http.IncomingMessage;
+      const body = await new Promise<string>(resolve => {
+        const res = { statusCode: 0, setHeader: () => {}, end: (text: string) => {
+          assert.equal(res.statusCode, 405);
+          resolve(text);
+        } };
+        middleware(req, res as unknown as http.ServerResponse, () => { nextCalled = true; resolve(''); });
+      });
+      assert.equal(nextCalled, false);
+      assert.match(JSON.parse(body).error as string, /지원하지 않는/);
     });
 
     void test('rejects unsupported HTTP methods on workspace endpoints with status 405', async () => {
@@ -500,6 +522,37 @@ void describe('Workspace Node Bridge (Vite Dev/Server Middleware & App Route Bri
       // Never expose secrets, stack traces, or command lines
       assert.ok(!data.error.includes('Error:'));
       assert.ok(!data.error.includes('at '));
+    });
+
+    void test('returns a sanitized actionable launcher error and run ID instead of a generic message', async () => {
+      const req = new Request('http://localhost:3000/api/runs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: '실행기 오류 원인 표시 테스트' }),
+      });
+
+      const res = await handleWorkspaceBridgeRequest(req, {
+        repoRoot: testRepoDir,
+        spawner: () => {
+          throw new Error(`spawn failed at ${testRepoDir} with token sk-abcdefghijklmnopqrstuvwxyz123456`);
+        },
+      });
+
+      assert.strictEqual(res.status, 500);
+      const data = (await res.json()) as {
+        ok: boolean;
+        error: string;
+        errorCategory?: string;
+        runId?: string;
+      };
+      assert.strictEqual(data.ok, false);
+      assert.strictEqual(data.errorCategory, 'launcher_error');
+      assert.ok(data.runId);
+      assert.ok(data.error.includes('실행기 오류:'));
+      assert.ok(data.error.includes('spawn failed'));
+      assert.ok(!data.error.includes('작업 요청 처리 중 오류가 발생했습니다'));
+      assert.ok(!data.error.includes(testRepoDir));
+      assert.ok(!data.error.includes('sk-abcdefghijklmnopqrstuvwxyz123456'));
     });
   });
 

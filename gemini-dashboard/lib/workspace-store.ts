@@ -1563,7 +1563,13 @@ export async function spawnRouterRun(options: {
     initialCompact.failureReason = sanitized;
     initialCompact.activeWorkersCount = 0;
     await saveCompactRunState(initialCompact, root);
-    throw new Error(sanitized);
+    const launcherError = new Error(sanitized) as Error & {
+      runId?: string;
+      errorCategory?: string;
+    };
+    launcherError.runId = runId;
+    launcherError.errorCategory = 'launcher_error';
+    throw launcherError;
   } finally {
     try {
       fs.closeSync(stdoutFd);

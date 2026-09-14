@@ -168,6 +168,8 @@ Orchestrator는 하향 조정보다 상향 조정을 우선한다.
 
 ### 4.3 Runtime Escalation
 
+v2.1 후속 이관: sensitive/review-required 요청을 검토하고 승인하는 human approval API/UI를 v2.2에서 설계한다. 승인 대상 task, 요청 scope/evidence, 승인 주체와 결정 시점의 정책을 연결하고, stale 승인 및 forbidden 우회를 거부해야 한다. v2.1의 WRITE_EXPANSION_REVIEW_REQUIRED 종료 계약은 이번 ver3에서 변경하지 않는다.
+
 작업 도중 조건이 변하면 Profile을 승격할 수 있다.
 
 ```text
@@ -318,6 +320,8 @@ v2.2는 이후 v2.3 학습을 위해 실행 데이터를 구조화해서 저장�
 
 ### 9.1 반드시 기록할 값
 
+v2.1 후속 이관: Dynamic Write Expansion history dashboard visualization은 v2.2 observability 작업이다. 기존 expansionRequests에 저장된 target, evidence, decision, matchedPattern과 승인 횟수를 읽어 시간 순서로 표시하고, 거부/review-required/승인을 구분하는 read-only 화면을 설계한다. v2.1 ver3에는 이 UI나 신규 telemetry pipeline을 구현하지 않는다.
+
 #### 결정 당시 Feature Snapshot
 
 - task type
@@ -455,6 +459,8 @@ actual_changed_files = 8
 4. shared resource conflict 시 sequential fallback
 
 ## 11. v2.2 완료 기준
+
+v2.1 후속 이관: 실제 Gemini/Codex online end-to-end validation을 baseline 검증과 완료 기준에 포함한다. 명시적으로 승인된 테스트 저장소와 모델 호출 예산에서 expansion 요청, deterministic verification, integration review 및 human handoff까지 검증하고 호출 모델·실패 조건·관찰 결과를 기록해야 한다. mock fixture의 성공을 online PASS로 대체할 수 없다. 이 온라인 검증은 v2.1 ver3 범위에서 수행하지 않는다.
 
 ### 기능
 

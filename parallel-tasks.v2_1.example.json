@@ -1,0 +1,131 @@
+{
+  "level": 2,
+  "parallelizable": true,
+  "max_workers": 2,
+  "summary": "Two independent canonical v2.1 documentation tasks",
+  "integration_test_commands": [
+    "if (-not ((Test-Path 'docs/worker-a.md') -and (Test-Path 'docs/worker-b.md'))) { exit 1 }"
+  ],
+  "tasks": [
+    {
+      "id": "TASK-001",
+      "name": "첫 번째 독립 작업",
+      "objective": "첫 번째 독립 작업 결과 문서를 생성한다.",
+      "prompt": "docs/worker-a.md 파일을 만들고 이 작업이 worker A에서 수행되었다고 한 줄로 기록하세요. 다른 파일은 수정하지 마세요.",
+      "depends_on": [],
+      "tier": "fast",
+      "read_scope": {
+        "root": "task_worktree",
+        "mode": "project_wide_search",
+        "deny": [
+          ".env*",
+          ".git/**",
+          "**/secrets/**"
+        ]
+      },
+      "write_scope": {
+        "derived_approved": [],
+        "derived_auto_expand": true,
+        "sensitive": [
+          "tests/**",
+          "package.json"
+        ],
+        "forbidden": [
+          ".env*",
+          ".git/**",
+          ".agent/**"
+        ],
+        "expected": [
+          "docs/worker-a.md"
+        ]
+      },
+      "merge_scope": {
+        "patterns": [],
+        "expected": [
+          "docs/worker-a.md"
+        ],
+        "deny": []
+      },
+      "test_commands": [
+        "if (-not (Test-Path -LiteralPath 'docs/worker-a.md')) { exit 1 }"
+      ],
+      "timeout_seconds": 300,
+      "retry_limit": 3,
+      "allowed_files": [
+        "docs/worker-a.md"
+      ],
+      "acceptance_criteria": [
+        "Create only the assigned document and pass the deterministic existence check."
+      ],
+      "forbidden_operations": [
+        "push",
+        "merge main",
+        "read secrets"
+      ],
+      "expected_change_scope": {
+        "files": 1,
+        "lines": 1
+      }
+    },
+    {
+      "id": "TASK-002",
+      "name": "두 번째 독립 작업",
+      "objective": "두 번째 독립 작업 결과 문서를 생성한다.",
+      "prompt": "docs/worker-b.md 파일을 만들고 이 작업이 worker B에서 수행되었다고 한 줄로 기록하세요. 다른 파일은 수정하지 마세요.",
+      "depends_on": [],
+      "tier": "fast",
+      "allowed_files": [
+        "docs/worker-b.md"
+      ],
+      "test_commands": [
+        "if (-not (Test-Path -LiteralPath 'docs/worker-b.md')) { exit 1 }"
+      ],
+      "timeout_seconds": 300,
+      "retry_limit": 3,
+      "read_scope": {
+        "root": "task_worktree",
+        "mode": "project_wide_search",
+        "deny": [
+          ".env*",
+          ".git/**",
+          "**/secrets/**"
+        ]
+      },
+      "write_scope": {
+        "derived_approved": [],
+        "derived_auto_expand": true,
+        "sensitive": [
+          "tests/**",
+          "package.json"
+        ],
+        "forbidden": [
+          ".env*",
+          ".git/**",
+          ".agent/**"
+        ],
+        "expected": [
+          "docs/worker-b.md"
+        ]
+      },
+      "merge_scope": {
+        "patterns": [],
+        "expected": [
+          "docs/worker-b.md"
+        ],
+        "deny": []
+      },
+      "acceptance_criteria": [
+        "Create only the assigned document and pass the deterministic existence check."
+      ],
+      "forbidden_operations": [
+        "push",
+        "merge main",
+        "read secrets"
+      ],
+      "expected_change_scope": {
+        "files": 1,
+        "lines": 1
+      }
+    }
+  ]
+}
