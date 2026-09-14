@@ -30,8 +30,8 @@
 
 - Dashboard 최종: 17 test files / 235 cases PASS, skip/todo 0, exit 0. lint/build 각각 exit 0.
 - 최종 PS 반복 실행 완료: filesystem 52, toolchain 23, bounded runner 38, dependency bootstrap 50, launcher 48; 모두 exit 0.
-- parallel-usage 최종 반복 실행 중 사용량 소진으로 실행기 중단. write-expansion 최종 반복은 아직 시작 안 함. 이 두 개를 최종 반복 PASS라고 하지 말 것.
-- 앞선 PS 실행에서는 parallel-usage 95/95 및 write-expansion 35/35 PASS. 최종 재개 시 두 suite만 우선 다시 실행.
+- 중단 정리 중 이미 실행 중이던 최종 suite가 자연 종료했다. parallel-usage 95/95, write-expansion 35/35도 exit 0. 최종 일곱 suite 모두 PASS.
+- 검증 프로세스는 모두 종료됨. 종료 시도는 PID 검사 불일치로 아무 프로세스도 죽이지 않았으며, 이후 session 6982의 자연 종료(exit 0)를 확인했다.
 - installer regression: test-installer.ps1 13/13 PASS. 현재 checkout 실제 격리 설치도 최종 재실행 exit 0.
 - 격리 InstallRoot: .agent/background/ver3-install. NoRegister/NoStart 사용하여 기존 설치/사용자 PATH/전역 launcher 보존.
 - API parity: node test-dashboard-api.mjs PASS. dev PID 11528 port 51096, start PID 18360 port 59898, Wrangler PID 18240 port 59900. 각 9 curl.exe 응답의 status/JSON/중요값/오류/Cache-Control 비교. 양쪽 root readiness 200, 프로세스 트리 종료 및 public port 폐쇄 확인.
@@ -41,7 +41,7 @@
 ## 재개할 일 (원래 사용자 A~K 요구사항 유지)
 
 1. git status와 branch/HEAD/main SHA 확인. 이 메모 이후 변경이 있으면 검토하여 기존 작업을 보존.
-2. pwsh -NoProfile -File test-parallel-usage.ps1 및 test-write-expansion.ps1 최종 실행. 중단된 suite의 임시 fixture 디렉터리가 남을 수 있음; 재실행은 새 GUID 임시 경로를 사용.
+2. 최종 일곱 suite 결과를 보고서 표로 정리. 소스 변경/새 우려가 없으면 재실행 불필요.
 3. 최종 설치 환경에서 생성 launcher의 embedded CODEX_GEMINI_INSTALL_ROOT, model-tiers.json 및 orchestration-common.ps1 해석을 추가 확인. 실제 설치는 이미 끝났으므로 변경이 없으면 npm ci 재실행 불필요.
 4. 모든 repository tracked *.ps1에 Parser::ParseFile 실행, 오류 0 확인. test-dashboard-api.mjs/start-local.mjs의 문법 확인도 가능.
 5. 최종 integration diff를 직접 review. 특히 installer 삭제 범위/manifest state 보호, 공용 함수 계약, start Node/Wrangler adapter, 모델 경로를 살펴볼 것.
@@ -52,7 +52,7 @@
 
 ## 로그와 중요한 설계 판단
 
-- .agent/background/ver3-validation/final/*.log 및 exits.csv: 최종 PS 반복 결과. parallel log는 중단되어 incomplete일 수 있음.
+- .agent/background/ver3-validation/final/*.log 및 exits.csv: 최종 PS 반복 결과. 모든 일곱 suite가 exit 0으로 종료.
 - .agent/background/ver3-validation/final-npm-test.log: 17개 파일 전체 목록, 235 cases.
 - .agent/background/ver3-validation/final-npm-build.log: 최종 build.
 - docs/V2_1_IMPLEMENTATION_REPORT.md에 단계별 실제 실패/수정/성공 누적.
