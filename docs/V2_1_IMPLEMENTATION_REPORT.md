@@ -190,3 +190,28 @@ lib/workspace-store.test.ts
 |---|---|---|---|---|---|
 | C API regression (corrected) | npm --prefix gemini-dashboard run test | 17 files / 235 cases | PASS | 0 | non-workspace 통과 assertion 유지, settings interception assertion 추가 |
 | C lint (corrected) | npm --prefix gemini-dashboard run lint | vite.config.ts 포함 | PASS | 0 | 신규 test response type 보완 |
+
+### F/G/H 검증 누적
+
+| 작업 영역 | command | test/file count | pass/fail | exit code | 비고 |
+|---|---|---|---|---|---|
+| F residue removal | npm run build (gemini-dashboard) | 5 vinext stages | PASS | 0 | next.config.ts/Sites 제거 후 |
+| C/F API parity | node test-dashboard-api.mjs | dev/start 각 9 responses | PASS | 0 | 정상/POST/PUT/400/500/refresh/headers 비교; 변동 시각 제외 |
+| G sync regression | pwsh -NoProfile -File test-installer.ps1 | 13/13 | PASS | 0 | stale cleanup, user state 보존, installed model lookup |
+| G current-checkout install | pwsh -NoProfile -File install.ps1 -SourcePath . -InstallRoot .agent/background/ver3-install -NoStart -NoRegister | npm ci 557 packages | PASS | 0 | main.zip 미사용, 실사용 설치/전역 설정 미변경 |
+| H canonical example | pwsh -NoProfile -File test-filesystem-policy.ps1 | baseline 47 → 52 | PASS | 0 | mixed 2 tasks, canonical 2 tasks, 실제 schema |
+
+API parity: dev PID 11528/port 51096, start PID 18360/port 59898, 내부 Wrangler PID 18240/port 59900. 양쪽 root readiness HTTP 200 확인. curl.exe로 GET settings, POST fast, GET persisted fast, PUT normal, invalid tier POST 400, malformed body POST 500, GET codex usage, refresh=true 이후 사용량 42→45, GET Gemini quota available을 비교했다. 사용량 데이터는 fixture이며 quota CLI 호출을 비활성화했다. 양쪽 프로세스 트리를 종료하고 public port 폐쇄를 확인했다. 초기 API 검증 스크립트의 IPv4 readiness 주소는 vinext의 localhost 바인딩과 달라 실패했고, 실제 localhost 주소로 수정한 뒤 위 검증을 통과했다.
+
+설치 초기 시도는 OneDrive의 ReparsePoint 속성을 symlink와 동일하게 제외해 소스를 복사하지 못했다(exit 1). 실제 SymbolicLink/Junction만 제외하도록 수정한 후 현재 checkout 설치가 성공했다. npm ci가 기존 dependency audit 11건(1 low, 2 moderate, 8 high)을 보고했다. 버전 변경이나 audit fix는 수행하지 않았다. 설치기에는 프로그램 manifest sync와 격리 검증용 NoRegister를 추가했다. 기존 manifest 없는 설치는 알려진 폐기 파일만 정리하고 미확인 사용자 파일을 보존한다.
+
+canonical example의 첫 schema 검증은 PowerShell scalar/array 직렬화 차이로 allowed_files가 string이 되어 실패했다. 배열로 보존한 최종 예제는 실제 schema PASS다.
+
+Bounded runner의 첫 전체 실행은 37/38(exit 1)이었다. 기존 3초 tree fixture가 Windows에서 parent PID만 기록한 채 종료되어 실패했다. tree fixture timeout만 10초로 늘려 시작 시간을 확보하고 PID assertion을 >=2에서 >=3으로 강화했다. 별도 timeout-speed assertion은 유지했고 helper 프로세스 창을 숨겼다. 재실행은 38/38 PASS(exit 0), 부모·자식·손자 모두 종료 확인이다.
+
+## 작업 일시 중단 — 2026-09-14
+
+사용자가 한도 소진 전에 중단하고 재개할 수 있도록 정리를 요청했다. 계정 5시간 한도 100% 사용을 확인하여 추가 작업을 중단했다. 재개 시 docs/V2_1_VER3_HANDOFF.md를 먼저 읽는다. 이 시점은 전체 작업 완료가 아니다.
+
+최종 소스에서 npm test는 17 files / 235 cases PASS (skip/todo 0), lint PASS, build PASS이며 각각 exit 0이다. 최종 installer는 SourcePath 현재 checkout + 격리 InstallRoot + NoRegister/NoStart로 재실행하여 exit 0이다.
+최종 PowerShell 반복 실행에서 filesystem-policy 52, toolchain 23, bounded-process-runner 38, dependency-bootstrap 50, dashboard-launcher 48이 모두 exit 0으로 끝났다. parallel-usage 반복 실행은 중단 대상이고 write-expansion 최종 반복은 미실행이다. 앞선 동일 구현 검증에서는 parallel-usage 95/95, write-expansion 35/35 PASS였다. 중단된 반복 실행을 최종 PASS로 기록하지 않는다.
