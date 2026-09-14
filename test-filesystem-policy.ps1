@@ -179,5 +179,13 @@ $reviewSchema = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'codex-re
 Assert-PolicyTest 'review schema requires candidate commit binding' (@($reviewSchema.required) -contains 'candidateCommit')
 Assert-PolicyTest 'review schema satisfies strict object requirements' (Test-StrictObjectSchema $reviewSchema)
 
+foreach ($example in @('parallel-tasks.example.json', 'parallel-tasks.v2_1.example.json')) {
+  $examplePlan = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot $example) | ConvertFrom-Json
+  foreach ($exampleTask in $examplePlan.tasks) {
+    $examplePolicy = Resolve-FilesystemPolicy $exampleTask
+    Assert-PolicyTest "$example / $($exampleTask.id) resolves runtime policy" ($examplePolicy.write_scope.expected.Count -gt 0 -and $examplePolicy.merge_scope.expected.Count -gt 0)
+  }
+}
+Assert-PolicyTest 'canonical v2.1 example validates actual planner schema' (Test-Json -Json (Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'parallel-tasks.v2_1.example.json')) -SchemaFile $schemaPath)
 Write-Host "`nFilesystem Policy tests: $passed passed / $failed failed" -ForegroundColor Cyan
 if ($failed -gt 0) { exit 1 }

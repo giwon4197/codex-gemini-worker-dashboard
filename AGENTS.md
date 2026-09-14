@@ -16,3 +16,7 @@ When the user asks to implement, build, fix, or change repository code in natura
 - Do not wait in the Codex turn for worker completion. Inspect worker output only when the user explicitly asks for a review/status, or when the user reports that the dashboard shows `requiresCodex`, `HIGH_MODEL_FAILED`, `POLICY_VIOLATION`, or another terminal escalation.
 - On review, read only the compact terminal result, integration diff, and test summary. Avoid loading the full live event stream unless the compact failure record is insufficient to diagnose an escalation.
 - A successful background run stops at `awaiting_review`; Codex review and main merge happen only after the user requests them.
+
+## v2.1 planning complexity
+
+Level 0: trivial/local deterministic change, very small scope, no shared contract change, one worker. Level 1: ordinary localized implementation in a few files, generally one worker. Level 2: multi-file/component change with possible contract coordination; at most two workers only with independent ownership. Level 3: architecture/algorithm/high ambiguity/high-risk reasoning, reasoning tier candidate; parallel workers only with clear independence. These are v2.1 planning complexity classifications, not execution profiles, and do not change the execution pipeline.
