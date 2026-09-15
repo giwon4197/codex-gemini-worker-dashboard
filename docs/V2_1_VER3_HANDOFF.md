@@ -64,3 +64,7 @@
 - bounded tree fixture 초기 3초는 프로세스 생성 전에 timeout. fixture만 10초로 늘리고 PID assertion >=2→>=3으로 강화. 별도 timeout-speed test 유지. 최종 38/38.
 
 재개 요청 예: "docs/V2_1_VER3_HANDOFF.md를 읽고 v2.1 ver3 안정화 작업의 남은 검증과 최종 보고를 이어서 완료해줘."
+
+## 2026-09-15 재개 결과
+
+남은 설치 경로·parser·Git·scope 감사 및 최종 보고서 작성을 수행했다. 상세 판정은 V2_1_IMPLEMENTATION_REPORT.md의 "ver3 최종 검증 및 Git 감사"를 참조한다. 재개 시 이미 main/origin/main에 ver3 merge가 반영되어 최초 SHA 불변 조건은 FAIL이다. 이 이력을 되돌리거나 추가 merge/push하지 않았다. 코드 검증은 PASS이며 이전 재개할 일 목록은 역사적 인계 기록으로 보존한다.
