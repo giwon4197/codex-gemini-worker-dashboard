@@ -217,3 +217,116 @@ Bounded runner의 첫 전체 실행은 37/38(exit 1)이었다. 기존 3초 tree 
 최종 PowerShell 반복 실행에서 filesystem-policy 52, toolchain 23, bounded-process-runner 38, dependency-bootstrap 50, dashboard-launcher 48이 모두 exit 0으로 끝났다. parallel-usage 반복 실행은 중단 대상이고 write-expansion 최종 반복은 미실행이다. 앞선 동일 구현 검증에서는 parallel-usage 95/95, write-expansion 35/35 PASS였다. 중단된 반복 실행을 최종 PASS로 기록하지 않는다.
 
 중단 정리 중 최종 suite 실행기가 자연 종료했다. session 6982 exit 0이며 parallel-usage 95/95 및 write-expansion 35/35도 최종 PASS다. 위의 중단 대상/미실행 상태는 종료 결과 확인 전의 기록이며 이 결과로 갱신한다. 모든 검증 프로세스는 종료되었다. 재개 시 테스트를 불필요하게 반복하지 말고 남은 parser/Git/author/scope 감사와 보고서 마무리를 진행한다.
+
+## ver3 최종 검증 및 Git 감사 — 2026-09-15
+
+최종 판정: 코드·설치·결정론적 검증은 PASS. 최초 main/origin/main SHA 불변 조건은 FAIL이다. 따라서 원래 요청의 모든 조건을 충족한 완료로 표현하지 않는다.
+
+재개 시 working tree는 clean이었지만 checkout은 main이었다. main과 origin/main은 모두 `18e1d0a75f57dd0608719568c0ae0679a096006e`로 바뀌어 있었다. reflog에는 중단 이후 2026-09-14 17:45:21 main checkout, 17:45:54 pull, 17:45:58 ver3 merge가 기록되어 있다. merge commit의 parents는 f6e954b와 617237f이며 Author/Committer는 hjwn <eric5519@naver.com>이다. origin/hjw-v2.1-ver3도 617237f를 가리킨다. 이 변경은 중단 후 재개 전에 이미 존재했으며 이 작업에서 되돌리거나 추가 merge/push하지 않았다. 재개 후 기존 ver3로 전환했다.
+
+| Git 항목 | 시작 baseline | 재개 시 확인 | 판정 |
+|---|---|---|---|
+| main | a57323acf1a24897e55db986552486c56741291b | 18e1d0a75f57dd0608719568c0ae0679a096006e | 최초 불변 조건 FAIL |
+| origin/main (fetch 후) | f6e954b59377843f893707badee7b3986486b14b | 18e1d0a75f57dd0608719568c0ae0679a096006e | 최초 불변 조건 FAIL |
+| ver3 기준 | 924639ede7833b45913d02329c85114b014562fd | 동일 base에서 진행 | PASS |
+| 재개 직전 ver3 HEAD | 617237ff996636848e7199a86ee5c8516d542d7c | 동일 | PASS |
+| Git identity | 허주완 <eric5519@naver.com> | hjwn <eric5519@naver.com> | 중단 후 표시 이름 변경 확인; 설정을 강제로 변경하지 않음 |
+
+재개 전 11개 commit의 Author와 Committer는 모두 허주완 <eric5519@naver.com>이었다. 재개 후 commit은 현재 설정인 hjwn <eric5519@naver.com>을 사용한다. git config 및 GIT_AUTHOR/GIT_COMMITTER 환경 변수를 변경하지 않았다. AI identity와 AI Co-authored-by trailer는 없다. 모든 subject는 요청한 feat:/fix:/refactor:/test:/docs: prefix 계약에 맞는다. 최초 identity와 마지막 identity가 문자 그대로 같다는 조건은 중단 이후 표시 이름 변경으로 충족하지 못한다.
+
+### 최종 검증 표
+
+아래 test/build 결과는 중단 직전 최종 소스에서 실제 실행한 로그에 근거한다. 재개 후 실행 코드 변경은 usage-handlers.ts의 마지막 빈 줄 제거뿐이다. 따라서 의미가 변하지 않은 suite를 반복하지 않았다. 재개 시 남은 설치 경로와 parser/Git 감사를 직접 실행했다.
+
+| 작업 영역 | command | baseline → ver3 test/file count | pass/fail | exit code | 비고 |
+|---|---|---|---|---|---|
+| Filesystem | pwsh -NoProfile -File test-filesystem-policy.ps1 | 47 → 52/52 | PASS | 0 | mixed/canonical example 및 실제 schema |
+| Toolchain/common | pwsh -NoProfile -File test-toolchain.ps1 | 9 → 23/23 | PASS | 0 | 명시적 missing module, JSON 실패/cleanup, redaction |
+| Bounded runner | pwsh -NoProfile -File test-bounded-process-runner.ps1 | 38 → 38/38 | PASS | 0 | tree PID assertion 강화, 기존 timeout-speed 유지 |
+| Dependency bootstrap | pwsh -NoProfile -File test-dependency-bootstrap.ps1 | 50 → 50/50 | PASS | 0 | 기존 계약 유지 |
+| Dashboard launcher | pwsh -NoProfile -File test-dashboard-launcher.ps1 | 48 → 48/48 | PASS | 0 | 기존 계약 유지 |
+| Parallel usage | pwsh -NoProfile -File test-parallel-usage.ps1 | 95 → 95/95 | PASS | 0 | 최종 반복도 자연 종료 |
+| Write expansion | pwsh -NoProfile -File test-write-expansion.ps1 | 35 → 35/35 | PASS | 0 | 최종 반복도 자연 종료, 최대 3 승인/Attempt 7 유지 |
+| PS 합계 | 위 7 suite | 322 → 341/341 | PASS | 0 | assertion 감소 없음 |
+| Installer regression | pwsh -NoProfile -File test-installer.ps1 | 신규 13/13 | PASS | 0 | 프로그램만 정리, 사용자 state 보존 |
+| Dashboard test | npm --prefix gemini-dashboard run test | 기존 15 + 신규 2 = 17 files / 235 cases | PASS | 0 | skipped 0, todo 0 |
+| Dashboard lint | npm --prefix gemini-dashboard run lint | vite.config.ts 포함 | PASS | 0 | err:any 및 vite ignore 제거 |
+| Dashboard build | npm --prefix gemini-dashboard run build | 5 stages | PASS | 0 | static route classification 안내만 남음 |
+| API parity | node test-dashboard-api.mjs | dev/start 각 9 requests | PASS | 0 | curl.exe, 실제 JSON/header 비교, quota fixture |
+| 현재 checkout 설치 | pwsh -NoProfile -File install.ps1 -SourcePath . -InstallRoot .agent/background/ver3-install -NoStart -NoRegister | npm ci 557 packages | PASS | 0 | main.zip 미사용, 별도 InstallRoot |
+| 설치 모델 경로 | installed orchestration-common.ps1 dot-source; Get-ModelTierConfiguration | 4 tiers / normal | PASS | 0 | 설치 PSScriptRoot 직접 로드 |
+| 설치 launcher 경로 | installed bin/worker-dashboard.ps1 -MockHttp dashboard -MockPortListen true -NoBrowser -NonInteractive | embedded root 및 mock launcher | PASS | 0 | 실제 localhost:3000 서버를 테스트한 것이 아님 |
+| PowerShell parser | Parser::ParseFile on git ls-files '*.ps1' | 24 files / 0 errors | PASS | 0 | tracked repository scripts 전체 |
+| JS parser | node --check test-dashboard-api.mjs; node --check gemini-dashboard/scripts/start-local.mjs | 2 files | PASS | 0 | 실행 중인 서버 없음 |
+| Diff whitespace | git diff --check BASE 및 git diff --check | 전체 ver3 diff | PASS | 0 | 재개 감사에서 EOF 빈 줄 1개 수정 |
+| Lockfile | base/current packages records 비교 | Sites plugin 1개 제거 외 동일 | PASS | 0 | version/resolution churn 0 |
+| Git 불변성 | git rev-parse main; git rev-parse origin/main | 최초 baseline과 다름 | FAIL | 0 (조회 성공) | 중단 이후 merge/push 이력 존재 |
+
+최종 테스트 파일 전체 목록은 다음과 같다. A 단계의 기존 15개를 모두 포함하며 신규 파일도 자동 발견한다.
+
+```text
+app/api/codex-usage/route.test.ts
+app/api/gemini-quota/route.test.ts
+app/api/projects/[projectId]/workers/route.test.ts
+app/api/runs/route.test.ts
+lib/codex-conversation.test.ts
+lib/codex-usage.test.ts
+lib/daily-token-stats.test.ts
+lib/gemini-quota.test.ts
+lib/model-tiers.test.ts
+lib/process-liveness.test.ts
+lib/project-event-graph.test.ts
+lib/run-tracking.test.ts
+lib/worker-settings.test.ts
+lib/workspace-contract.test.ts
+lib/workspace-node-bridge.test.ts
+lib/workspace-sanitize.test.ts
+lib/workspace-store.test.ts
+Discovered test file count = 17
+node:test: 235 passed, 0 failed, 0 skipped, 0 todo; exit 0
+```
+
+### 변경 계약
+
+| 항목 | 최종 변경 |
+|---|---|
+| 1. 삭제 파일 | gemini-dashboard/next.config.ts; gemini-dashboard/.openai/hosting.json |
+| 2. 새 파일 | 아래 15개 목록 참조 |
+| 3. 공용 module 이동 | orchestration-common.ps1: Write-AtomicJson, Resolve-SharedDashboardPaths, Set-ObjectProperty, Invoke-Verification, Redact-Text; Redact-Secrets 호환 wrapper. test-common.ps1: Assert-Test |
+| 4. Test discovery | 수동 13개 목록 → app/lib filesystem 재귀 탐색·lexical sort·목록/count stdout·명시적 Node 인자; Node glob의 literal [] escape; strip-types 명시 |
+| 5. Model source | model-tiers.json 단일 source, TS bundle/loader 및 PowerShell 직접 loader; example model과 README 자동 drift 검증 |
+| 6. API source | settings는 lib/worker-settings.ts; usage/quota는 lib/usage-handlers.ts; app route와 Node bridge가 위임. dev dead middleware 제거. start는 Node bridge + Wrangler UI runtime |
+| 7. Installer | 소유 프로그램 manifest sync, 명시적 SourcePath 실패, 알려진 legacy stale 파일만 정리, state 보존, NoRegister 격리 경로, launcher의 설치 root 포함 |
+| 8. Framework residue | 빈 next.config/Sites/null D1/R2 제거; next compatibility import와 Cloudflare/Wrangler 유지; UI 디자인 불변, 나머지 dependency record 불변 |
+
+새 파일 15개:
+
+```text
+docs/V2_1_VER3_HANDOFF.md
+gemini-dashboard/lib/model-tiers.test.ts
+gemini-dashboard/lib/model-tiers.ts
+gemini-dashboard/lib/usage-handlers.ts
+gemini-dashboard/lib/worker-settings.test.ts
+gemini-dashboard/lib/worker-settings.ts
+gemini-dashboard/scripts/run-tests.mjs
+gemini-dashboard/scripts/start-local.mjs
+installer-common.ps1
+model-tiers.json
+orchestration-common.ps1
+parallel-tasks.v2_1.example.json
+test-common.ps1
+test-dashboard-api.mjs
+test-installer.ps1
+```
+
+### Scope audit 및 남은 한계
+
+최종 base diff를 검토했다. filesystem-policy.ps1와 router-plan.schema.json, UI page/layout/components는 변경하지 않았다. 기존 read/write/merge scope, Dynamic Write Expansion, 최대 3 승인, Attempt 최대 7, retry/escalation 및 integration/review 의미를 보존한다. router 변경은 planning level 설명뿐이며 실행 pipeline 변경이 없다.
+
+Execution Profile, recommended_profile, Runtime Profile Escalation, Verification DAG Scheduler/node engine, affected-test/incremental engine, dependency/analysis cache, analytics telemetry pipeline, executions.ndjson/spans.ndjson, learned router/profile prediction/budget/model selection, approval dashboard UI/API는 새로 구현하지 않았다. V2_2_V2_3_ROADMAP.md 변경은 expansion history visualization, human approval API/UI, online baseline validation의 후속 이관 설명만이다.
+
+직접 Wrangler만 시작하면 host filesystem 데이터에 접근하지 못한다. 검증한 start 계약은 npm start의 Node adapter와 내부 Wrangler 조합이다. Cloudflare production deployment를 보장하지 않는다. 기존 installer에 manifest가 없으면 알려진 폐기 파일 외 미확인 프로그램/사용자 파일을 자동 삭제하지 않는다. Node >=22.13.0 계약과 strip-types 인자를 유지했으나 이번 실제 실행은 Node v24.15.0으로 했고 Node 22 binary 별도 실행 검증은 하지 않았다. npm ci의 기존 audit 11건을 고치기 위한 dependency version 변경은 범위 밖이다.
+
+실제 Gemini/Codex online model end-to-end validation은 수행하지 않았다. 결정론적 fixture의 성공을 online validation PASS로 기록하지 않는다. 최초 baseline 조사에서 로컬 사용량 및 agy /quota 상태 조회는 있었으나 모델 추론 검증이 아니다.
+
+재개 후 main/origin/main을 수정하지 않았고 remote push도 수행하지 않았다. 중단 이전 및 이후 commit 사이의 Git 상태 변경은 위 표대로 공개하며 원래 Git 불변 조건을 충족했다고 주장하지 않는다.
