@@ -14,6 +14,11 @@ function New-Request([string]$Target = 'src/dependency.ts', [string]$Relation = 
   [pscustomobject]@{ action='REQUEST_WRITE_EXPANSION'; target=$Target; reason='required dependency'; evidence=[pscustomobject]@{ relation=$Relation; source_file='src/original.ts' } }
 }
 
+$protectedPolicy = New-Policy
+$protectedDecision = Invoke-TaskWriteExpansion (New-Request 'orchestration-common.ps1') $protectedPolicy
+Assert-Expansion 'common module expansion forbidden with protection evidence' ($protectedDecision.decision -eq 'DENY_FORBIDDEN' -and $protectedDecision.matchedPattern -eq 'orchestration-common.ps1')
+Assert-Expansion 'forbidden common module does not expand policy or consume budget' ($protectedDecision.expansionCount -eq 0 -and $protectedPolicy.write_scope.derived_approved.Count -eq 0)
+
 foreach ($relation in @('direct_import', 'interface_implementation', 'direct_symbol_dependency', 'feature_implementation_dependency')) {
   $policy = New-Policy
   $r = Invoke-TaskWriteExpansion (New-Request -Relation $relation) $policy
@@ -76,6 +81,7 @@ foreach($file in @($step.files)) {
   [IO.File]::WriteAllText($path, $file.text)
 }
 if($Attempt -gt 1 -and $config.expectExpansionPrompt -and $Attempt -eq 2 -and $Prompt -notmatch 'WRITE_EXPANSION_APPROVED:') { throw 'missing continuation prompt' }
+if($Attempt -gt 2 -and $config.expectExpansionPrompt -and ($Prompt -notmatch 'REQUEST_WRITE_EXPANSION' -or $Prompt -notmatch 'write_scope.derived_approved')) { throw 'retry lost expansion contract' }
 $snapshot=Get-Content -Raw -LiteralPath (Join-Path $StateRoot "tasks/$TaskId.json") | ConvertFrom-Json
 if($Attempt -eq 2 -and $config.expectExpansionPrompt -and $snapshot.filesystemPolicy.write_scope.derived_approved.Count -ne 1) { throw 'policy not saved before resume' }
 $state=[pscustomobject]@{runId=$OrchestrationRunId;taskId=$TaskId;task=$Task;attempt=$Attempt;status='completed';finalResponse=$step.response;error=$null;model=$Model}
@@ -110,6 +116,10 @@ $state | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $StateRo
   )
   $case=Invoke-Fixture 'resume' $steps @() $true
   Assert-Expansion 'real loop resumes to PASS without test retry' ($case.result.verification.decision -eq 'PASS' -and $case.result.attempt -eq 2 -and $case.result.testRetryCount -eq 0 -and $case.result.expansionCount -eq 1)
+  $commitIdentity = & git -C $case.result.worktree log -1 '--format=%an <%ae>|%cn <%ce>'
+  Assert-Expansion 'orchestrator preserves configured author and committer' ($commitIdentity -eq 'Expansion Test <expansion@example.invalid>|Expansion Test <expansion@example.invalid>')
+  $commitSubject = & git -C $case.result.worktree log -1 '--format=%s'
+  Assert-Expansion 'orchestrator uses permitted commit prefix' ($commitSubject.StartsWith('fix: '))
   Assert-Expansion 'same worktree preserves original edits' ((Get-Content -Raw -LiteralPath (Join-Path $case.result.worktree 'src/original.ts')) -eq 'preserved')
   Assert-Expansion 'literal derived filename passes orchestrator' (@($case.result.policy.entries | Where-Object classification -eq 'DERIVED_APPROVED').Count -eq 1)
   $taskState=Get-Content -Raw -LiteralPath (Join-Path $case.run 'tasks/TASK-001.json') | ConvertFrom-Json

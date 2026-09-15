@@ -998,7 +998,9 @@ try {
 $($task.prompt)
 
 이전 구현은 오케스트레이터의 결정론적 검증에 실패했습니다. 현재 worktree의 기존 변경을 유지하고 아래 실패만 수정하세요.
-허용된 파일 외에는 수정하지 마세요. 테스트를 직접 실행해 통과시킨 뒤 결과를 보고하세요.
+write_scope.expected 및 write_scope.derived_approved 밖의 파일은 직접 수정하지 마세요.
+추가 파일이 필요하면 수정 전에 REQUEST_WRITE_EXPANSION을 반환하세요. 승인되면 동일 worktree의 기존 변경을 유지하고 계속하세요.
+테스트를 직접 실행해 통과시킨 뒤 결과를 보고하세요.
 
 ATTEMPT: $($attempt + 1)
 CHANGED_FILES: $($changed -join ', ')
@@ -1062,7 +1064,7 @@ Continue the existing work in this same worktree. Preserve all existing changes;
       } else {
         & git -C $wt.path diff --cached --quiet
         if ($LASTEXITCODE -ne 0) {
-          & git -C $wt.path -c user.name='Gemini Worker' -c user.email='gemini-worker@local' commit -m "agent($($task.id)): $($task.name)"
+          & git -C $wt.path commit -m "fix: $($task.name)"
           if ($LASTEXITCODE -ne 0) { $decision = 'COMMIT_FAILED' }
         }
         if ($decision -eq 'PASS') { $commitHashes = @(& git -C $wt.path rev-list --reverse "$baseCommit..HEAD") }
