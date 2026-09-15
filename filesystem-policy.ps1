@@ -26,6 +26,7 @@ $script:DefaultSensitive = @(
 )
 
 $script:DefaultProtected = @(
+  'orchestration-common.ps1',
   'filesystem-policy.ps1',
   'toolchain.ps1',
   'bounded-process-runner.ps1',

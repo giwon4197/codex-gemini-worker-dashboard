@@ -16,6 +16,17 @@ function Assert-PolicyTest([string]$Name, [bool]$Condition, [string]$Detail = ''
 
 Write-Host 'Filesystem Policy v2.1 deterministic tests' -ForegroundColor Cyan
 
+foreach ($scope in @('orchestration-common.ps1', '**', '**/orchestration-common.ps1')) {
+  $rejected = $false
+  try { $null = Resolve-FilesystemPolicy ([pscustomobject]@{write_scope=[pscustomobject]@{expected=@($scope)}}) }
+  catch { $rejected = $true }
+  Assert-PolicyTest "common module expected scope rejected: $scope" $rejected
+}
+$rejected = $false
+try { $null = Resolve-FilesystemPolicy ([pscustomobject]@{write_scope=[pscustomobject]@{expected=@('src/a.ts');derived_approved=@('orchestration-common.ps1')}}) }
+catch { $rejected = $true }
+Assert-PolicyTest 'common module cannot be preapproved as derived' $rejected
+
 $literalCases = @(
   'gemini-dashboard/app/api/runs/[runId]/route.ts',
   'gemini-dashboard/app/api/posts/[slug]/route.ts',
