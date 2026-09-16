@@ -18,6 +18,10 @@ param(
   [int]$MockExitCode = 0
 )
 
+# Git emits UTF-8 paths even when a detached Windows shell inherits a legacy code page.
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+$OutputEncoding = [Console]::OutputEncoding
+
 $isMockRun = ($MockOutputLines -and $MockOutputLines.Count -gt 0) -or (-not [string]::IsNullOrWhiteSpace($MockOutputJson))
 $antigravity = Join-Path $env:LOCALAPPDATA 'agy\bin\agy.exe'
 if (-not $isMockRun -and -not (Test-Path -LiteralPath $antigravity)) {

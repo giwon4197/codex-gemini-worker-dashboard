@@ -16,6 +16,10 @@ param(
   [string]$SyncStateRoot = ''
 )
 
+# Git emits UTF-8 paths even when a detached Windows shell inherits a legacy code page.
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+$OutputEncoding = [Console]::OutputEncoding
+
 $commonModule = Join-Path $PSScriptRoot 'orchestration-common.ps1'
 if (-not (Test-Path -LiteralPath $commonModule -PathType Leaf)) { throw "Required orchestration module not found: $commonModule" }
 . $commonModule
@@ -49,7 +53,10 @@ function Stop-WorkerProcesses([string]$StatePath) {
   try {
     $state = Get-Content -Raw -LiteralPath $StatePath | ConvertFrom-Json
     foreach ($processId in @($state.agentProcessId, $state.runnerProcessId)) {
-      if (Test-ProcessAlive $processId) { Stop-Process -Id ([int]$processId) -Force -ErrorAction SilentlyContinue }
+      if (-not $processId -or [int]$processId -le 0) { continue }
+      # Terminate descendants before their parent can disappear and orphan them.
+      $workerProcess = Get-Process -Id ([int]$processId) -ErrorAction SilentlyContinue
+      if ($workerProcess) { Stop-ProcessTree -ProcessId ([int]$processId) -ProcessObject $workerProcess }
     }
   } catch {}
 }
@@ -672,7 +679,7 @@ function Repair-OrphanedRuns([string]$AgentRoot, [string]$RepositoryRoot) {
       foreach ($wt in @($manifest.worktrees)) {
         $path = [string]$wt.path
         if (-not $path -or -not (Test-Path -LiteralPath $path)) { continue }
-        $expectedRoot = [IO.Path]::GetFullPath((Join-Path $AgentRoot 'worktrees'))
+        $expectedRoot = [IO.Path]::GetFullPath((Join-Path $AgentRoot 'worktrees')).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
         $resolved = [IO.Path]::GetFullPath($path)
         if (-not $resolved.StartsWith($expectedRoot, [StringComparison]::OrdinalIgnoreCase)) { continue }
         if (& git -C $resolved status --porcelain) { $preserved += $resolved; continue }

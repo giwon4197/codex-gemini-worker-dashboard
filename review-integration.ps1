@@ -8,6 +8,10 @@ param(
   [switch]$SkipCodexReview
 )
 
+# Git emits UTF-8 paths even when a detached Windows shell inherits a legacy code page.
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+$OutputEncoding = [Console]::OutputEncoding
+
 $commonModule = Join-Path $PSScriptRoot 'orchestration-common.ps1'
 if (-not (Test-Path -LiteralPath $commonModule -PathType Leaf)) { throw "Required orchestration module not found: $commonModule" }
 . $commonModule
@@ -97,6 +101,14 @@ function Record-Diagnostic([string]$Category, [string]$Reason, [hashtable]$Detai
   Write-AtomicJson $manifestPath $m
 
   [Console]::Error.WriteLine("DELIVERY_ERROR: [$Category] $redactedReason")
+}
+
+function Clear-CurrentReviewFailure($Manifest) {
+  # A successful retry resolves the current error, while diagnostic artifacts
+  # and prior delivery-attempt records remain available as historical evidence.
+  foreach ($propertyName in @('errorCategory', 'failureReason', 'error', 'escalation')) {
+    $Manifest.PSObject.Properties.Remove($propertyName)
+  }
 }
 
 $settingsPath = Join-Path $repoRoot 'worker-settings.json'
@@ -348,7 +360,9 @@ if ($failedTasks.Count -gt 0) {
 }
 
 if ($manifest.integration -and $manifest.integration.tests) {
-  $failedIntegTests = @($manifest.integration.tests | Where-Object { $_.status -eq 'FAIL' })
+  $failedIntegTests = @($manifest.integration.tests | Where-Object {
+    $_.status -in @('FAIL', 'TIMED_OUT') -or ($null -ne $_.exitCode -and $_.exitCode -ne 0) -or $_.timedOut
+  })
   if ($failedIntegTests.Count -gt 0) {
     Record-Diagnostic 'integration_test_failed' "Integration test command failed: $($failedIntegTests[0].command) (exit code $($failedIntegTests[0].exitCode))" @{
       failedTests = $failedIntegTests
@@ -371,6 +385,7 @@ if (-not $shouldDeliver) {
     reviewedAt = (Get-Date).ToString('o')
     mainModified = $false
   })
+  Clear-CurrentReviewFailure $manifest
   Set-ObjectProperty $manifest 'updatedAt' (Get-Date).ToString('o')
   Write-AtomicJson $manifestPath $manifest
   Write-Output "Codex review: $reviewPath"
@@ -704,6 +719,7 @@ Set-ObjectProperty $manifest 'delivery' ([pscustomobject]@{
   mainVerifiedCommit = $candidateCommit
   deliveredAt = (Get-Date).ToString('o')
 })
+Clear-CurrentReviewFailure $manifest
 Set-ObjectProperty $manifest 'updatedAt' (Get-Date).ToString('o')
 Write-AtomicJson $manifestPath $manifest
 

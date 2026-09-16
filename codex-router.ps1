@@ -6,6 +6,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Git emits UTF-8 paths even when a detached Windows shell inherits a legacy code page.
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+$OutputEncoding = [Console]::OutputEncoding
 $root = $PSScriptRoot
 # Canonical planner output only. External legacy task files are normalized by
 # Resolve-FilesystemPolicy in the runtime loader without this planner schema.
@@ -83,5 +86,7 @@ $runRoot = Join-Path $repoRoot ".agent\runs\$runId"
 $manifest = Get-Content -Raw -LiteralPath (Join-Path $runRoot 'run.json') | ConvertFrom-Json
 if ($manifest.status -ne 'awaiting_review') { exit $(if ($runExit) { $runExit } else { 1 }) }
 
-& (Join-Path $root 'review-integration.ps1') -RunId $runId -Repository $repoRoot
-exit $LASTEXITCODE
+# Review is a separate user-requested stage; settings must not turn routing into delivery.
+Write-Output "Awaiting review: $runRoot"
+Write-Output 'Run review-integration explicitly after inspecting the integration diff and test summary.'
+exit 0
