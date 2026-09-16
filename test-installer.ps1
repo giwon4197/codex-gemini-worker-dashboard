@@ -11,6 +11,8 @@ try {
   [IO.File]::WriteAllText((Join-Path $source 'program.ps1'), '# program v1')
   Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'model-tiers.json') -Destination $source
   Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'orchestration-common.ps1') -Destination $source
+  Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'dashboard-launcher.cmd') -Destination $source
+  Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'dashboard-launcher.ps1') -Destination $source
   [IO.File]::WriteAllText((Join-Path $target 'gemini-dashboard/next.config.ts'), 'stale')
   $stateFiles = @('worker-settings.json', '.agent/runs/user.json', 'gemini-dashboard/public/data/dashboard.json', 'local-notes.txt', '.env.local')
   foreach ($file in $stateFiles) {
@@ -21,6 +23,8 @@ try {
   [IO.File]::WriteAllText((Join-Path $source 'worker-settings.json'), 'source-state-must-not-overwrite')
   Sync-InstalledProgramFiles $source $target
   Assert-Test 'program copied' ((Get-Content -Raw -LiteralPath (Join-Path $target 'program.ps1')) -eq '# program v1')
+  Assert-Test 'dashboard-launcher.cmd copied' (Test-Path -LiteralPath (Join-Path $target 'dashboard-launcher.cmd'))
+  Assert-Test 'dashboard-launcher.ps1 copied' (Test-Path -LiteralPath (Join-Path $target 'dashboard-launcher.ps1'))
   Assert-Test 'pre-manifest retired next.config removed' (-not (Test-Path -LiteralPath (Join-Path $target 'gemini-dashboard/next.config.ts')))
   foreach ($file in $stateFiles) {
     Assert-Test "preserves $file" ((Get-Content -Raw -LiteralPath (Join-Path $target $file)) -eq 'user-state')

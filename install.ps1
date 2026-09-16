@@ -7,6 +7,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+$OutputEncoding = [Console]::OutputEncoding
 $InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
 $repoZip = 'https://github.com/giwon4197/codex-gemini-worker-dashboard/archive/refs/heads/main.zip'
 $agyInstaller = 'https://antigravity.google/cli/install.ps1'
@@ -17,12 +19,20 @@ function Require-Windows {
     if ($env:OS -ne 'Windows_NT') { throw '이 설치기는 Windows PowerShell 전용입니다.' }
 }
 
+function Assert-NodeVersion {
+    $reportedVersion = & node.exe --version
+    $parsedVersion = $null
+    if (-not [version]::TryParse(([string]$reportedVersion).Trim().TrimStart('v'), [ref]$parsedVersion) -or $parsedVersion -lt [version]'22.13.0') {
+        throw 'Node.js 22.13.0 이상이 필요합니다. Node.js를 업데이트한 뒤 다시 실행하세요.'
+    }
+}
 function Ensure-Node {
-    if ((Get-Command node.exe -ErrorAction SilentlyContinue) -and (Get-Command npm.cmd -ErrorAction SilentlyContinue)) { return }
+    if ((Get-Command node.exe -ErrorAction SilentlyContinue) -and (Get-Command npm.cmd -ErrorAction SilentlyContinue)) { Assert-NodeVersion; return }
     $standardNodeDir = 'C:\Program Files\nodejs'
     if ((Test-Path -LiteralPath (Join-Path $standardNodeDir 'node.exe')) -and
         (Test-Path -LiteralPath (Join-Path $standardNodeDir 'npm.cmd'))) {
         $env:Path = "$standardNodeDir;$env:Path"
+        Assert-NodeVersion
         return
     }
     $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
@@ -32,6 +42,7 @@ function Ensure-Node {
     if ((Test-Path -LiteralPath (Join-Path $standardNodeDir 'node.exe')) -and
         (Test-Path -LiteralPath (Join-Path $standardNodeDir 'npm.cmd'))) {
         $env:Path = "$standardNodeDir;$env:Path"
+        Assert-NodeVersion
         return
     }
     throw 'Node.js 설치에 실패했습니다.'
@@ -121,7 +132,7 @@ try {
     Initialize-RuntimeFile (Join-Path $InstallRoot 'worker-settings.example.json') (Join-Path $InstallRoot 'worker-settings.json')
 
     Write-Host '대시보드 의존성을 설치합니다...' -ForegroundColor Cyan
-    Push-Location (Join-Path $InstallRoot 'gemini-dashboard')
+    Push-Location -LiteralPath (Join-Path $InstallRoot 'gemini-dashboard')
     try { & npm.cmd ci } finally { Pop-Location }
     if ($LASTEXITCODE -ne 0) { throw 'npm 의존성 설치에 실패했습니다.' }
 
@@ -146,7 +157,7 @@ if ($Model) { $argsMap.Model = $Model }
 & (Join-Path $root 'run-gemini-worker.ps1') @argsMap
 exit $LASTEXITCODE
 '@.Replace('__INSTALL_ROOT__', $escapedRoot)
-    Set-Content -LiteralPath (Join-Path $launcherDir 'gemini-worker.ps1') -Value $workerLauncher -Encoding utf8
+    [IO.File]::WriteAllText((Join-Path $launcherDir 'gemini-worker.ps1'), $workerLauncher, [Text.UTF8Encoding]::new($true))
 
     $parallelLauncher = @'
 [CmdletBinding()]
@@ -165,7 +176,7 @@ $sharedDashboardPath = Join-Path $sharedDataDir 'dashboard.json'
 & (Join-Path $root 'run-parallel-workers.ps1') -TasksFile $TasksFile -Repository $repo -MaxWorkers $MaxWorkers -WorkerTimeoutSeconds $WorkerTimeoutSeconds -Timeout $Timeout -CleanupWorktrees:$CleanupWorktrees -DashboardPath $sharedDashboardPath -DataDir $sharedDataDir
 exit $LASTEXITCODE
 '@.Replace('__INSTALL_ROOT__', $escapedRoot)
-    Set-Content -LiteralPath (Join-Path $launcherDir 'parallel-gemini-workers.ps1') -Value $parallelLauncher -Encoding utf8
+    [IO.File]::WriteAllText((Join-Path $launcherDir 'parallel-gemini-workers.ps1'), $parallelLauncher, [Text.UTF8Encoding]::new($true))
 
     $stopParallelLauncher = @'
 [CmdletBinding()]
@@ -178,7 +189,7 @@ $repo = if ([string]::IsNullOrWhiteSpace($Repository)) { (Get-Location).Path } e
 & (Join-Path $root 'stop-parallel-run.ps1') -RunId $RunId -Repository $repo
 exit $LASTEXITCODE
 '@.Replace('__INSTALL_ROOT__', $escapedRoot)
-    Set-Content -LiteralPath (Join-Path $launcherDir 'stop-parallel-run.ps1') -Value $stopParallelLauncher -Encoding utf8
+    [IO.File]::WriteAllText((Join-Path $launcherDir 'stop-parallel-run.ps1'), $stopParallelLauncher, [Text.UTF8Encoding]::new($true))
 
     $codexRouterLauncher = @'
 [CmdletBinding()]
@@ -192,7 +203,7 @@ $repo = if ([string]::IsNullOrWhiteSpace($Repository)) { (Get-Location).Path } e
 & (Join-Path $root 'codex-router.ps1') -Request $Request -Repository $repo -PlanOnly:$PlanOnly
 exit $LASTEXITCODE
 '@.Replace('__INSTALL_ROOT__', $escapedRoot)
-    Set-Content -LiteralPath (Join-Path $launcherDir 'codex-route.ps1') -Value $codexRouterLauncher -Encoding utf8
+    [IO.File]::WriteAllText((Join-Path $launcherDir 'codex-route.ps1'), $codexRouterLauncher, [Text.UTF8Encoding]::new($true))
 
     $reviewIntegrationLauncher = @'
 [CmdletBinding()]
@@ -205,12 +216,16 @@ $repo = if ([string]::IsNullOrWhiteSpace($Repository)) { (Get-Location).Path } e
 & (Join-Path $root 'review-integration.ps1') -RunId $RunId -Repository $repo
 exit $LASTEXITCODE
 '@.Replace('__INSTALL_ROOT__', $escapedRoot)
-    Set-Content -LiteralPath (Join-Path $launcherDir 'review-integration.ps1') -Value $reviewIntegrationLauncher -Encoding utf8
+    [IO.File]::WriteAllText((Join-Path $launcherDir 'review-integration.ps1'), $reviewIntegrationLauncher, [Text.UTF8Encoding]::new($true))
 
-    # Copy dashboard-launcher.cmd to launcher directory
-    $installedLauncher = Join-Path $InstallRoot 'dashboard-launcher.cmd'
-    if (Test-Path -LiteralPath $installedLauncher) {
-        Copy-Item -LiteralPath $installedLauncher -Destination (Join-Path $launcherDir 'dashboard-launcher.cmd') -Force
+    # Copy dashboard-launcher.cmd and dashboard-launcher.ps1 to launcher directory
+    $installedLauncherCmd = Join-Path $InstallRoot 'dashboard-launcher.cmd'
+    if (Test-Path -LiteralPath $installedLauncherCmd) {
+        Copy-Item -LiteralPath $installedLauncherCmd -Destination (Join-Path $launcherDir 'dashboard-launcher.cmd') -Force
+    }
+    $installedLauncherPs1 = Join-Path $InstallRoot 'dashboard-launcher.ps1'
+    if (Test-Path -LiteralPath $installedLauncherPs1) {
+        Copy-Item -LiteralPath $installedLauncherPs1 -Destination (Join-Path $launcherDir 'dashboard-launcher.ps1') -Force
     }
 
     $dashboardLauncherPs = @'
@@ -220,10 +235,10 @@ param(
   [string[]]$RemainingArgs
 )
 $env:CODEX_GEMINI_INSTALL_ROOT = '__INSTALL_ROOT__'
-& (Join-Path $PSScriptRoot 'dashboard-launcher.cmd') @RemainingArgs
+& '__PWSH_PATH_PS__' -NoProfile -File (Join-Path $PSScriptRoot 'dashboard-launcher.ps1') @RemainingArgs
 exit $LASTEXITCODE
-'@.Replace('__INSTALL_ROOT__', $escapedRoot)
-    Set-Content -LiteralPath (Join-Path $launcherDir 'worker-dashboard.ps1') -Value $dashboardLauncherPs -Encoding utf8
+'@.Replace('__INSTALL_ROOT__', $escapedRoot).Replace('__PWSH_PATH_PS__', $pwshPath.Replace("'", "''"))
+    [IO.File]::WriteAllText((Join-Path $launcherDir 'worker-dashboard.ps1'), $dashboardLauncherPs, [Text.UTF8Encoding]::new($true))
     $escapedPwsh = $pwshPath.Replace('%', '%%')
     $workerCmd = @'
 @echo off
@@ -231,9 +246,8 @@ exit $LASTEXITCODE
 '@.Replace('__PWSH_PATH__', $escapedPwsh)
     $dashboardCmd = @'
 @echo off
-set "CODEX_GEMINI_INSTALL_ROOT=__INSTALL_ROOT_CMD__"
-"%~dp0dashboard-launcher.cmd" %*
-'@.Replace('__INSTALL_ROOT_CMD__', $InstallRoot.Replace('%', '%%'))
+"__PWSH_PATH__" -NoProfile -File "%~dp0worker-dashboard.ps1" %*
+'@.Replace('__PWSH_PATH__', $escapedPwsh)
     $parallelCmd = @'
 @echo off
 "__PWSH_PATH__" -NoProfile -File "%~dp0parallel-gemini-workers.ps1" %*

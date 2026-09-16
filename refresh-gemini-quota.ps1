@@ -2,7 +2,8 @@
 param(
     [string]$DashboardDir = (Join-Path $PSScriptRoot 'gemini-dashboard'),
     [ValidateRange(15, 3600)][int]$IntervalSeconds = 60,
-    [switch]$Once
+    [switch]$Once,
+    [int]$ParentProcessId = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -20,6 +21,7 @@ $agyPath = if ($env:AGY_BIN -and (Test-Path -LiteralPath $env:AGY_BIN)) {
 New-Item -ItemType Directory -Path $quotaDir -Force | Out-Null
 
 do {
+    if ($ParentProcessId -gt 0 -and -not (Get-Process -Id $ParentProcessId -ErrorAction SilentlyContinue)) { break }
     $now = [DateTimeOffset]::UtcNow
     $response = [ordered]@{
         ok = $false
@@ -88,5 +90,10 @@ do {
     $tempPath = "$quotaPath.tmp"
     $response | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $tempPath -Encoding utf8
     Move-Item -LiteralPath $tempPath -Destination $quotaPath -Force
-    if (-not $Once) { Start-Sleep -Seconds $IntervalSeconds }
+    if (-not $Once) {
+        for ($second = 0; $second -lt $IntervalSeconds; $second++) {
+            if ($ParentProcessId -gt 0 -and -not (Get-Process -Id $ParentProcessId -ErrorAction SilentlyContinue)) { return }
+            Start-Sleep -Seconds 1
+        }
+    }
 } while (-not $Once)

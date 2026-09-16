@@ -2,7 +2,8 @@
 param(
     [string]$DashboardDir = (Join-Path $PSScriptRoot 'gemini-dashboard'),
     [ValidateRange(5, 3600)][int]$IntervalSeconds = 15,
-    [switch]$Once
+    [switch]$Once,
+    [int]$ParentProcessId = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -55,6 +56,7 @@ function Get-LiveRateLimits {
 }
 
 do {
+    if ($ParentProcessId -gt 0 -and -not (Get-Process -Id $ParentProcessId -ErrorAction SilentlyContinue)) { break }
     try {
         $limits = Get-LiveRateLimits
         $primary = $limits.primary
@@ -79,5 +81,10 @@ do {
     } catch {
         # Keep the last known-good snapshot; never publish raw account errors.
     }
-    if (-not $Once) { Start-Sleep -Seconds $IntervalSeconds }
+    if (-not $Once) {
+        for ($second = 0; $second -lt $IntervalSeconds; $second++) {
+            if ($ParentProcessId -gt 0 -and -not (Get-Process -Id $ParentProcessId -ErrorAction SilentlyContinue)) { return }
+            Start-Sleep -Seconds 1
+        }
+    }
 } while (-not $Once)
