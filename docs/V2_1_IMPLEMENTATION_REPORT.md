@@ -330,3 +330,142 @@ Execution Profile, recommended_profile, Runtime Profile Escalation, Verification
 실제 Gemini/Codex online model end-to-end validation은 수행하지 않았다. 결정론적 fixture의 성공을 online validation PASS로 기록하지 않는다. 최초 baseline 조사에서 로컬 사용량 및 agy /quota 상태 조회는 있었으나 모델 추론 검증이 아니다.
 
 재개 후 main/origin/main을 수정하지 않았고 remote push도 수행하지 않았다. 중단 이전 및 이후 commit 사이의 Git 상태 변경은 위 표대로 공개하며 원래 Git 불변 조건을 충족했다고 주장하지 않는다.
+
+## v2.1 Final Release Gate
+
+최종 기록일: 2026-09-16. 대상: `hjw-v2.1-final-hardening`, 시작 main/origin/main `a3b659e1f5e461478a4f62b459a5e24266f4add0`. 위 ver2/ver3는 당시의 검증 이력이다. 특히 ver3의 “온라인 미수행”은 당시 사실이며, 아래 실제 온라인 호출 결과와 구분한다.
+
+**판정: v2.1 release-ready — 아래 명시된 Windows 환경과 소규모 온라인 smoke 범위에서 필수 gate 모두 PASS.** 모든 사용 환경에서 오류가 없거나 장기 작업 성공률이 보장된다는 의미는 아니다. main merge/push는 수행하지 않았다. 사용자 전역 설치본은 업데이트하지 않았으며, 현재 checkout을 source로 만든 격리 설치본을 검증했다.
+
+### 수정한 문제와 변경 계약
+
+| 영역 | 원인 / 수정 / 검증 |
+|---|---|
+| Windows launcher | 기존 hybrid CMD의 LF bytes를 실제 cmd.exe로 실행하면 `F8)`, `dDir`, `CODE -eq 0` 오해석을 재현했다. 안전한 code sentinel 호출도 확인했다(실제 VS Code 실행 없음). 같은 시점 CRLF 소스/설치본은 exit 0으로, 모든 bytes가 항상 실패하는 문제는 아니다. thin ASCII CMD → 독립 PS1으로 분리하고 LF/CRLF 모두 검증했다. |
+| 설치 진입점 | named argument 전달 손실 및 한글 경로 손상을 수정했다. PS wrapper는 절대 pwsh 경로와 -File을 사용하며, 생성 PS1은 UTF-8 BOM으로 Windows PowerShell 5.1에서도 한글 InstallRoot를 보존한다. 현재 SourcePath + 임시 InstallRoot + NoRegister/NoStart로 검증했다. |
+| 경로/프로세스 | 공백·한글·[] 경로는 LiteralPath 및 literal cwd로 처리한다. 로그를 port별 분리하고 --strictPort를 사용한다. 서버 준비 후 quota updater를 시작하고 서버 수명과 연결한다. 잘못된 Select-Object -Reverse 종료 fallback을 수정했다. |
+| Orchestration | CP949 shell의 Git 한글 경로 손상을 UTF-8로 수정했다. worker의 자식·손자 프로세스를 함께 종료하며 orphan worktree 경계는 separator까지 비교한다. router는 awaiting_review에서 정지하고 리뷰를 자동 실행하지 않는다. |
+| Review | FAIL 외 TIMED_OUT/timedOut/nonzero exit도 integration gate에서 거절한다. 리뷰 재시도 성공 시 현재 오류 필드를 지우되 진단 artifact와 과거 delivery 기록은 보존한다. 실제 Case 1의 cached online PASS 재사용으로 현재 상태 정리도 검증했다. |
+| 보호 및 retry | orchestration-common.ps1의 expected/derived/broad pattern 및 expansion 우회를 차단한다. TEST_FAILED retry는 범위 밖 직접 수정 대신 REQUEST_WRITE_EXPANSION과 같은 worktree 재개 계약을 안내한다. 기존 Git identity 강제를 제거했다. |
+| 새 파일 / 삭제 | 새 파일: dashboard-launcher.ps1, test-native-runtime.ps1, test-launcher-lifecycle.ps1, docs/V2_1_FINAL_HARDENING_HANDOFF.md. 삭제 파일 없음. CMD 안의 PS 본문은 새 PS1으로 이동했다. |
+| 보존 범위 | dashboard UI, dependency version/lockfile, model tier, v2.2/v2.3 로드맵 변경 없음. 기존 test discovery/API 공용 구현은 유지한다. |
+
+기존 hardening 위임 `20260915-132758-3cf74bfc`는 실제 계획/Gemini 호출 후 TIMED_OUT/requiresCodex였다. 그 후보를 리뷰·수정한 것이며 위임 자체를 성공으로 바꾸지 않는다. 런처 테스트의 설치 실패 후 전역 worker-dashboard로 fallback하던 false-pass도 제거하고 isolated bin의 실제 명령 경로를 검증한다.
+
+### 최종 regression
+
+로그 루트 `R=.agent/background/hardening-release/`, `D=.agent/background/hardening-direct/`. 각 suite는 실제 실행했다. 아래 baseline은 최초 v2.1 요청의 수치이며 기존 assertion은 줄지 않았다.
+
+| 영역 | Command | Baseline → 최종 pass/total | Result | Exit | Evidence |
+|---|---|---:|---|---:|---|
+| Filesystem | pwsh -NoProfile -File test-filesystem-policy.ps1 | 47 → 56/56 | PASS | 0 | R/filesystem-policy.log |
+| Toolchain | pwsh -NoProfile -File test-toolchain.ps1 | 9 → 23/23 | PASS | 0 | R/toolchain.log |
+| Bounded process | pwsh -NoProfile -File test-bounded-process-runner.ps1 | 38 → 38/38 | PASS | 0 | R/bounded-process-runner.log |
+| Dependency | pwsh -NoProfile -File test-dependency-bootstrap.ps1 | 50 → 50/50 | PASS | 0 | R/dependency-bootstrap.log |
+| Dashboard launcher | pwsh -NoProfile -File test-dashboard-launcher.ps1 | 48 → 85/85 | PASS | 0 | D/launcher-release.log |
+| Parallel usage | pwsh -NoProfile -File test-parallel-usage.ps1 | 95 → 95/95 | PASS | 0 | R/parallel-usage.log |
+| Write expansion | pwsh -NoProfile -File test-write-expansion.ps1 | 35 → 39/39 | PASS | 0 | R/write-expansion.log |
+| Installer | pwsh -NoProfile -File test-installer.ps1 | 15/15 | PASS | 0 | R/installer.log |
+| Native runtime | pwsh -NoProfile -File test-native-runtime.ps1 | 신규 39/39 | PASS | 0 | R/native-runtime.log |
+| Launcher lifecycle | pwsh -NoProfile -File test-launcher-lifecycle.ps1 | 신규 12/12 | PASS | 0 | R/launcher-lifecycle.log |
+| Dashboard test | npm --prefix gemini-dashboard run test | 17 files; 235/235; 88 suites | PASS | 0 | D/npm-test.log; skip/todo/cancelled 0 |
+| Lint | npm --prefix gemini-dashboard run lint | 해당 없음 | PASS | 0 | D/npm-lint.log |
+| Build | npm --prefix gemini-dashboard run build | 해당 없음 | PASS | 0 | D/npm-build-resume.log |
+| API parity | node test-dashboard-api.mjs (curl.exe) | dev/start 각 9 응답 | PASS | 0 | D/api-parity-final.log |
+| PowerShell parser | Parser::ParseFile, git tracked + untracked nonignored *.ps1 | 27 files / errors 0 | PASS | 0 | R/parser.json; node_modules/fixture 제외 |
+| Whitespace | git diff --check; git diff --cached --check | errors 0 | PASS | 0 | 최종 코드 및 문서 확인 |
+
+PowerShell 필수 8 suite는 401/401, 추가 2 suite 포함 452/452이다. build 최초 시도는 dist 삭제 EPERM으로 실패했고 이후 재실행은 exit 0이었다. 원래 실패 로그도 보존했다. 검증 binary는 Node v24.15.0이며 Node 22 binary에서 별도 전체 회귀 실행은 하지 않았다. 지원 최소 버전 22.13.0 및 strip-types 계약은 유지한다.
+
+발견된 테스트 전체 목록(기존 15개와 신규 2개, 수동 제외 없음):
+
+```text
+app/api/codex-usage/route.test.ts
+app/api/gemini-quota/route.test.ts
+app/api/projects/[projectId]/workers/route.test.ts
+app/api/runs/route.test.ts
+lib/codex-conversation.test.ts
+lib/codex-usage.test.ts
+lib/daily-token-stats.test.ts
+lib/gemini-quota.test.ts
+lib/model-tiers.test.ts
+lib/process-liveness.test.ts
+lib/project-event-graph.test.ts
+lib/run-tracking.test.ts
+lib/worker-settings.test.ts
+lib/workspace-contract.test.ts
+lib/workspace-node-bridge.test.ts
+lib/workspace-sanitize.test.ts
+lib/workspace-store.test.ts
+Discovered test file count = 17
+node:test 235 PASS, 0 FAIL, 0 skipped, 0 todo; exit 0
+```
+
+### 실제 런처 및 API 프로세스 증거
+
+| 경로 | PID / port | 준비 / 정리 |
+|---|---|---|
+| Source CMD launcher | server 18100 / 62182; updater 12476,14916 | HTTP 200, exit 0, process tree 종료·port 해제 |
+| 임시 설치 worker-dashboard | server 21296 / 62223; updater 22052,10072 | HTTP 200, exit 0, process tree 종료·port 해제 |
+| vinext dev | 17256 / 54757 | HTTP 200, 종료·port 해제 |
+| npm start + 내부 Wrangler | 21712 / 55811; Wrangler 20380 / 55813 | HTTP 200, 종료·port 해제 |
+
+실제 Windows cmd.exe와 Windows PowerShell 5.1에서 설치 명령 해석·named option·실패 exit 보존을 검증했다. source/installed 실사용 준비 검증은 -NoBrowser 사용, VS Code 신규 실행 없음. ParentProcessId가 이미 사라진 updater는 CLI 호출·snapshot 쓰기 없이 종료함도 별도 검증했다.
+
+API는 GET/POST/PUT settings, 저장 후 GET, invalid tier 400, malformed body 500, GET codex-usage 및 refresh=true, GET gemini-quota를 비교했다. status, JSON shape/핵심 값, error 계약, usage/quota의 `no-store, no-cache, must-revalidate`가 dev/start에서 동일하다. timestamp exact equality는 요구하지 않았다. API 데이터 fixture 검증과 아래 실제 모델 E2E는 별개이다.
+
+### 실제 온라인 E2E (mock 대체 없음)
+
+증거 루트 `E=D/e2e/20260915-233509-a3e5d0/`. disposable Git repository에는 remote가 없으며 각 main SHA 불변, push/delivery 없음. 기존 보호 test는 수정하지 않았다. 실제 Codex planner와 Gemini worker를 호출하고, 사용자 승인 범위에서 별도 실제 Codex review를 AutoDeliver false로 실행했다.
+
+| Case | Run / canonical plan | Integration / final state | 실제 결과 및 elapsed |
+|---|---|---|---|
+| 1. 정상 소규모 수정 | 20260915-233603-cfdddb13; E/case1-한글/.agent/plans/20260915-233513-719487c1.json | integration/20260915-233603-cfdddb13; awaiting_review → 명시적 review 후 awaiting_human_approval | planner exit 0, 47.1s; Gemini exit 0, 166.8s; src/add.mjs만 변경; attempt 1/expansion 0; 보호 test 3/3; 실제 review 재시도 exit 0, 55.2s, PASS/0 findings |
+| 2. Dynamic Write Expansion | 성공 run 20260916-140951-55ee1993; 원본 E/case2-한글/.agent/plans/20260915-233850-3785d762.json; 실행 E/case2-timeout-only-plan-20260916-140946.json | integration/20260916-140951-55ee1993; awaiting_review → 명시적 review 후 awaiting_human_approval | planner exit 0, 65.6s; Gemini 재시도 exit 0, 105.7s; 보호 test 3/3; 실제 review exit 0, 50.3s, PASS/0 findings |
+
+Case 1 candidate `3d27ca1abd30d452480118f631d0ee56f6617b55`, Case 2 candidate `7d969174fcdfd0fa5f7388654eb01dbf22abf156`. 각각 candidate에 bound된 실제 review JSON을 확인했다. Case 1 최종 상태 정리 후 current error 필드 없음, 기존 실제 review 내용 불변, mainModified=false도 `D/e2e/case1-current-state-check.json`에 기록했다.
+
+Case 2 실제 첫 응답은 REQUEST_WRITE_EXPANSION, target `src/b.mjs`, evidence.relation `direct_import`, evidence.source_file `src/a.mjs`였다. local policy ALLOW_DERIVED → expansionCount 1/3 → derived_approved에 b 추가 → 같은 worktree attempt 2에서 a의 이전 수정 보존 및 b 수정 → 최종 a=EXPECTED, b=DERIVED_APPROVED. testRetryCount=0으로 expansion이 test retry budget을 소비하지 않았다. 초기 expected/allowed/merge는 a만 포함하며 b를 미리 승인하지 않았다.
+
+실패 이력을 숨기지 않는다. Case 1 최초 부가 guard는 core.autocrlf의 LF/CRLF byte 차이를 test 변경으로 오판했다. Git base/candidate test blob `8f1bfdc55eaceda309a728e9fcb40e09931b56a4`가 동일함을 확인하고 guard를 Git blob 비교로 수정했다. test/assertion은 그대로다. 최초 실제 Codex review는 사용량 제한으로 실패했고, 9월 16일 실제 호출 재시도로 PASS했다. Case 2 최초 run `20260915-233956-629254dc`는 180초 Gemini timeout, expansion/integration 미완료였다. 승인된 1회 재시도에서 task timeout만 180→300으로 늘렸고 scope/model/prompt/tests는 변경하지 않았다. 원본/실행 plan SHA256은 result JSON에 보존한다. 이 PASS는 첫 시도 성공 또는 timeout이 더는 없다는 보장이 아니다.
+
+상세 최종 증거: `E/case1-resume-result-20260916-140645.json`, `E/case2-resume-result-20260916-140946.json`. `E/summary.json`의 초기 실패를 덮어쓰지 않았다. 각 fixture baseline test의 exit 1은 모델 수정 전 의도된 failing fixture이며 최종 test는 둘 다 3/3 PASS다.
+
+### 필수 Gate
+
+| Gate | Result | Evidence |
+|---|---|---|
+| read/write/merge scope | PASS | filesystem-policy 56/56, online 최종 scope |
+| Dynamic Write Expansion | PASS | write-expansion 39/39, 실제 Case 2 |
+| Sensitive/Forbidden | PASS | REQUIRE_REVIEW / DENY_FORBIDDEN 회귀 |
+| expansion ≤ 3 | PASS | 4번째 승인 거절 및 실제 loop 제한 회귀 |
+| invocation ≤ 7 | PASS | write-expansion의 invocation 상한 회귀 |
+| retry/escalation | PASS | parallel-usage 95/95, write-expansion 39/39 |
+| deterministic diff verification | PASS | 최종 diff 분류, 보호 tests 불변 |
+| integration/review gate | PASS | native-runtime 39/39, 실제 candidate-bound review 2건, 자동 main merge 없음 |
+| orchestration self-protection | PASS | common module 직접/derived/broad/expansion 거절 |
+| worker-dashboard real launcher | PASS | Windows cmd/PS 및 source/installed readiness, 85/85 |
+| Gemini online E2E | PASS (Case 2 재시도 후) | 20260915-233603-cfdddb13 / 20260916-140951-55ee1993 |
+| Codex online planning/review path | PASS (Case 1 review 재시도 후) | 두 canonical plan 및 두 실제 review PASS |
+| docs implementation/design boundary | PASS | 이 절 및 V2_1_FILESYSTEM_POLICY.md |
+
+### 현재 보장과 남은 한계
+
+현재 v2.1은 repository read/search와 read_scope.deny 정책 전달, expected/derived 쓰기, sensitive/forbidden 분류, expansion ≤3/invocation ≤7, retry 예산 분리, merge scope, deterministic final diff와 integration/review 재검증, protected orchestrator, worker main 직접 변경/remote push 금지 정책을 제공한다. 이는 orchestration/prompt/policy 및 Git 검증이며 OS 권한 차단과 다르다.
+
+| Known limitation / future work | 현재 경계 |
+|---|---|
+| OS-level read sandbox | ACL/AppContainer/container 수준 kernel read isolation 없음 |
+| AST dependency truth proof | 구조화된 relation/source_file 검증, 실제 AST/import graph 진위 증명 없음 |
+| Sensitive 승인 API/UI | REQUIRE_REVIEW에서 정지, 승인·자동 재개 UI/API 미구현 |
+| Expansion history UI | state/artifact는 존재, 전용 visualization 없음 |
+| 장기 workload | 이번 2건은 release smoke이며 통계적 reliability 증명 아님; 모델 quota/timeout 가능 |
+| 환경/배포 | Node 22 binary 별도 전체 실행 미검증; 기존 npm audit 11건(1 low/2 moderate/8 high) dependency 변경 없이 유지; Cloudflare production deployment 보장 없음 |
+
+위 future 기능은 이번에 구현하지 않았다. Execution Profile/recommended_profile, DAG scheduler, affected-test/incremental/cache layer, executions/spans telemetry, learned router/profile prediction/budget learning, approval/expansion dashboard UI/API 모두 추가하지 않았다. 원래 로드맵도 변경하지 않았다.
+
+### Git 및 설치 전달 상태
+
+코드 commit: `f00f622` 보호 정책, `9ca777d` retry/identity, `cd9e74d` orchestration/review/lifecycle, `75592dc` Windows launcher/installer. 최종 문서 commit은 이 절을 포함하는 `docs: record v2.1 final release verification`이다. 모든 hardening commit은 기존 `hjwn <eric5519@naver.com>` identity를 사용하며 AI Author/Committer/trailer를 추가하지 않았다. main/origin/main은 시작 SHA 그대로이며 로컬 hardening branch에만 commit했다.
+
+사용자 기존 전역 설치는 검증 도중 교체하지 않았다. 이 branch를 실제 전역 worker-dashboard에 적용하려면 현재 checkout에서 `pwsh -NoProfile -File .\install.ps1 -SourcePath . -NoStart`를 별도로 실행해야 한다. 이번 검증은 main.zip을 사용하지 않았다. 승인 후 merge 가능한 상태이며, merge/push/전역 설치 적용 자체는 이번 최종 검증의 수행 결과가 아니다.

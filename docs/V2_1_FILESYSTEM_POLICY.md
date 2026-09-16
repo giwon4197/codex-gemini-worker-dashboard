@@ -4,11 +4,40 @@
 
 > 이 문서는 [V2_ARCHITECTURE.md](V2_ARCHITECTURE.md)의 전체 구조를 교체하지 않는다. Gemini Worker의 파일 접근 정책 때문에 발생하는 불필요한 중단, 전체 재호출, 토큰 낭비를 줄이기 위한 v2 정책 보완판이다.
 
+## 현재 구현 계약과 설계 목표의 구분 — 2026-09-15
+
+이 문서의 기존 1–19절은 구현 방향과 설계 목표도 포함한다. 아래 표는 현재 v2.1 코드가 제공하는 계약이며, 이후 절의 더 강한 보안·자동화 목표가 모두 구현됐다는 뜻은 아니다. 실행 검증 결과와 릴리스 판정은 [구현 보고서의 Final Release Gate](V2_1_IMPLEMENTATION_REPORT.md#v21-final-release-gate)를 따른다.
+
+| 현재 v2.1 계약 | 구현 범위와 근거 |
+|---|---|
+| Repository read/search 및 `read_scope.deny` | worker에 task worktree 내부의 project-wide 탐색을 허용하고 정규화한 read deny 정책을 전달한다. `Resolve-FilesystemPolicy`와 worker prompt의 정책 계약이며 OS 읽기 격리는 아니다. |
+| `write_scope.expected` / `derived_approved` | 승인 범위와 실제 최종 diff를 비교한다. legacy `allowed_files`는 초기 expected 범위로 정규화한다. 물리적 파일 쓰기를 모두 사전에 가로채는 기능은 아니다. |
+| Dynamic Write Expansion | 수정 전에 `REQUEST_WRITE_EXPANSION`을 반환한다. 허용된 relation, 승인 범위 안의 `evidence.source_file`, target 경로·소유권·금지 범위를 검사하고 `ALLOW_DERIVED`이면 저장한 정책으로 같은 worktree를 재실행한다. 기존 변경을 유지하지만 같은 모델 세션 유지까지 보장하지 않는다. |
+| Sensitive / Forbidden | sensitive 확장 요청은 `REQUIRE_REVIEW`에서 중단하며, forbidden은 `DENY_FORBIDDEN`으로 거절한다. 명시적 초기 expected/merge 계약과 sensitive 자동 확장 승인은 구분한다. |
+| 실행 상한 및 retry/escalation | task당 expansion 승인은 최대 3회, invocation attempt는 최대 7이다. expansion과 `TEST_FAILED` retry 횟수를 분리하고 기존 High 승급·Codex 인계 의미를 유지한다. |
+| `merge_scope` 및 deterministic final diff verification | expected/승인된 derived라도 merge scope 밖이면 통과하지 못한다. merge deny는 확장으로 우회할 수 없고, 승인 전의 범위 밖 수정을 소급 승인하지 않는다. |
+| Integration/review revalidation | worker 후보와 integration/review 단계에서 저장된 task 정책으로 diff를 다시 검증한다. 일반 worker 실행 성공은 main 반영 승인이 아니다. |
+| Orchestrator 자체 보호 | `filesystem-policy.ps1`의 보호 목록에 `orchestration-common.ps1`을 포함한다. expected·derived 사전 지정과 broad pattern 우회, expansion target으로 자동 수정할 수 없도록 검사한다. |
+| Worker의 main 직접 변경 / remote push 금지 | task 계약과 격리 worktree 실행, diff·Git 검증으로 금지 정책을 적용한다. 이 정책은 worker 프로세스가 가진 모든 OS/Git 권한을 제거했다는 보장이 아니다. 이 안정화 작업은 main merge와 remote push를 수행하지 않는다. |
+| Secret redaction | 공용 redactor가 알려진 token, header, URL credential, query secret, private key 패턴을 로그·diagnostic 출력에서 가린다. 임의 secret의 완전한 탐지나 모든 파일 열람 차단을 보장하지 않는다. |
+
+다음은 **미구현 / known limitation이며 별도 hardening 또는 future work**다. 현재 v2.1의 위 계약을 위반하는 버그와 구분하며, 이를 구현해야만 v2.1이 완성된다는 뜻으로 해석하지 않는다.
+
+| 설계 목표 / 후속 항목 | 현재 보장하지 않는 것 |
+|---|---|
+| OS-level filesystem read sandbox | Windows ACL, AppContainer, container 등 kernel-enforced read isolation은 없다. `read_scope.deny`는 orchestration/prompt/policy 계약이다. |
+| AST/import graph 기반 dependency truth proof | 구조화된 relation/source_file의 유효성을 검사하지만 실제 import AST graph로 dependency 진위를 증명하지 않는다. |
+| Sensitive human approval API/UI | `REQUIRE_REVIEW` → `WRITE_EXPANSION_REVIEW_REQUIRED`에서 멈춘다. 승인 후 자동 재개를 제공하는 dashboard UI/API는 없다. |
+| Expansion history dashboard visualization | state JSON과 artifact에는 요청·판정·승인 범위를 남기지만 전용 이력 UI는 없다. |
+| 대규모 real workload 검증 | 소규모 online E2E는 release smoke validation이다. 통과해도 장기 workload, 통계적 신뢰도, 아래 KPI 개선을 증명하지 않는다. |
+
+기존 [v2.2/v2.3 로드맵](V2_2_V2_3_ROADMAP.md)의 의미는 유지한다. Execution Profile, DAG scheduler, cache/telemetry engine, learned router 및 신규 승인 UI/API는 이번 v2.1 안정화에서 구현하지 않는다.
+
 핵심 원칙은 다음과 같다.
 
 > Repository를 볼 수 있는 범위 ≠ 수정할 수 있는 범위 ≠ 최종 merge 가능한 범위
 
-또한 다음 안전 원칙을 함께 적용한다.
+또한 다음 안전 원칙을 적용한다. 아래 실행 환경의 secret 차단과 Risk Delivery Gate는 위 표보다 강한 **설계 목표**를 포함한다.
 
 > 물리적 Worktree Write 권한은 Patch 승인 권한이 아니다.
 
@@ -76,7 +105,7 @@ Worker는 자신의 격리된 Task Worktree 안에서 다음 동작을 수행할
 - import/export 및 dependency 탐색
 - 관련 테스트 탐색
 
-다음 영역은 실행 환경에서 읽기를 차단한다.
+다음은 읽기를 차단할 영역에 대한 설계 목록이다. 현재 런타임이 정규화하는 deny 패턴의 기준은 `filesystem-policy.ps1`의 `DefaultReadDeny`이며, 이 목록 전체를 OS 수준에서 차단하는 구현은 없다.
 
 ```text
 .env
@@ -93,6 +122,8 @@ Worker는 자신의 격리된 Task Worktree 안에서 다음 동작을 수행할
 ```
 
 ### 3.1 Secret 강제 차단
+
+이 절은 후속 hardening 목표다. 현재 적용된 canonical redaction과 read deny 정책을, secret 파일 제거·환경 변수 정화·모든 읽기 시도 audit까지 구현된 것으로 해석하지 않는다.
 
 Secret 보호는 모델 지시만으로 구현하지 않는다.
 
@@ -119,6 +150,8 @@ Expected 변경 때문에 자연스럽게 필요한 직접 dependency다.
 - 관련된 **신규** 단위 테스트
 
 Worker는 구조화된 Write Expansion을 요청하며 Local Policy Engine이 기계적 증거를 확인하면 Codex 호출 없이 승인할 수 있다.
+
+현재의 기계적 검사는 허용 relation, 승인된 source_file 범위 및 target 정책 확인이다. 아래의 dependency 진위까지 증명하는 목표는 AST/import graph 검증을 추가하는 후속 hardening에 해당한다.
 
 같은 디렉터리에 있다는 사실이나 Worker의 주장만으로는 Derived로 승인하지 않는다.
 
@@ -208,6 +241,8 @@ Local Policy Engine은 LLM을 먼저 호출하지 않고 다음 순서로 판정
 
 ## 7. Task Contract v2.1
 
+아래 JSON은 설계 설명용 발췌이며 canonical planner schema를 만족하는 완전한 입력 예제가 아니다. 실제 required field와 실행 가능한 예제는 [`router-plan.schema.json`](../router-plan.schema.json)과 [`parallel-tasks.v2_1.example.json`](../parallel-tasks.v2_1.example.json)을 따른다. `expected_change_scope` 기반 anomaly/Risk 처리 설명 역시 실행 결과로 검증된 보장과 구분한다.
+
 ```json
 {
   "objective": "로그인 refresh token 처리 수정",
@@ -282,6 +317,8 @@ OWNERSHIP_CONFLICT
 
 ## 9. False Pass 방어
 
+이 절의 원본 snapshot 전체 목록과 독립 protected-test 실행은 설계 목표를 포함한다. 현재 보장은 보호 파일 정책, 실제 diff와 저장된 task 정책의 재검증, 설정된 deterministic verification 명령 실행이다. 모든 항목의 원본 snapshot 및 독립 semantic verifier가 구현됐다고 보장하지 않는다.
+
 `test`, `lint`, `build`의 PASS만으로 성공 처리하지 않는다.
 
 작업 시작 시 다음 항목의 원본 hash 또는 snapshot을 보관한다.
@@ -320,6 +357,8 @@ Integration-owned:  src/shared/**, src/routes.ts, package.json
 
 ## 11. Failure Classifier v2.1
 
+아래 표는 설계상의 분류다. 모든 이름이 현재 terminal state로 구현됐다는 뜻은 아니다. 실제 runtime 상태와 retry/expansion 처리 계약은 [구현 보고서](V2_1_IMPLEMENTATION_REPORT.md)의 Dynamic Write Expansion 설명을 따른다.
+
 | 분류 | 처리 |
 |---|---|
 | `CONTEXT_MISS` | Search/Read로 자체 보완, 실패로 계산하지 않음 |
@@ -336,6 +375,8 @@ Integration-owned:  src/shared/**, src/routes.ts, package.json
 특히 `CONTEXT_MISS`와 `PERMISSION_ERROR`를 동일하게 취급하지 않는다.
 
 ## 12. Context Compiler v2.1
+
+이 절은 설계 목표다. 아래 입력을 모두 사용하는 compiler와 read/search/token telemetry 수집을 현재 구현의 보장으로 간주하지 않는다.
 
 Context Compiler는 다음 입력에서 Worker의 Initial Context를 만든다.
 
@@ -368,6 +409,8 @@ expansion_denied
 
 ## 13. Compact State
 
+아래는 설계용 예시이며 현재 state JSON의 전체 schema가 아니다. 실제 expansion 상태는 `filesystemPolicy`, `expansionRequests`, `expansionCount`, `expansionLimit`, `testRetryCount`, `attempt` 등의 필드에 기록한다. 예시의 `files_read`/`search_calls` 수집까지 구현됐다는 뜻은 아니다.
+
 ```json
 {
   "filesystem_policy": "v2.1",
@@ -391,6 +434,8 @@ expansion_denied
 긴 파일 목록과 전체 로그는 Compact State가 아니라 별도 artifact에 저장한다.
 
 ## 14. Delivery Gate
+
+이 절은 장기 전달 정책 설계다. LOW 자동 fast-forward/push에 대한 설명은 현재 worker에게 main 변경이나 push 권한을 부여하지 않는다. 현재 v2.1 일반 실행은 integration/review gate에서 검토하며, 이 안정화 작업에서는 main merge/push를 금지한다.
 
 Scope가 승인됐다는 사실만으로 자동 병합하지 않는다.
 
@@ -423,6 +468,8 @@ Scope Verification
 - 실패, 충돌, 정책 위반 시 자동 병합하지 않음
 
 ## 15. 기본 실행 흐름
+
+아래는 설계 전체 흐름이다. 현재 검증 대상 흐름은 `router → canonical task policy → isolated worker → optional expansion → deterministic verification → integration/review`이며, independent semantic verification·risk 자동 전달·main push 단계의 전체 구현을 주장하지 않는다.
 
 ```text
 USER REQUEST
@@ -459,6 +506,8 @@ main fast-forward → deterministic Git checks → normal push
 
 ## 16. 구현 순서
 
+아래는 설계 당시의 작업 순서다. 완료 체크리스트가 아니며 OS sandbox, dependency truth proof, telemetry 및 replay 성능 측정 등 후속 범위도 포함한다.
+
 1. `allowed_files`와 실제 Filesystem Permission 분리
 2. Task Worktree 내부 project-wide Search/Read 허용
 3. 실행환경 기반 Read Denylist와 secret redaction 추가
@@ -473,6 +522,8 @@ main fast-forward → deterministic Git checks → normal push
 12. 기존 범위 실패 작업 replay 및 v2 대비 측정
 
 ## 17. Acceptance Criteria
+
+이 절은 설계 목표와 장기 품질 기준이다. 현재 v2.1 릴리스의 필수 gate는 구현 보고서의 Final Release Gate에 별도로 기록하며, 아래 항목 전체를 검증 완료로 간주하지 않는다.
 
 ### 기능
 
@@ -505,6 +556,8 @@ main fast-forward → deterministic Git checks → normal push
 - 실패·충돌·정책 위반 시 main과 remote가 변경되지 않음
 
 ## 18. KPI
+
+아래는 후속 workload 평가 지표다. 현재 측정값이나 개선 효과를 보고하는 절이 아니다.
 
 다음 지표를 v2 적용 전후 동일한 방식으로 기록한다.
 
