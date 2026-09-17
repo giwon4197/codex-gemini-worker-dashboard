@@ -1,0 +1,135 @@
+{
+  "name": "codex-gemini-workspace",
+  "displayName": "Codex × Gemini",
+  "description": "Local Codex conversation and Gemini worker orchestration inside VS Code.",
+  "version": "0.1.0",
+  "publisher": "codex-gemini",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.106.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "secondarySidebar": [
+        {
+          "id": "codexGemini",
+          "title": "Codex × Gemini",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "codexGemini": [
+        {
+          "type": "webview",
+          "id": "codexGemini.conversation",
+          "name": "Conversation"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "codexGemini.openWorkspace",
+        "title": "Open Workspace",
+        "category": "Codex × Gemini"
+      },
+      {
+        "command": "codexGemini.explainSelection",
+        "title": "Explain Selection",
+        "category": "Codex × Gemini"
+      },
+      {
+        "command": "codexGemini.planFixForSelection",
+        "title": "Plan Fix for Selection",
+        "category": "Codex × Gemini"
+      },
+      {
+        "command": "codexGemini.showActiveRun",
+        "title": "Show Active Run",
+        "category": "Codex × Gemini"
+      },
+      {
+        "command": "codexGemini.reviewChanges",
+        "title": "Review Changes",
+        "category": "Codex × Gemini"
+      },
+      {
+        "command": "codexGemini.refreshUsage",
+        "title": "Refresh Usage",
+        "category": "Codex × Gemini"
+      },
+      {
+        "command": "codexGemini.refreshTaskTree",
+        "title": "Refresh Task Tree",
+        "category": "Codex × Gemini",
+        "icon": "$(refresh)"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "codexGemini.explainSelection",
+          "when": "editorHasSelection",
+          "group": "codexGemini@1"
+        },
+        {
+          "command": "codexGemini.planFixForSelection",
+          "when": "editorHasSelection",
+          "group": "codexGemini@2"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "codexGemini.refreshTaskTree",
+          "when": "view == codexGemini.conversation",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Codex × Gemini",
+      "properties": {
+        "codexGemini.codexModel": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "계획·대화 단계에서 `codex exec --model` 에 전달할 모델 id. 비워두면 `model-tiers.json` 의 `codex_default_model` 을 씁니다."
+        },
+        "codexGemini.codexChatModel": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "워커를 만들지 않는 설명 전용 요청(Explain Selection)에 쓸 모델 id. 비워두면 `codexGemini.codexModel` 을 따릅니다."
+        },
+        "codexGemini.workerTier": {
+          "type": "string",
+          "enum": ["fast", "normal", "advanced", "reasoning"],
+          "default": "normal",
+          "markdownDescription": "Gemini 워커 모델 등급. 작업 폴더의 `worker-settings.json` 에 저장되어 웹 대시보드와 공유됩니다."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "node esbuild.mjs",
+    "vscode:prepublish": "npm run compile",
+    "package": "vsce package --allow-missing-repository --no-dependencies",
+    "test": "node --experimental-strip-types --test src/workspace-context.test.ts src/core-host.test.ts src/ids.test.ts src/graph-tree.test.ts src/restore-state.test.ts src/protocol.test.ts src/webview-script.test.ts"
+  },
+  "vsce": {
+    "dependencies": false
+  },
+  "devDependencies": {
+    "@types/node": "22.19.19",
+    "@types/vscode": "^1.106.0",
+    "@vscode/vsce": "3.7.1",
+    "esbuild": "0.25.11",
+    "typescript": "5.9.3"
+  }
+}

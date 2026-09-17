@@ -1,6 +1,5 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-// @ts-expect-error TS5097 allowed for test runner
 import { getLocalDateKey, parseTokenCount, calculateDailyTokenStats } from './daily-token-stats.ts';
 
 void describe('Daily Token Stats Helper and Calculations', () => {

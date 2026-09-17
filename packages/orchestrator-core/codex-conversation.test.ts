@@ -4,12 +4,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import type { SpawnOptions } from 'node:child_process';
-// @ts-expect-error TS5097 allowed for test runner
-import { evaluateCodexConversation } from './codex-conversation.ts';
-// @ts-expect-error TS5097 allowed for test runner
+import { buildCodexExecArgs, defaultCodexRunner, evaluateCodexConversation, normalizeAffectedFiles, parseAndValidateCodexDecision, sanitizeSpawnEnv } from './codex-conversation.ts';
 import { getConversationSession, approveConversationPlan, saveCompactRunState, listCompactRuns } from './workspace-store.ts';
-// @ts-expect-error TS5097 allowed for test runner
 import { extractTimelineEvents } from './workspace-contract.ts';
+import { CODEX_DEFAULT_MODEL } from './model-tiers.ts';
 
 void describe('Codex Conversational Workspace & Decision Engine', () => {
   let testRepoDir: string;
@@ -51,6 +49,61 @@ void describe('Codex Conversational Workspace & Decision Engine', () => {
     }
   });
 
+  void test('the npm-installed codex binary wins over the desktop app bundle', async t => {
+    if (process.platform !== 'win32') return t.skip('windows-only lookup');
+    const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-lookup-'));
+    const npmExe = path.join(
+      fakeHome, 'roaming', 'npm', 'node_modules', '@openai', 'codex',
+      'node_modules', '@openai', 'codex-win32-x64', 'vendor',
+      'x86_64-pc-windows-msvc', 'bin', 'codex.exe'
+    );
+    const bundledExe = path.join(fakeHome, 'local', 'OpenAI', 'Codex', 'bin', 'abc123', 'codex.exe');
+    for (const exe of [npmExe, bundledExe]) {
+      fs.mkdirSync(path.dirname(exe), { recursive: true });
+      fs.writeFileSync(exe, '');
+    }
+
+    let seenExecutable = '';
+    await evaluateCodexConversation({
+      message: '아아 들려?',
+      repoRoot: testRepoDir,
+      env: {
+        PATH: '',
+        APPDATA: path.join(fakeHome, 'roaming'),
+        LOCALAPPDATA: path.join(fakeHome, 'local'),
+      },
+      codexRunner: async params => {
+        seenExecutable = params.executable;
+        return { stdout: JSON.stringify({ intent: 'chat', reply: 'ok' }), stderr: '', exitCode: 0 };
+      },
+    });
+
+    fs.rmSync(fakeHome, { recursive: true, force: true });
+    assert.strictEqual(seenExecutable, npmExe);
+  });
+
+  void test('an injected runner still receives the resolved codex path, not a bare name', async () => {
+    let seenExecutable = '';
+    const result = await evaluateCodexConversation({
+      message: '아아 들려?',
+      repoRoot: testRepoDir,
+      toolOverrides: { codex: process.execPath },
+      codexRunner: async params => {
+        seenExecutable = params.executable;
+        return {
+          stdout: JSON.stringify({ intent: 'chat', reply: 'ok' }),
+          stderr: '',
+          exitCode: 0,
+        };
+      },
+    });
+
+    assert.strictEqual(result.ok, true);
+    // A bare 'codex' reaches spawn() as ENOENT on Windows, where PATH only has shims.
+    assert.notStrictEqual(seenExecutable, 'codex');
+    assert.strictEqual(seenExecutable, process.execPath);
+  });
+
   void describe('1. 일반 대화 처리 (General Chat)', () => {
     void test('일반 대화(아아 들려?)는 워커를 0개 생성하고 Codex 대화 응답만 반환한다', async () => {
       const mockCodexRunner = async () => ({
@@ -76,6 +129,203 @@ void describe('Codex Conversational Workspace & Decision Engine', () => {
       assert.strictEqual(result.session.pendingApproval, undefined);
 
       // Verify no router/worker spawned (Criterion 1 & 10)
+      const runs = await listCompactRuns(testRepoDir);
+      assert.strictEqual(runs.length, 0);
+    });
+
+    void test('Codex human-readable exec output still yields a chat decision', async () => {
+      const mixed = [
+        'OpenAI Codex v0.147.0-alpha.6.5',
+        '--------',
+        'workdir: C:\\tmp\\repo',
+        'model: gpt-5.6-luna',
+        '--------',
+        'user',
+        'Respond ONLY with a JSON object',
+        'codex',
+        '{"intent":"chat","reply":"네, 잘 들립니다."}',
+        'tokens used',
+        '14330',
+      ].join('\n');
+      const parsed = parseAndValidateCodexDecision(mixed, testRepoDir);
+      assert.equal(parsed.ok, true);
+      assert.equal(parsed.decision?.intent, 'chat');
+      assert.equal(parsed.decision?.reply, '네, 잘 들립니다.');
+
+      const result = await evaluateCodexConversation({
+        message: '잘 들려?',
+        repoRoot: testRepoDir,
+        codexRunner: async () => ({ stdout: mixed, stderr: '', exitCode: 0 }),
+      });
+      assert.equal(result.ok, true);
+      assert.equal(result.message?.intentType, 'chat');
+    });
+
+    void test('the project default model is used when nothing overrides it', async () => {
+      let seenArgs: string[] = [];
+      await evaluateCodexConversation({
+        message: '아아 들려?',
+        repoRoot: testRepoDir,
+        env: {},
+        codexRunner: async params => {
+          seenArgs = params.args;
+          return { stdout: JSON.stringify({ intent: 'chat', reply: 'ok' }), stderr: '', exitCode: 0 };
+        },
+      });
+      assert.equal(seenArgs[seenArgs.indexOf('--model') + 1], CODEX_DEFAULT_MODEL);
+    });
+
+    void test('exec args omit --model unless one is chosen', () => {
+      const inherited = buildCodexExecArgs({ prompt: 'hi', cwd: testRepoDir });
+      assert.equal(inherited.includes('--model'), false);
+
+      const pinned = buildCodexExecArgs({ prompt: 'hi', cwd: testRepoDir, model: 'gpt-6-astra' });
+      assert.equal(pinned[pinned.indexOf('--model') + 1], 'gpt-6-astra');
+      assert.equal(pinned.at(-1), '-');
+    });
+
+    void test('an explicit model beats the environment so a workflow stage can switch it', async () => {
+      let seenArgs: string[] = [];
+      const capture = async (params: { args: string[] }) => {
+        seenArgs = params.args;
+        return { stdout: JSON.stringify({ intent: 'chat', reply: 'ok' }), stderr: '', exitCode: 0 };
+      };
+
+      await evaluateCodexConversation({
+        message: '아아 들려?',
+        repoRoot: testRepoDir,
+        env: { CODEX_MODEL: 'from-env' },
+        codexModel: 'from-call',
+        codexRunner: capture,
+      });
+      assert.equal(seenArgs[seenArgs.indexOf('--model') + 1], 'from-call');
+
+      await evaluateCodexConversation({
+        message: '아아 들려?',
+        repoRoot: testRepoDir,
+        env: { CODEX_MODEL: 'from-env' },
+        codexRunner: capture,
+      });
+      assert.equal(seenArgs[seenArgs.indexOf('--model') + 1], 'from-env');
+    });
+
+    void test('a malformed model id is rejected instead of reaching argv', async () => {
+      let seenArgs: string[] = [];
+      await evaluateCodexConversation({
+        message: '아아 들려?',
+        repoRoot: testRepoDir,
+        env: {},
+        codexModel: 'bad model --sandbox danger-full-access',
+        codexRunner: async params => {
+          seenArgs = params.args;
+          return { stdout: JSON.stringify({ intent: 'chat', reply: 'ok' }), stderr: '', exitCode: 0 };
+        },
+      });
+      // The bad id is dropped and the vetted project default takes its place.
+      assert.equal(seenArgs[seenArgs.indexOf('--model') + 1], CODEX_DEFAULT_MODEL);
+      assert.equal(seenArgs.includes('danger-full-access'), false);
+      assert.equal(seenArgs.some(arg => arg.includes('bad model')), false);
+    });
+
+    void test('exec args allow non-git workspaces', () => {
+      const args = buildCodexExecArgs({
+        prompt: 'hello\nworld',
+        cwd: testRepoDir,
+      });
+      assert.equal(args.includes('--skip-git-repo-check'), true);
+      assert.equal(args.includes('--ephemeral'), true);
+      assert.equal(args.at(-1), '-');
+      assert.equal(args.includes('hello\nworld'), false);
+    });
+
+    void test('sanitizeSpawnEnv drops undefined values and Electron flags', () => {
+      const env = sanitizeSpawnEnv({
+        PATH: 'C:\\bin',
+        EMPTY: undefined,
+        ELECTRON_RUN_AS_NODE: '1',
+      });
+      assert.equal(env.PATH, 'C:\\bin');
+      assert.equal('EMPTY' in env, false);
+      assert.equal('ELECTRON_RUN_AS_NODE' in env, false);
+    });
+
+    void test('defaultCodexRunner sends the prompt on stdin without spawn EINVAL', async () => {
+      const result = await defaultCodexRunner({
+        executable: process.execPath,
+        args: [
+          '-e',
+          'let s=""; process.stdin.setEncoding("utf8"); process.stdin.on("data", d => s += d); process.stdin.on("end", () => { process.stdout.write(s); });',
+        ],
+        cwd: testRepoDir,
+        env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', UNSET: undefined },
+        timeoutMs: 8000,
+        stdinText: '{"intent":"chat","reply":"ok"}',
+      });
+      assert.equal(result.exitCode, 0);
+      assert.match(result.stdout, /"intent":"chat"/);
+    });
+
+    void test('executionPrompt is sent to Codex while the visible user message stays short', async () => {
+      let capturedStdin = '';
+      const result = await evaluateCodexConversation({
+        message: '선택 코드 수정 계획: src/sum.ts',
+        executionPrompt:
+          '아래 선택 코드의 수정 계획을 세우세요.\n승인 전에는 파일을 변경하지 마세요.\n```\nreturn a - b;\n```',
+        repoRoot: testRepoDir,
+        codexRunner: async params => {
+          capturedStdin = params.stdinText || '';
+          return {
+            stdout: JSON.stringify({
+              intent: 'action_plan',
+              reply: '빼기 연산을 고치겠습니다.',
+              plan: {
+                title: '합산 수정',
+                explanation: 'return을 더하기로 바꿉니다.',
+                steps: ['수정', '테스트'],
+                affectedFiles: ['src/sum.ts'],
+              },
+            }),
+            stderr: '',
+            exitCode: 0,
+          };
+        },
+      });
+
+      assert.equal(result.ok, true);
+      const user = result.session?.messages.find(message => message.sender === 'user');
+      assert.equal(user?.text, '선택 코드 수정 계획: src/sum.ts');
+      assert.match(capturedStdin, /return a - b/);
+      assert.doesNotMatch(user?.text || '', /return a - b/);
+      assert.match(result.approval?.prompt || '', /return a - b/);
+    });
+
+    void test('forbidWorkers는 action_plan 분류를 chat으로 내리고 승인과 워커를 만들지 않는다', async () => {
+      const mockCodexRunner = async () => ({
+        stdout: JSON.stringify({
+          intent: 'action_plan',
+          reply: '이 함수는 입력 배열을 합산합니다.',
+          plan: {
+            title: '합산 함수 수정',
+            explanation: '선택 코드를 변경합니다.',
+            steps: ['파일 수정'],
+            affectedFiles: ['src/sum.ts'],
+          },
+        }),
+        stderr: '',
+        exitCode: 0,
+      });
+
+      const result = await evaluateCodexConversation({
+        message: '이 코드를 설명해주세요. 파일을 수정하지 마세요.',
+        repoRoot: testRepoDir,
+        codexRunner: mockCodexRunner,
+        forbidWorkers: true,
+      });
+
+      assert.strictEqual(result.ok, true);
+      assert.strictEqual(result.message?.intentType, 'chat');
+      assert.strictEqual(result.approval, undefined);
+      assert.strictEqual(result.session?.pendingApproval, undefined);
       const runs = await listCompactRuns(testRepoDir);
       assert.strictEqual(runs.length, 0);
     });
@@ -418,6 +668,7 @@ void describe('Codex Conversational Workspace & Decision Engine', () => {
       assert.ok(capturedArgs.includes('read-only'));
       assert.ok(capturedArgs.includes('--cd'));
       assert.ok(capturedArgs.includes(testRepoDir));
+      assert.equal(capturedArgs.at(-1), '-');
     });
 
     void test('외부 경로 또는 경로 탈출 시도는 거부된다', async () => {
@@ -430,4 +681,11 @@ void describe('Codex Conversational Workspace & Decision Engine', () => {
       assert.ok(result.error?.includes('허용되지 않은'));
     });
   });
+});
+
+void test('affectedFiles keeps relative paths and drops descriptive labels', () => {
+  assert.deepStrictEqual(
+    normalizeAffectedFiles(['src/a.ts', './src\\b.test.ts', 'README.md', '경로 비교 구현 파일', 'the test file', 'C:/abs/c.ts', '']),
+    ['src/a.ts', 'src/b.test.ts', 'README.md']
+  );
 });

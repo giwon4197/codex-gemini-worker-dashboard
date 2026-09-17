@@ -1,5 +1,6 @@
 {
   "tier": "normal",
   "model": "gemini-3.8-flash-medium",
-  "updatedAt": null
+  "updatedAt": null,
+  "codexModel": "gpt-5.6-terra"
 }

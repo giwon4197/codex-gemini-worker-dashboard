@@ -1,6 +1,5 @@
 import { test, describe, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-// @ts-expect-error TS5097 allowed for test runner
 import { RunDetector, RunTracker, RunLifecycleCoordinator, compareRunsNewestFirst, executeGuarded, getSharedRunTracker, resetSharedRunTracker, type BaseRunItem, type RunInvalidationEvent } from './run-tracking.ts';
 
 void describe('Run Tracking & Invalidation Orchestration', () => {

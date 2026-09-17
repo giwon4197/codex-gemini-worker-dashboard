@@ -13,7 +13,7 @@ async function discover(directory) {
   }
   return files;
 }
-const files = [...await discover('app'), ...await discover('lib')].sort((a, b) => a < b ? -1 : a > b ? 1 : 0);
+const files = [...await discover('app'), ...await discover('lib'), ...await discover('../packages/orchestrator-core')].sort((a, b) => a < b ? -1 : a > b ? 1 : 0);
 for (const file of files) console.log(file);
 console.log(`Discovered test file count = ${files.length}`);
 if (files.length < 15) {

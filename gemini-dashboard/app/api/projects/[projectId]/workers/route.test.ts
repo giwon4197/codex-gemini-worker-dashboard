@@ -3,9 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-// @ts-expect-error TS5097 allowed for test runner
 import { GET as getProjectWorkers } from './route.ts';
-// @ts-expect-error TS5097 allowed for test runner
 import { STALE_PROCESS_MISMATCH_REASON, setGlobalLivenessOptions, resetGlobalLivenessOptions } from '../../../../../lib/process-liveness.ts';
 
 void describe('/api/projects/[projectId]/workers API Route Handlers', () => {

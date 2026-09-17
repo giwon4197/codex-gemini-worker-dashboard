@@ -1,6 +1,7 @@
 import tailwindcss from '@tailwindcss/postcss';
 import vinext from 'vinext';
 import { defineConfig } from 'vite';
+import { fileURLToPath } from 'node:url';
 
 import { workspaceBridgePlugin } from './lib/workspace-node-bridge';
 
@@ -24,9 +25,11 @@ export default defineConfig(async () => {
 
   return {
     css: { postcss: { plugins: [tailwindcss()] } },
-    server: isCodexSeatbeltSandbox
-      ? { watch: { useFsEvents: false, usePolling: true } }
-      : undefined,
+    server: {
+      // orchestrator-core lives one level above this app; let the dev server serve it.
+      fs: { allow: [fileURLToPath(new URL('..', import.meta.url))] },
+      ...(isCodexSeatbeltSandbox ? { watch: { useFsEvents: false, usePolling: true } } : {}),
+    },
     plugins: [
       workspaceBridgePlugin(),
 
