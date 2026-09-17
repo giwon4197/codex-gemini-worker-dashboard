@@ -6,9 +6,7 @@ import os from 'node:os';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { SpawnOptions } from 'node:child_process';
-// @ts-expect-error TS5097 allowed for test runner
 import { handleWorkspaceBridgeRequest, createWorkspaceBridgeMiddleware, workspaceBridgePlugin, resetWorkspaceBridgeOptions } from './workspace-node-bridge.ts';
-// @ts-expect-error TS5097 allowed for test runner
 import { getCompactRunState, getAliasRecord, resolveRequiredTools, saveConversationSession, getRunDetails, spawnRouterRun } from './workspace-store.ts';
 
 void describe('Workspace Node Bridge (Vite Dev/Server Middleware & App Route Bridge)', () => {
@@ -1157,18 +1155,22 @@ void describe('Workspace Node Bridge (Vite Dev/Server Middleware & App Route Bri
       assert.ok(spawnResult.runId);
       const runId = spawnResult.runId;
 
-      // Poll until bootstrap writes exitCode 1 to metadata (up to 5s)
+      // Poll until bootstrap writes exitCode 1 to metadata. pwsh writes the
+      // file with a UTF-8 BOM, which JSON.parse rejects, so strip it the way
+      // the store does; otherwise this loop silently burns its whole budget.
       const metaPath = path.join(failRepo, '.agent', 'dashboard-state', 'meta', `${runId}.json`);
       const start = Date.now();
-      while (Date.now() - start < 5000) {
+      let settledExitCode: number | null = null;
+      while (Date.now() - start < 30000 && settledExitCode === null) {
         if (fs.existsSync(metaPath)) {
           try {
-            const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8')) as { exitCode: number | null };
-            if (meta.exitCode !== null) break;
+            const raw = fs.readFileSync(metaPath, 'utf8').replace(/^\uFEFF/, '');
+            settledExitCode = (JSON.parse(raw) as { exitCode: number | null }).exitCode;
           } catch {}
         }
-        await new Promise((r) => setTimeout(r, 100));
+        if (settledExitCode === null) await new Promise((r) => setTimeout(r, 100));
       }
+      assert.notEqual(settledExitCode, null, `router bootstrap did not record an exit code within 30s (${metaPath})`);
 
       // Query via HTTP request simulation
       const req = new Request(`http://localhost:3000/api/runs/${runId}`, { method: 'GET' });
@@ -1219,6 +1221,53 @@ void describe('Workspace Node Bridge (Vite Dev/Server Middleware & App Route Bri
       assert.ok(!r.failureReason.includes(failRepo));
     });
 
+    void test('manifest timeout keeps a live planner running', async () => {
+      const runId = '20260909-timeout-alive';
+      const prompt = '플래닝 진행 중 작업';
+      const now = new Date(Date.now() - 60000).toISOString();
+      await fs.promises.writeFile(
+        path.join(failRepo, '.agent', 'dashboard-state', 'compact', `${runId}.json`),
+        JSON.stringify({
+          runId,
+          prompt,
+          status: 'running',
+          createdAt: now,
+          updatedAt: now,
+          requiresUserAction: false,
+          tasksCount: 0,
+          activeWorkersCount: 1,
+          completedTasksCount: 0,
+          orchestratorProcessId: 1111,
+        }),
+        'utf8'
+      );
+      await fs.promises.writeFile(
+        path.join(failRepo, '.agent', 'dashboard-state', 'meta', `${runId}.json`),
+        JSON.stringify({
+          dashboardRunId: runId,
+          orchestratorProcessId: 1111,
+          startedAt: now,
+          status: 'running',
+          exitCode: null,
+        }),
+        'utf8'
+      );
+
+      const detail = await getRunDetails(runId, failRepo, {
+        manifestTimeoutMs: 50,
+        processInfoResolver: () => ({
+          pid: 1111,
+          alive: true,
+          command: 'pwsh.exe -File router-bootstrap.ps1',
+          metadataAvailable: true,
+        }),
+      });
+
+      assert.ok(detail);
+      assert.strictEqual(detail.status, 'running');
+      assert.strictEqual(detail.errorCategory, undefined);
+    });
+
     void test('manifest timeout settles to launcher_error without fake tasks', async () => {
       const runId = '20260909-timeout-001';
       const prompt = '타임아웃 검증 작업';
@@ -1260,8 +1309,7 @@ void describe('Workspace Node Bridge (Vite Dev/Server Middleware & App Route Bri
         manifestTimeoutMs: 50,
         processInfoResolver: () => ({
           pid: 1111,
-          alive: true,
-          command: 'pwsh.exe',
+          alive: false,
           metadataAvailable: true,
         }),
       });

@@ -1,6 +1,5 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-// @ts-expect-error TS5097 allowed for test runner
 import { sanitizePath, sanitizeCommand, sanitizeText, sanitizeWorkerLog, sanitizeWorkerData } from './workspace-sanitize.ts';
 import type { LiveWorkerData } from './workspace-contract.ts';
 

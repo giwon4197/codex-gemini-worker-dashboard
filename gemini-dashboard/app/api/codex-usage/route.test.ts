@@ -3,9 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-// @ts-expect-error TS5097 allowed for test runner
 import { GET } from './route.ts';
-// @ts-expect-error TS5097 allowed for test runner
 import { clearCodexUsageCache } from '../../../lib/codex-usage.ts';
 
 void describe('/api/codex-usage API Route Handlers', () => {

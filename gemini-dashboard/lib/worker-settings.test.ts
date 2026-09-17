@@ -3,9 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-// @ts-expect-error TS5097 allowed for test runner
 import { GET, POST, PUT } from '../app/api/settings/route.ts';
-// @ts-expect-error TS5097 allowed for test runner
 import { handleWorkspaceBridgeRequest } from './workspace-node-bridge.ts';
 
 const originalRoot = process.env.CODEX_GEMINI_INSTALL_ROOT;

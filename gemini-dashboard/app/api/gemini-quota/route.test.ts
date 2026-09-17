@@ -1,8 +1,6 @@
 import { test, describe, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-// @ts-expect-error TS5097 allowed for test runner
 import { GET } from './route.ts';
-// @ts-expect-error TS5097 allowed for test runner
 import { clearGeminiQuotaCache } from '../../../lib/gemini-quota.ts';
 
 void describe('/api/gemini-quota API Route', () => {

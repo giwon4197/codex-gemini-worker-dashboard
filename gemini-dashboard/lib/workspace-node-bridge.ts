@@ -2,18 +2,12 @@ import type http from 'node:http';
 import path from 'node:path';
 import type { Plugin } from 'vite';
 import type { SpawnerFn } from './workspace-store.ts';
-// @ts-expect-error TS5097 allowed for test runner
 import { validateSessionId, createEmptyConversationSession } from './workspace-contract.ts';
-// @ts-expect-error TS5097 allowed for test runner
 import { getAllowedRepoRoot, validateRunId, validateRepository, validatePrompt, spawnRouterRun, retryRun, listCompactRuns, getRunDetails, getProjectWorkers, getConversationSession, listConversationSessions, saveConversationSession, approveConversationPlan } from './workspace-store.ts';
-// @ts-expect-error TS5097 allowed for test runner
 import { sanitizeText } from './workspace-sanitize.ts';
-// @ts-expect-error TS5097 allowed for test runner
 import { evaluateCodexConversation } from './codex-conversation.ts';
 import type { CodexRunnerFn } from './codex-conversation.ts';
-// @ts-expect-error TS5097 allowed for test runner
 import { handleCodexUsage, handleGeminiQuota } from './usage-handlers.ts';
-// @ts-expect-error TS5097 allowed for test runner
 import { GET as getSettings, POST as saveSettings } from './worker-settings.ts';
 
 export interface WorkspaceBridgeOptions {

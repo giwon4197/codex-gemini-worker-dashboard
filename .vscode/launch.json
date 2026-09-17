@@ -1,0 +1,35 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run Codex × Gemini Extension",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": [
+        "${workspaceFolder}",
+        "--extensionDevelopmentPath=${workspaceFolder}/vscode-extension"
+      ],
+      "outFiles": ["${workspaceFolder}/vscode-extension/dist/**/*.js"],
+      "preLaunchTask": "compile-vscode-extension"
+    },
+    {
+      "name": "Run Extension in other folder",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": [
+        "${input:targetFolder}",
+        "--extensionDevelopmentPath=${workspaceFolder}/vscode-extension"
+      ],
+      "outFiles": ["${workspaceFolder}/vscode-extension/dist/**/*.js"],
+      "preLaunchTask": "compile-vscode-extension"
+    }
+  ],
+  "inputs": [
+    {
+      "id": "targetFolder",
+      "type": "promptString",
+      "description": "테스트할 프로젝트 폴더의 전체 경로",
+      "default": "${workspaceFolder}"
+    }
+  ]
+}

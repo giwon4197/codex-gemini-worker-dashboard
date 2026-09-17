@@ -1,6 +1,5 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-// @ts-expect-error TS5097 allowed for test runner
 import { normalizeRunStatus, normalizeWorkerStatus, isWorkerActive, requiresUserAction, getUserActionReason, extractTimelineEvents, formatDuration, RUN_STATUS_META, WORKER_STATUS_META, validateSessionId, isLauncherError } from './workspace-contract.ts';
 
 void describe('Workspace Contract & Pure State Transforms', () => {

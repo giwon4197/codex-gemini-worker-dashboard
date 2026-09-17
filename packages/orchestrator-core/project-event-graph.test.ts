@@ -1,8 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-// @ts-expect-error TS5097 allowed for test runner
 import { parseWorkerNDJSONLine, buildProjectWorkGraph, sortGraphNodesNewestFirst, sortGraphNodesOldestFirst, computeGraphLayoutGeometry, computeLaneX, computeNodeY, computeGraphSvgWidth, computeGraphSvgHeight, getLaneColor, GRAPH_LAYOUT_CONFIG, type ProjectGraphNode } from './project-event-graph.ts';
-// @ts-expect-error TS5097 allowed for test runner
 import { sanitizeGraphData } from './workspace-sanitize.ts';
 
 void describe('Project Work Graph & Defensive NDJSON Parser', () => {
@@ -780,4 +778,22 @@ void describe('Project Work Graph & Defensive NDJSON Parser', () => {
       assert.strictEqual(tipNode.y, computeNodeY(0));
     });
   });
+});
+
+void test('a run that failed before planning shows only the recorded request node', () => {
+  const graph = buildProjectWorkGraph({
+    runId: 'run-launch-fail',
+    prompt: '경로 비교 오탐 수정',
+    status: 'failed',
+    createdAt: '2026-09-17T04:00:00Z',
+    tasks: [],
+    workers: [],
+  });
+  assert.deepEqual(graph.nodes.map(n => n.type), ['request']);
+  assert.equal(graph.nodes[0]?.status, 'failed');
+  assert.equal(graph.edges.length, 0);
+  assert.deepEqual(graph.tips.map(t => t.id), ['run-launch-fail:request']);
+  // A running run without a manifest yet still gets its placeholder branch.
+  const running = buildProjectWorkGraph({ runId: 'run-live', status: 'running', tasks: [], workers: [] });
+  assert.ok(running.nodes.some(n => n.type === 'worker_branch'));
 });

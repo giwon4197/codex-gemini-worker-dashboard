@@ -80,7 +80,9 @@ Codex 검토
 
 ### 검토 모드
 
-작업이 끝나면 선택한 노드의 Git diff, 변경 파일, 테스트 결과와 승인 동작을 표시한다. 완료 워커의 라이브 CLI는 활성 영역에서 제거하되 작업 그래프와 이력에는 보존한다.
+작업이 끝나면 노드별 변경 파일 목록을 표시하고, 파일을 누르면 Run의 `baseCommit`과 통합 브랜치를 비교하는 VS Code diff 편집기를 연다. 테스트 결과와 Problems는 Run 증거에 포함하며, 증거는 별도 문서 탭이 아니라 Task Graph 패널의 검토 섹션에 표시한다. 완료 워커의 라이브 CLI는 활성 영역에서 제거하되 작업 그래프와 이력에는 보존한다.
+
+검토 승인(통합 브랜치 → `main` 병합)은 이 단계 범위에서 제외한다. Core에 `approveReview(runId)` API를 추가하고 Web과 Extension이 같은 버튼으로 호출하는 작업은 [후속 계획](#후속-계획)에 둔다.
 
 ## 1단계: 현재 Web Workspace 안정화
 
@@ -144,11 +146,13 @@ UI에서 프로세스를 직접 실행하거나 Run 상태를 임의로 생성�
 
 ### 제공 화면
 
-- Activity Bar의 전용 Codex × Gemini 아이콘
-- Primary Side Bar의 대화 Webview
-- 실행 시 자동으로 나타나는 Task Tree 또는 분할 Webview
-- 선택 노드의 상세 이벤트, 변경 파일, 테스트 결과
-- VS Code Status Bar의 간결한 Run 상태와 사용량 조회 진입점
+UI 배치와 동선의 세부 결정은 [`VSCODE_EXTENSION_UIUX_DECISIONS.md`](./VSCODE_EXTENSION_UIUX_DECISIONS.md)를 따른다. 이 절은 요약이다.
+
+- Secondary Side Bar의 전용 Codex × Gemini 뷰 컨테이너 (VS Code 1.106+, [ADR-0001](./adr/0001-extension-lives-in-secondary-side-bar.md)). Activity Bar 아이콘은 두지 않는다.
+- 같은 컨테이너 안의 대화 Webview
+- 대화 Webview 상단의 접이식 Task Graph 패널 (Run 생성 시 자동으로 펼쳐짐)
+- Task Graph 안의 검토 섹션: 선택 노드의 상세 이벤트, 변경 파일, 테스트 결과, 통합 브랜치를 현재 브랜치에 merge
+- VS Code Status Bar의 간결한 Run 상태와 Gate 대기 시 뷰 배지
 - 실패 노드의 안전한 재시도 버튼
 
 ### VS Code에서 전달할 컨텍스트
@@ -187,27 +191,27 @@ idle → planning → awaiting approval → running
      → completed | failed | action required
 ```
 
-VS Code 화면과 웹 화면은 같은 Run ID와 상태를 보여야 한다. Extension을 다시 열어도 디스크의 영속 상태를 기준으로 복구한다.
+VS Code 화면과 웹 화면은 같은 Run ID와 상태를 보여야 한다. Extension을 다시 열면 현재 세션에 연결된 Run만 디스크의 영속 상태에서 복구한다. 세션과 무관한 진행 중 Run은 자동으로 채택하지 않고 Status Bar에 `진행 중 Run N (연결 안 됨)`으로 알리며, 클릭하면 `Show Active Run`으로 이동한다.
 
 ## 사용량 UI
 
-원형 그래프를 사용하지 않고 작은 한 줄 형태를 사용한다.
+원형 그래프를 사용하지 않고 버튼 두 개를 상하로 둔다. 버튼을 누르면 오른쪽 빈 공간에 결과가 나타난다.
 
 ```text
-◴ Codex 사용량                         조회하기
-◴ Gemini 사용량                        조회하기
+[Codex ]
+[Gemini]
 ```
 
-조회 후에는 같은 위치에 남은 비율을 표시한다.
+조회 후:
 
 ```text
-◴ Codex 사용량                          59% 남음
-◴ Gemini 사용량                         45% 남음
+[Codex ]  59% 남음 · 14:30 초기화
+[Gemini]  45% 남음 · 16:00 초기화
 ```
 
-- 사용자가 누른 경우에만 실제 사용량을 조회한다.
-- 조회 중에는 `조회 중…`, 실패하면 `다시 조회`를 표시한다.
-- 퍼센트 hover, 키보드 focus 또는 모바일 대응 UI에서 초기화 날짜와 남은 시간을 표시한다.
+- 사용자가 버튼을 누른 경우에만 실제 사용량을 조회한다.
+- 조회 중에는 `조회 중…`, 실패하면 `다시 조회`를 오른쪽에 표시한다.
+- 버튼이나 결과 텍스트에 hover 또는 키보드 focus 하면 툴팁에 창별(5h·weekly) 남은 비율, 초기화 시각, 남은 시간을 표시한다.
 - Gemini는 5시간 한도와 주간 한도를 구분한다.
 - 조회 실패를 0%로 표현하지 않는다.
 - 마지막 정상 값과 조회 시각을 캐시하되 자동 반복 조회하지 않는다.
@@ -276,10 +280,18 @@ packages/
 - Extension에서 현재 저장소·파일·선택 코드·진단·diff를 선택적으로 전달할 수 있다.
 - 작업 그래프와 상세 이벤트가 실제 영속 기록으로 복구된다.
 - 재시도와 사용량 조회가 요구된 안전 경계를 지킨다.
-- Extension 재시작 후 진행 중인 Run을 다시 표시한다.
+- Extension 재시작 후 현재 세션에 연결된 Run을 다시 표시하고, 연결되지 않은 진행 중 Run은 Status Bar에 알린다.
 - Web 회귀 테스트와 Core/Extension 테스트가 통과한다.
 - VSIX 설치 후 주요 흐름을 수동 검증한다.
 - 비밀정보와 사용자 절대경로가 로그와 UI에 노출되지 않는다.
+
+## 후속 계획
+
+Extension 1차 완료 후 별도 브랜치에서 진행한다.
+
+- 검토 승인 API: Core에 `approveReview(runId)`를 추가해 통합 브랜치 병합, 충돌 처리, 멱등 키를 Core가 소유한다. Web과 Extension은 같은 API를 호출하는 버튼만 둔다.
+- ~~사이드바 채팅에 현재 파일·선택 코드를 선택적으로 첨부하는 체크박스. 기본은 꺼짐.~~ UI/UX 개편 범위로 앞당김(결정 8).
+- 태스크 단위 재시도. 현재 재시도는 Run 단위이며 버튼 라벨도 `이 Run 재시도`로 표기한다.
 
 ## 범위 제외
 

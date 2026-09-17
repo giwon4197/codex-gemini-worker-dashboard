@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-// @ts-expect-error TS5097 allowed for test runner
 import { isProcessAlive, getProcessInfo, isProcessRelatedToRun, hasActiveWorkerEvidence, evaluateRunLiveness, STALE_PROCESS_MISMATCH_REASON, resetGlobalLivenessOptions } from './process-liveness.ts';
 import type { CompactRunState } from './workspace-contract.ts';
 
