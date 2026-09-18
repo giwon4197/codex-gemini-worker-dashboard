@@ -667,6 +667,13 @@ function renderConversationHtml(webview: vscode.Webview): string {
     }
     .row { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
     .tools { display: flex; align-items: center; gap: 2px; }
+    .menuWrap { position: relative; display: inline-flex; }
+    .panel.floating {
+      position: absolute; bottom: calc(100% + 4px); left: 0; z-index: 10;
+      min-width: min(232px, calc(100vw - 16px)); max-width: calc(100vw - 16px); margin: 0;
+      background: var(--vscode-editorWidget-background, var(--vscode-sideBar-background));
+      box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.36));
+    }
     .iconBtn {
       position: relative; display: inline-flex; align-items: center; justify-content: center;
       width: 24px; height: 24px; padding: 0; margin: 4px 0 0; border-radius: 4px; opacity: 0.85;
@@ -676,7 +683,7 @@ function renderConversationHtml(webview: vscode.Webview): string {
     .iconBtn[aria-expanded="true"] { opacity: 1; background: var(--vscode-toolbar-activeBackground, rgba(128, 128, 128, 0.3)); }
     .iconBtn.danger { color: var(--vscode-errorForeground); opacity: 1; }
     .iconBtn svg { width: 16px; height: 16px; }
-    .badge {
+    .iconBadge {
       position: absolute; top: -2px; right: -2px; min-width: 13px; height: 13px; padding: 0 3px;
       box-sizing: border-box; border-radius: 7px; font-size: 9px; line-height: 13px; text-align: center;
       background: var(--vscode-errorForeground); color: var(--vscode-editor-background);
@@ -733,7 +740,10 @@ function renderConversationHtml(webview: vscode.Webview): string {
     #graphPanel > summary { cursor: pointer; padding: 4px 6px; font-weight: 600; user-select: none; }
     #graphPanel > summary:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
     #graphPanel > summary .meta { display: inline; margin: 0 0 0 6px; font-weight: 400; }
-    #graphPanel .body { padding: 4px 6px 6px; max-height: 45vh; overflow: auto; }
+    /* Drag the pane's bottom edge to trade height with the chat; the inline height a
+       drag writes outranks the :has() default below. */
+    #graphPanel .body { padding: 4px 6px 6px; overflow: auto; resize: vertical; min-height: 60px; max-height: 80vh; }
+    #graphPanel .body:has(#graph:not([hidden])) { height: 45vh; }
     #graphPanel button {
       margin: 0; padding: 2px 6px;
       background: var(--vscode-button-secondaryBackground, var(--vscode-button-background));
@@ -848,29 +858,31 @@ function renderConversationHtml(webview: vscode.Webview): string {
   <textarea id="input" aria-label="메시지" placeholder="질문하거나 작업을 요청하세요" aria-describedby="sendHint"></textarea>
   <div class="sendRow">
     <div class="tools">
-      <button id="usageToggle" class="iconBtn" type="button" aria-expanded="false" aria-controls="usagePanel" aria-label="사용량" title="사용량">
-        <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="8" cy="8" r="5.6" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M8 8 11 5.6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="M8 2.4v1.4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
-      </button>
+      <div class="menuWrap" id="usageMenu">
+        <button id="usageToggle" class="iconBtn" type="button" aria-expanded="false" aria-controls="usagePanel" aria-haspopup="true" aria-label="사용량" title="사용량">
+          <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="8" cy="8" r="5.6" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M8 8 11 5.6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="M8 2.4v1.4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+        </button>
+        <div class="panel usage floating" id="usagePanel" role="menu" hidden>
+          <div class="row">
+            <button id="codexUsage" type="button" aria-describedby="codexUsageText">Codex</button>
+            <span id="codexUsageText" class="usageText" aria-live="polite"></span>
+          </div>
+          <div class="row">
+            <button id="geminiUsage" type="button" aria-describedby="geminiUsageText">Gemini</button>
+            <span id="geminiUsageText" class="usageText" aria-live="polite"></span>
+          </div>
+        </div>
+      </div>
       <button id="memoryToggle" class="iconBtn" type="button" aria-expanded="false" aria-controls="memoryPanel" aria-label="메모리" title="메모리">
         <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><rect x="4.2" y="4.2" width="7.6" height="7.6" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M6.4 4.2V2.4M9.6 4.2V2.4M6.4 13.6v-1.8M9.6 13.6v-1.8M11.8 6.4h1.8M11.8 9.6h1.8M2.4 6.4h1.8M2.4 9.6h1.8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
       </button>
       <button id="errorToggle" class="iconBtn danger" type="button" aria-expanded="false" aria-controls="errorPanel" aria-label="오류 로그" title="오류 로그" hidden>
         <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 2.4 14.3 13.2H1.7Z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M8 6.6v2.9" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><circle cx="8" cy="11.3" r="0.8" fill="currentColor"/></svg>
-        <span id="errorCount" class="badge">0</span>
+        <span id="errorCount" class="iconBadge">0</span>
       </button>
     </div>
     <p class="hint" id="sendHint">Ctrl+Enter 보내기 · Esc 중단</p>
     <button id="send" type="button">보내기</button>
-  </div>
-  <div class="panel usage" id="usagePanel" hidden>
-    <div class="row">
-      <button id="codexUsage" type="button" aria-describedby="codexUsageText">Codex</button>
-      <span id="codexUsageText" class="usageText" aria-live="polite"></span>
-    </div>
-    <div class="row">
-      <button id="geminiUsage" type="button" aria-describedby="geminiUsageText">Gemini</button>
-      <span id="geminiUsageText" class="usageText" aria-live="polite"></span>
-    </div>
   </div>
   <div class="panel" id="memoryPanel" hidden>
     <div class="panelHead">
@@ -963,7 +975,6 @@ function renderConversationHtml(webview: vscode.Webview): string {
     let lastRunStatus = 'idle';
     // Only one panel fits above the composer, so opening one closes the others.
     const composerPanels = [
-      [usagePanel, usageToggle],
       [memoryPanel, memoryToggle],
       [errorPanel, errorToggle],
     ];
@@ -1195,7 +1206,25 @@ function renderConversationHtml(webview: vscode.Webview): string {
       event.preventDefault();
       vscode.postMessage({ type: 'cancel' });
     });
-    usageToggle.addEventListener('click', () => openPanel(usagePanel, usageToggle));
+    // Usage floats over the chat on hover; the fetch still happens only on a button click.
+    const usageMenu = document.getElementById('usageMenu');
+    function showUsage(open) {
+      usagePanel.hidden = !open;
+      usageToggle.setAttribute('aria-expanded', String(open));
+    }
+    usageMenu.addEventListener('mouseenter', () => showUsage(true));
+    usageMenu.addEventListener('mouseleave', () => showUsage(false));
+    usageMenu.addEventListener('focusin', () => showUsage(true));
+    usageMenu.addEventListener('focusout', event => {
+      if (!usageMenu.contains(event.relatedTarget)) showUsage(false);
+    });
+    usageToggle.addEventListener('click', () => showUsage(usagePanel.hidden));
+    usageMenu.addEventListener('keydown', event => {
+      if (event.key !== 'Escape' || usagePanel.hidden) return;
+      event.stopPropagation();
+      showUsage(false);
+      usageToggle.focus();
+    });
     errorToggle.addEventListener('click', () => openPanel(errorPanel, errorToggle));
     errorClear.addEventListener('click', clearErrors);
     codexBtn.addEventListener('click', () => {
