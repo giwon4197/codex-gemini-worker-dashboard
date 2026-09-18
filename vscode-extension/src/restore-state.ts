@@ -13,25 +13,31 @@ export interface RestorableSession {
 
 export function resolveTrackedRunId(
   stored: string | undefined,
-  runs: RestorableRun[]
+  runs: RestorableRun[],
+  linkedToSession?: string
 ): string | undefined {
-  const storedMatch = stored
-    ? runs.find(run => run.runId === stored || run.actualRunId === stored)
-    : undefined;
+  const match = (id?: string) =>
+    id ? runs.find(run => run.runId === id || run.actualRunId === id) : undefined;
+  const storedMatch = match(stored);
   if (storedMatch) return storedMatch.runId;
-  // A fresh window never adopts a run it did not start; use "Show Active Run"
-  // to pick up work left over from a previous window.
-  return undefined;
+  // Only the resumed conversation's own run comes back. A run this window never
+  // tracked stays unlinked; use "Show Active Run" to pick it up deliberately.
+  return match(linkedToSession)?.runId;
 }
 
 export function resolveSessionId(
   stored: string | undefined,
-  sessions: RestorableSession[]
+  sessions: RestorableSession[],
+  resumeSessionId?: string
 ): string | undefined {
   if (stored && sessions.some(session => session.sessionId === stored)) {
     return stored;
   }
-  // No stored session means a fresh window, which starts a new conversation.
+  // A window without its own stored session resumes the workspace selection,
+  // never just the newest conversation on disk.
+  if (resumeSessionId && sessions.some(session => session.sessionId === resumeSessionId)) {
+    return resumeSessionId;
+  }
   return undefined;
 }
 

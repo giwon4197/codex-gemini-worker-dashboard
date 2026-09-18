@@ -105,10 +105,23 @@ export async function openFileDiff(
   await vscode.commands.executeCommand('vscode.diff', gitUri(fsPath, baseRef), head, title, { preview: true });
 }
 
-/** Opens `file` (workspace-relative or absolute) in an editor tab. */
+/**
+ * Opens `file` (workspace-relative or absolute) in an editor tab.
+ * A plan lists the files it intends to touch, so some of them do not exist yet;
+ * those get an explanation instead of the editor's raw "cannot open" error.
+ */
 export async function openWorkspaceFile(workspaceRoot: string, file: string): Promise<void> {
   const fsPath = path.isAbsolute(file) ? file : path.join(workspaceRoot, file);
-  await vscode.window.showTextDocument(vscode.Uri.file(fsPath), { preview: true });
+  const uri = vscode.Uri.file(fsPath);
+  try {
+    await vscode.workspace.fs.stat(uri);
+  } catch (error) {
+    // Only a missing file is expected here; anything else is a real failure worth surfacing.
+    if ((error as vscode.FileSystemError)?.code !== 'FileNotFound') throw error;
+    vscode.window.showInformationMessage(`${file}: 아직 없는 파일입니다. 승인 후 실행하면 생성됩니다.`);
+    return;
+  }
+  await vscode.window.showTextDocument(uri, { preview: true });
 }
 
 /**

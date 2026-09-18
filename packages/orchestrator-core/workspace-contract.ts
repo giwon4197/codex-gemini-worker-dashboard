@@ -950,6 +950,17 @@ export interface ConversationApproval {
   error?: string;
 }
 
+/** Per-call accounting for the memory injected into a Codex prompt. */
+export interface ResumeContextTelemetry {
+  memoryTokens: number;
+  recentTokens: number;
+  /** Tokens spent on retrieved repository memory (test hints). */
+  retrievedTokens: number;
+  droppedMessages: number;
+  droppedHints: number;
+  droppedSessions: number;
+}
+
 export interface ConversationMessage {
   id: string;
   sender: 'user' | 'codex';
@@ -965,6 +976,8 @@ export interface ConversationMessage {
     latestRunId?: string;
   };
   error?: string;
+  /** What the resume context cost on the call that produced this message. */
+  resumeTelemetry?: ResumeContextTelemetry;
 }
 
 export interface ConversationSession {
@@ -975,6 +988,42 @@ export interface ConversationSession {
   pendingApproval?: ConversationApproval;
   lastApproval?: ConversationApproval;
   linkedRunIds: string[];
+}
+
+/** Persisted pointer to the selection a new window should resume; never a run-state copy. */
+export interface WorkspaceResumeState {
+  schemaVersion: 1;
+  repositoryId: string;
+  activeSessionId?: string;
+  activeRunId?: string;
+  actualRunId?: string;
+  lastMessageId?: string;
+  updatedAt: string;
+}
+
+export interface WorkspaceResumeCandidate {
+  schemaVersion: 1;
+  authoritative: false;
+  derivedAt: string;
+  session?: {
+    sessionId: string;
+    updatedAt: string;
+    lastMessageId?: string;
+    pendingApproval: boolean;
+    linkedRunIds: string[];
+  };
+  run?: {
+    runId: string;
+    actualRunId?: string;
+    status: RunStatus;
+    updatedAt?: string;
+    requiresUserAction?: boolean;
+  };
+  reason:
+    | 'latest_session_with_linked_run'
+    | 'latest_session'
+    | 'latest_run'
+    | 'none';
 }
 
 export function validateSessionId(sessionId: unknown): boolean {

@@ -1,16 +1,26 @@
 {
-  "name": "codex-gemini-workspace",
-  "displayName": "Codex × Gemini",
-  "description": "Local Codex conversation and Gemini worker orchestration inside VS Code.",
+  "name": "coxgem",
+  "displayName": "coXgem",
+  "description": "Local AI conversation and background worker orchestration inside VS Code. Works with the Codex and Gemini CLIs; not affiliated with OpenAI or Google.",
   "version": "0.1.0",
-  "publisher": "codex-gemini",
+  "publisher": "coxgem",
   "private": true,
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/onseoh/codex-gemini-worker-dashboard.git",
+    "directory": "vscode-extension"
+  },
+  "bugs": {
+    "url": "https://github.com/onseoh/codex-gemini-worker-dashboard/issues"
+  },
+  "icon": "media/icon.png",
   "engines": {
     "vscode": "^1.106.0"
   },
   "categories": [
-    "Other"
+    "AI",
+    "Chat"
   ],
   "activationEvents": [
     "onStartupFinished"
@@ -20,94 +30,94 @@
     "viewsContainers": {
       "secondarySidebar": [
         {
-          "id": "codexGemini",
-          "title": "Codex × Gemini",
+          "id": "coxgem",
+          "title": "coXgem",
           "icon": "media/icon.svg"
         }
       ]
     },
     "views": {
-      "codexGemini": [
+      "coxgem": [
         {
           "type": "webview",
-          "id": "codexGemini.conversation",
+          "id": "coxgem.conversation",
           "name": "Conversation"
         }
       ]
     },
     "commands": [
       {
-        "command": "codexGemini.openWorkspace",
+        "command": "coxgem.openWorkspace",
         "title": "Open Workspace",
-        "category": "Codex × Gemini"
+        "category": "coXgem"
       },
       {
-        "command": "codexGemini.explainSelection",
+        "command": "coxgem.explainSelection",
         "title": "Explain Selection",
-        "category": "Codex × Gemini"
+        "category": "coXgem"
       },
       {
-        "command": "codexGemini.planFixForSelection",
+        "command": "coxgem.planFixForSelection",
         "title": "Plan Fix for Selection",
-        "category": "Codex × Gemini"
+        "category": "coXgem"
       },
       {
-        "command": "codexGemini.showActiveRun",
+        "command": "coxgem.showActiveRun",
         "title": "Show Active Run",
-        "category": "Codex × Gemini"
+        "category": "coXgem"
       },
       {
-        "command": "codexGemini.reviewChanges",
+        "command": "coxgem.reviewChanges",
         "title": "Review Changes",
-        "category": "Codex × Gemini"
+        "category": "coXgem"
       },
       {
-        "command": "codexGemini.refreshUsage",
+        "command": "coxgem.refreshUsage",
         "title": "Refresh Usage",
-        "category": "Codex × Gemini"
+        "category": "coXgem"
       },
       {
-        "command": "codexGemini.refreshTaskTree",
+        "command": "coxgem.refreshTaskTree",
         "title": "Refresh Task Tree",
-        "category": "Codex × Gemini",
+        "category": "coXgem",
         "icon": "$(refresh)"
       }
     ],
     "menus": {
       "editor/context": [
         {
-          "command": "codexGemini.explainSelection",
+          "command": "coxgem.explainSelection",
           "when": "editorHasSelection",
-          "group": "codexGemini@1"
+          "group": "coxgem@1"
         },
         {
-          "command": "codexGemini.planFixForSelection",
+          "command": "coxgem.planFixForSelection",
           "when": "editorHasSelection",
-          "group": "codexGemini@2"
+          "group": "coxgem@2"
         }
       ],
       "view/title": [
         {
-          "command": "codexGemini.refreshTaskTree",
-          "when": "view == codexGemini.conversation",
+          "command": "coxgem.refreshTaskTree",
+          "when": "view == coxgem.conversation",
           "group": "navigation"
         }
       ]
     },
     "configuration": {
-      "title": "Codex × Gemini",
+      "title": "coXgem",
       "properties": {
-        "codexGemini.codexModel": {
+        "coxgem.codexModel": {
           "type": "string",
           "default": "",
           "markdownDescription": "계획·대화 단계에서 `codex exec --model` 에 전달할 모델 id. 비워두면 `model-tiers.json` 의 `codex_default_model` 을 씁니다."
         },
-        "codexGemini.codexChatModel": {
+        "coxgem.codexChatModel": {
           "type": "string",
           "default": "",
-          "markdownDescription": "워커를 만들지 않는 설명 전용 요청(Explain Selection)에 쓸 모델 id. 비워두면 `codexGemini.codexModel` 을 따릅니다."
+          "markdownDescription": "워커를 만들지 않는 설명 전용 요청(Explain Selection)에 쓸 모델 id. 비워두면 `coxgem.codexModel` 을 따릅니다."
         },
-        "codexGemini.workerTier": {
+        "coxgem.workerTier": {
           "type": "string",
           "enum": ["fast", "normal", "advanced", "reasoning"],
           "default": "normal",
@@ -118,8 +128,9 @@
   },
   "scripts": {
     "compile": "node esbuild.mjs",
+    "typecheck": "tsc --noEmit -p .",
     "vscode:prepublish": "npm run compile",
-    "package": "vsce package --allow-missing-repository --no-dependencies",
+    "package": "vsce package --no-dependencies",
     "test": "node --experimental-strip-types --test src/workspace-context.test.ts src/core-host.test.ts src/ids.test.ts src/graph-tree.test.ts src/restore-state.test.ts src/protocol.test.ts src/webview-script.test.ts"
   },
   "vsce": {

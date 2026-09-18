@@ -16,7 +16,7 @@ async function pushWorkerSettings(): Promise<void> {
     void vscode.window.showWarningMessage('작업 폴더에 codex-router.ps1이 없어 워커 설정을 저장하지 않았습니다.');
     return;
   }
-  const config = vscode.workspace.getConfiguration('codexGemini');
+  const config = vscode.workspace.getConfiguration('coxgem');
   const result = await syncWorkerSettings(root, {
     tier: config.get<string>('workerTier') || 'normal',
     codexModel: config.get<string>('codexModel'),
@@ -52,8 +52,8 @@ export function activate(context: vscode.ExtensionContext): void {
       // Only a user edit writes the file; activation never overwrites what the web UI saved.
       vscode.workspace.onDidChangeConfiguration(event => {
         if (
-          event.affectsConfiguration('codexGemini.workerTier') ||
-          event.affectsConfiguration('codexGemini.codexModel')
+          event.affectsConfiguration('coxgem.workerTier') ||
+          event.affectsConfiguration('coxgem.codexModel')
         ) {
           run(pushWorkerSettings)();
         }
@@ -66,7 +66,7 @@ export function activate(context: vscode.ExtensionContext): void {
       vscode.commands.registerCommand(COMMANDS.refreshUsage, run(() => provider.refreshUsage()))
     );
 
-    void provider.startFreshWindow();
+    void provider.restoreWindow();
   } catch (error) {
     void vscode.window.showErrorMessage(sanitizeUiError(error, getWorkspaceRoot()));
   }

@@ -2,6 +2,7 @@
   "name": "@codex-gemini/orchestrator-core",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "description": "Orchestrator control plane shared by the web workspace and the VS Code extension.",
   "engines": {

@@ -4,15 +4,38 @@ import { spawn } from 'node:child_process';
 import type { ConversationSession, LiveWorkerData } from '../../packages/orchestrator-core/workspace-contract.ts';
 import { defaultCodexRunner, evaluateCodexConversation } from '../../packages/orchestrator-core/codex-conversation.ts';
 import type { CodexRunnerFn } from '../../packages/orchestrator-core/codex-conversation.ts';
-import { approveConversationPlan, getConversationSession, getProjectWorkGraph, getRunDetails, listCompactRuns, listConversationSessions, retryRun, saveConversationSession } from '../../packages/orchestrator-core/workspace-store.ts';
+import { approveConversationPlan, getConversationSession, getProjectWorkGraph, getRunDetails, getWorkspaceResumeState, listCompactRuns, listConversationSessions, retryRun, saveConversationSession, saveWorkspaceResumeState } from '../../packages/orchestrator-core/workspace-store.ts';
 import type { SpawnerFn } from '../../packages/orchestrator-core/workspace-store.ts';
 import { getCodexDailyUsage } from '../../packages/orchestrator-core/codex-usage.ts';
 import { getGeminiQuota } from '../../packages/orchestrator-core/gemini-quota.ts';
 import type { ProjectWorkGraphData } from '../../packages/orchestrator-core/project-event-graph.ts';
-import { formatUsageDetail, formatUsageLine, summarizeRunStatus, type UsageWindow } from './workspace-context.ts';
+import { formatUsageDetail, formatUsageLine, isBranchMerged, readGitIdentity, summarizeRunStatus, type UsageWindow } from './workspace-context.ts';
 import { sanitizeSpawnEnv } from '../../packages/orchestrator-core/spawn-env.ts';
 import { sanitizeText } from '../../packages/orchestrator-core/workspace-sanitize.ts';
-import { POST as saveWorkerSettingsRequest } from '../../packages/orchestrator-core/worker-settings.ts';
+import {
+  POST as saveWorkerSettingsRequest,
+  EXPLANATION_DETAILS,
+  PLAN_PRESENTATIONS,
+  RESPONSE_LANGUAGES,
+  deleteWorkerPreference,
+  readWorkerMemory,
+  resetWorkerPreferences,
+  setWorkerMemoryEnabled,
+  setWorkerPreference,
+} from '../../packages/orchestrator-core/worker-settings.ts';
+import type {
+  WorkerMemorySettings,
+  WorkerPreferenceKey,
+} from '../../packages/orchestrator-core/worker-settings.ts';
+import {
+  clearRepositoryMemory,
+  readRepositoryMemory,
+  rebuildRepositoryMemory,
+} from '../../packages/orchestrator-core/repository-memory.ts';
+import type {
+  TaskHistoryValue,
+  TestMapValue,
+} from '../../packages/orchestrator-core/repository-memory.ts';
 import { countUnlinkedActiveRuns, resolveSessionId, resolveTrackedRunId } from './restore-state.ts';
 import { runCompletionLines, runFailureLines, sessionTitle, type SessionSummary, type WebviewMessage } from './protocol.ts';
 
@@ -33,8 +56,10 @@ export async function restoreWorkspaceBindings(
   return withWorkspaceRoot(repoRoot, async () => {
     const runs = await listCompactRuns(repoRoot);
     const sessions = await listConversationSessions(repoRoot);
-    const runId = resolveTrackedRunId(stored.runId, runs);
-    const sessionId = resolveSessionId(stored.sessionId, sessions);
+    const resume = await getWorkspaceResumeState(repoRoot);
+    const sessionId = resolveSessionId(stored.sessionId, sessions, resume?.activeSessionId);
+    const resumedSession = sessions.find(session => session.sessionId === sessionId);
+    const runId = resolveTrackedRunId(stored.runId, runs, resumedSession?.linkedRunIds.at(-1));
     const run = runs.find(item => item.runId === runId || item.actualRunId === runId);
     return {
       sessionId,
@@ -47,6 +72,23 @@ export async function restoreWorkspaceBindings(
       }),
     };
   });
+}
+
+/** Records the conversation the user selected so the next window resumes it. */
+export async function rememberActiveSession(
+  repoRoot: string,
+  session: ConversationSession
+): Promise<void> {
+  await withWorkspaceRoot(repoRoot, () =>
+    saveWorkspaceResumeState(
+      {
+        activeSessionId: session.sessionId,
+        lastMessageId: session.messages.at(-1)?.id,
+        activeRunId: session.linkedRunIds.at(-1),
+      },
+      repoRoot
+    )
+  );
 }
 
 /**
@@ -90,6 +132,139 @@ export async function syncWorkerSettings(
     const body = (await response.json().catch(() => ({}))) as { error?: string };
     return { ok: false, error: body.error || `설정 저장 실패 (${response.status})` };
   });
+}
+
+/** Explicit presentation preferences the extension can show, change, and delete. */
+export const MEMORY_PREFERENCES: Array<{
+  key: WorkerPreferenceKey;
+  label: string;
+  values: Array<string | boolean>;
+}> = [
+  { key: 'responseLanguage', label: '응답 언어', values: [...RESPONSE_LANGUAGES] },
+  { key: 'explanationDetail', label: '설명 상세도', values: [...EXPLANATION_DETAILS] },
+  { key: 'planPresentation', label: '계획 표현', values: [...PLAN_PRESENTATIONS] },
+  { key: 'preferTargetedTests', label: 'Targeted test 우선 표시', values: [true, false] },
+  { key: 'completionNotifications', label: '완료 알림', values: [true, false] },
+];
+
+export type MemoryMutation =
+  | { operation: 'setEnabled'; enabled: boolean }
+  | { operation: 'setPreference'; key: WorkerPreferenceKey; value: unknown }
+  | { operation: 'deletePreference'; key: WorkerPreferenceKey }
+  | { operation: 'reset' };
+
+/** Reads the workspace worker-settings.json memory block shared with the web UI. */
+export async function readWorkspaceMemory(repoRoot: string): Promise<WorkerMemorySettings> {
+  return withWorkspaceRoot(repoRoot, async () => readWorkerMemory());
+}
+
+/** Applies one explicit user mutation; inferred values never reach this path. */
+export async function mutateWorkspaceMemory(
+  repoRoot: string,
+  mutation: MemoryMutation
+): Promise<{ ok: boolean; memory?: WorkerMemorySettings; error?: string }> {
+  return withWorkspaceRoot(repoRoot, async () => {
+    try {
+      switch (mutation.operation) {
+        case 'setEnabled':
+          return { ok: true, memory: setWorkerMemoryEnabled(mutation.enabled) };
+        case 'setPreference':
+          return { ok: true, memory: setWorkerPreference(mutation.key, mutation.value as never) };
+        case 'deletePreference':
+          return { ok: true, memory: deleteWorkerPreference(mutation.key) };
+        case 'reset':
+          return { ok: true, memory: resetWorkerPreferences() };
+      }
+    } catch (error) {
+      const message = sanitizeUiError(error, repoRoot);
+      return {
+        ok: false,
+        error: message === 'INVALID_MEMORY_MUTATION' ? '유효하지 않은 메모리 설정 요청입니다.' : message,
+      };
+    }
+  });
+}
+
+/** One display row per repository memory record, with where it came from. */
+export interface RepositoryMemoryRow {
+  id: string;
+  label: string;
+  provenance: string;
+  stale: boolean;
+}
+
+export interface RepositoryMemoryView {
+  updatedAt: string;
+  headCommit?: string;
+  staleAgainstHead: boolean;
+  staleRecords: number;
+  rows: RepositoryMemoryRow[];
+}
+
+function toRow(record: {
+  id: string;
+  confidence: string;
+  source: { type: string; runId: string; baseCommit?: string };
+  lastValidatedAt: string;
+  value: TaskHistoryValue | TestMapValue;
+}): RepositoryMemoryRow {
+  const value = record.value;
+  const label =
+    'file' in value
+      ? `${value.file} · ${value.commands.join(', ') || '검증 명령 없음'}`
+      : `${value.prompt.slice(0, 60)} · ${value.changedFiles.length}개 파일${
+          value.merged === true ? ' · merged' : value.merged === false ? ' · unmerged' : ''
+        }`;
+  return {
+    id: record.id,
+    label,
+    provenance: `${record.confidence} · ${record.source.type}:${record.source.runId}${
+      record.source.baseCommit ? ` · ${record.source.baseCommit}` : ''
+    } · ${record.lastValidatedAt.slice(0, 16).replace('T', ' ')}`,
+    stale: record.confidence === 'stale',
+  };
+}
+
+async function currentHeadCommit(repoRoot: string): Promise<string | undefined> {
+  return (await readGitIdentity(repoRoot, createGitRunner())).head;
+}
+
+/** Rebuilds against the current HEAD, asking git which integration branches landed. */
+async function rebuildMemory(repoRoot: string): Promise<void> {
+  const headCommit = await currentHeadCommit(repoRoot);
+  const git = createGitRunner();
+  await rebuildRepositoryMemory({
+    repoRoot,
+    headCommit,
+    isMerged: branch => isBranchMerged(repoRoot, branch, git),
+  });
+}
+
+/** Reads the repository memory revalidated against the current checkout. */
+export async function readRepositoryMemoryView(repoRoot: string): Promise<RepositoryMemoryView> {
+  const headCommit = await currentHeadCommit(repoRoot);
+  const snapshot = await withWorkspaceRoot(repoRoot, () =>
+    readRepositoryMemory({ repoRoot, headCommit })
+  );
+  const rows = [...snapshot.taskHistory, ...snapshot.testMap].map(toRow);
+  return {
+    updatedAt: snapshot.updatedAt,
+    headCommit: snapshot.headCommit,
+    staleAgainstHead: snapshot.staleAgainstHead,
+    staleRecords: rows.filter(row => row.stale).length,
+    rows,
+  };
+}
+
+/** Rebuilds the memory from the finished runs on disk. */
+export async function rebuildRepositoryMemoryView(repoRoot: string): Promise<RepositoryMemoryView> {
+  await withWorkspaceRoot(repoRoot, () => rebuildMemory(repoRoot));
+  return readRepositoryMemoryView(repoRoot);
+}
+
+/** Deletes everything the repository memory holds for this workspace. */
+export async function forgetRepositoryMemory(repoRoot: string): Promise<void> {
+  await withWorkspaceRoot(repoRoot, () => clearRepositoryMemory(repoRoot));
 }
 
 export interface RunWorkerView {
@@ -363,6 +538,8 @@ export async function appendRunCompletion(
     session.messages.push({ id, sender: 'codex', text, timestamp, intentType: 'chat' });
     session.updatedAt = timestamp;
     await saveConversationSession(session, repoRoot);
+    // A finished run is new evidence; fold it into the repository memory right away.
+    await rebuildMemory(repoRoot);
     return session;
   });
 }

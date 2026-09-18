@@ -14,7 +14,14 @@ import {
   getRunStatusText,
   listSessionSummaries,
   loadSession,
+  MEMORY_PREFERENCES,
+  mutateWorkspaceMemory,
+  readRepositoryMemoryView,
+  readWorkspaceMemory,
+  rebuildRepositoryMemoryView,
+  forgetRepositoryMemory,
   refreshCodexUsageLine,
+  rememberActiveSession,
   refreshGeminiUsageLine,
   restoreWorkspaceBindings,
   sanitizeUiError,
@@ -36,6 +43,9 @@ import {
 } from '../workspace-context';
 import { ACTIVE_RUN_STATUSES } from '../graph-tree';
 import type { RunStatusBar } from '../status-bar';
+import type { MemoryMutation } from '../core-host';
+
+const MEMORY_OPERATIONS = new Set(['setEnabled', 'setPreference', 'deletePreference', 'reset']);
 
 export interface RunFollowUp {
   /** Shares the conversation webview so the Task Graph panel can render inside it. */
@@ -210,6 +220,37 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
       }
       if (message.type === 'cancel') {
         await this.cancel();
+        return;
+      }
+      if (message.type === 'memoryGet') {
+        await this.postMemory();
+        return;
+      }
+      if (message.type === 'memoryMutate') {
+        const root = this.requireRoot();
+        if (!root) return;
+        const operation = message.mutation?.operation;
+        if (!MEMORY_OPERATIONS.has(operation)) {
+          this.post({ type: 'error', message: '유효하지 않은 메모리 설정 요청입니다.' });
+          return;
+        }
+        const result = await mutateWorkspaceMemory(root, message.mutation as MemoryMutation);
+        if (!result.ok) this.post({ type: 'error', message: result.error || '메모리 설정을 저장하지 못했습니다.' });
+        await this.postMemory();
+        return;
+      }
+      if (message.type === 'repoMemoryRebuild') {
+        const root = this.requireRoot();
+        if (!root) return;
+        await rebuildRepositoryMemoryView(root);
+        await this.postMemory();
+        return;
+      }
+      if (message.type === 'repoMemoryClear') {
+        const root = this.requireRoot();
+        if (!root) return;
+        await forgetRepositoryMemory(root);
+        await this.postMemory();
       }
     } catch (error) {
       this.reportError(error);
@@ -226,7 +267,7 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
     // Decision 9: during a run every message is a question, so no second plan card appears.
     const forbidWorkers = options.forbidWorkers || this.runInProgress();
     this.setBusy(true, 'Codex에 요청하는 중 (Esc: 중단)');
-    const config = vscode.workspace.getConfiguration('codexGemini');
+    const config = vscode.workspace.getConfiguration('coxgem');
     let liveOutput = '';
     const abort = new AbortController();
     this.chatAbort = abort;
@@ -304,11 +345,16 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
     await this.postSessions();
   }
 
-  /** A freshly opened window starts a new conversation instead of resuming the last one. */
-  async startFreshWindow(): Promise<void> {
-    await this.startNewSession();
+  /** Reopening a window resumes the workspace selection; nothing is started over. */
+  async restoreWindow(): Promise<void> {
     if (this.view) await this.restoreFromDisk();
     else await this.syncRunState();
+  }
+
+  /** An explicit new conversation, or a different workspace folder, starts over. */
+  async startFreshWindow(): Promise<void> {
+    await this.startNewSession();
+    await this.restoreWindow();
   }
 
   private async switchSession(sessionId: string): Promise<void> {
@@ -321,6 +367,7 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
     }
     this.sessionId = session.sessionId;
     await this.context.workspaceState.update(SESSION_STATE_KEY, session.sessionId);
+    await rememberActiveSession(root, session);
     this.post({ type: 'session', sessionId: session.sessionId, messages: toWebviewMessages(session) });
     await this.refreshRunStatus(Boolean(session.pendingApproval));
     await this.syncGraphToSession(session);
@@ -462,6 +509,31 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
     this.post({ type: 'runStatus', text: restored.status });
     this.postCachedUsage();
     await this.postSessions();
+  }
+
+  /** Explicit preferences and repository memory, sent when the panel is opened or changed. */
+  private async postMemory(): Promise<void> {
+    const root = this.requireRoot();
+    if (!root) return;
+    const memory = await readWorkspaceMemory(root);
+    const repository = await readRepositoryMemoryView(root);
+    this.post({
+      type: 'memory',
+      enabled: memory.enabled,
+      preferences: MEMORY_PREFERENCES.map(preference => ({
+        key: preference.key,
+        label: preference.label,
+        values: preference.values,
+        value: memory.preferences[preference.key]?.value,
+        updatedAt: memory.preferences[preference.key]?.updatedAt,
+      })),
+      repository: {
+        updatedAt: repository.updatedAt,
+        staleAgainstHead: repository.staleAgainstHead,
+        staleRecords: repository.staleRecords,
+        rows: repository.rows,
+      },
+    });
   }
 
   private postCachedUsage(): void {
@@ -622,6 +694,12 @@ function renderConversationHtml(webview: vscode.Webview): string {
     .hint { font-size: 11px; color: var(--vscode-descriptionForeground); margin: 4px 0 0; }
     .chip { display: inline-flex; align-items: center; gap: 4px; margin-top: 8px; cursor: pointer; }
     .chip input { margin: 0; }
+    .memoryRow { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin: 4px 0; }
+    .memoryRow > span:first-child { min-width: 96px; }
+    .memoryList { margin: 4px 0; padding-left: 16px; font-size: 12px; }
+    .memoryList li { margin-bottom: 4px; }
+    .memoryList .meta { white-space: normal; }
+    #memoryBody h3 { font-size: 12px; margin: 10px 0 4px; }
     .sendRow { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
     .sendRow button { margin: 4px 0 0; }
     #graphPanel { margin-bottom: 6px; border: 1px solid var(--vscode-widget-border, var(--vscode-contrastBorder, transparent)); border-radius: 3px; }
@@ -735,6 +813,10 @@ function renderConversationHtml(webview: vscode.Webview): string {
         </details>
       </section>
     </div>
+  </details>
+  <details id="memoryPanel">
+    <summary>메모리<span id="memorySummary" class="meta"></span></summary>
+    <div class="body" id="memoryBody"><p class="empty">열면 불러옵니다.</p></div>
   </details>
   <div class="meta"><span id="context">workspace 연결 대기</span> · <span id="status" role="status" aria-live="polite">idle</span></div>
   <div class="messages" id="messages" aria-live="polite" aria-label="대화"></div>
@@ -892,8 +974,92 @@ function renderConversationHtml(webview: vscode.Webview): string {
       }
       messagesEl.scrollTop = messagesEl.scrollHeight;
     }
+    const memoryPanel = document.getElementById('memoryPanel');
+    const memoryBody = document.getElementById('memoryBody');
+    const memorySummary = document.getElementById('memorySummary');
+    let memoryLoaded = false;
+    // Git and disk reads happen only once the user actually opens the panel.
+    memoryPanel.addEventListener('toggle', () => {
+      if (memoryPanel.open && !memoryLoaded) {
+        memoryLoaded = true;
+        vscode.postMessage({ type: 'memoryGet' });
+      }
+    });
+    function el(tag, text, cls) {
+      const node = document.createElement(tag);
+      if (text !== undefined) node.textContent = text;
+      if (cls) node.className = cls;
+      return node;
+    }
+    function button(label, onClick, disabled) {
+      const node = el('button', label);
+      node.type = 'button';
+      node.disabled = Boolean(disabled);
+      node.addEventListener('click', onClick);
+      return node;
+    }
+    function mutate(mutation) {
+      vscode.postMessage({ type: 'memoryMutate', mutation });
+    }
+    function renderMemory(data) {
+      memoryBody.replaceChildren();
+      const repo = data.repository;
+      memorySummary.textContent = (data.enabled ? ' · 켬' : ' · 끔') + ' · 저장소 기억 ' + repo.rows.length + '건';
+
+      const toggle = el('label', '', 'chip');
+      const box = document.createElement('input');
+      box.type = 'checkbox';
+      box.checked = data.enabled;
+      box.addEventListener('change', () => mutate({ operation: 'setEnabled', enabled: box.checked }));
+      toggle.append(box, ' 선호 메모리 사용 · 표시 선호만 저장하며 승인·정책에는 적용하지 않습니다');
+      memoryBody.append(toggle);
+
+      for (const pref of data.preferences) {
+        const row = el('div', '', 'memoryRow');
+        const select = document.createElement('select');
+        select.disabled = !data.enabled;
+        select.setAttribute('aria-label', pref.label);
+        select.append(new Option('선택 안 함', ''));
+        for (const value of pref.values) select.append(new Option(String(value), String(value)));
+        select.value = pref.value === undefined ? '' : String(pref.value);
+        select.addEventListener('change', () => {
+          if (!select.value) return;
+          const raw = pref.values.find(value => String(value) === select.value);
+          mutate({ operation: 'setPreference', key: pref.key, value: raw });
+        });
+        const stamp = pref.updatedAt
+          ? '명시적 사용자 · 확인됨 · ' + pref.updatedAt.slice(0, 16).replace('T', ' ')
+          : '저장되지 않음';
+        row.append(
+          el('span', pref.label),
+          select,
+          button('삭제', () => mutate({ operation: 'deletePreference', key: pref.key }), pref.value === undefined),
+          el('span', stamp, 'meta')
+        );
+        memoryBody.append(row);
+      }
+      memoryBody.append(button('선호 초기화', () => mutate({ operation: 'reset' })));
+
+      const head = repo.rows.length
+        ? '기억 ' + repo.rows.length + '건 · stale ' + repo.staleRecords + '건 · ' +
+          repo.updatedAt.slice(0, 16).replace('T', ' ') + (repo.staleAgainstHead ? ' · 다른 HEAD 기준' : '')
+        : '저장된 저장소 기억이 없습니다. 완료된 Run이 생기면 자동으로 채워집니다.';
+      const actions = el('div', '', 'memoryRow');
+      actions.append(
+        button('완료된 Run에서 다시 스캔', () => vscode.postMessage({ type: 'repoMemoryRebuild' })),
+        button('저장소 기억 삭제', () => vscode.postMessage({ type: 'repoMemoryClear' }), repo.rows.length === 0)
+      );
+      const list = el('ul', '', 'memoryList');
+      for (const row of repo.rows) {
+        const item = el('li', (row.stale ? '⚠ ' : '') + row.label);
+        item.append(el('div', row.provenance, 'meta'));
+        list.append(item);
+      }
+      memoryBody.append(el('h3', '저장소 기억'), el('p', head, 'meta'), actions, list);
+    }
     window.addEventListener('message', event => {
       const data = event.data;
+      if (data.type === 'memory') renderMemory(data);
       if (data.type === 'session') render(data.messages || []);
       if (data.type === 'sessions') renderSessions(data.items || [], data.activeSessionId);
       if (data.type === 'error') { clearPending(); setError(data.message); }

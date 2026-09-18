@@ -258,6 +258,26 @@ export async function readGitIdentity(
   };
 }
 
+/**
+ * True when the branch tip is already reachable from the default branch. Only a
+ * merged result may later count as a golden patch, so unknown stays false.
+ */
+export async function isBranchMerged(
+  workspaceRoot: string,
+  branch: string,
+  runner: GitRunner
+): Promise<boolean> {
+  // The name reaches git as argv; refuse anything that could read as an option.
+  if (!/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(branch)) return false;
+  for (const base of ['main', 'master']) {
+    const exists = await runner(['rev-parse', '--verify', '--quiet', `refs/heads/${base}`], workspaceRoot);
+    if (exists.exitCode !== 0) continue;
+    const merged = await runner(['merge-base', '--is-ancestor', branch, base], workspaceRoot);
+    return merged.exitCode === 0;
+  }
+  return false;
+}
+
 export function selectedTestFailures(ctx: EditorContext): string[] {
   const file = (ctx.activeFile || '').replace(/\\/g, '/');
   const isTestFile =

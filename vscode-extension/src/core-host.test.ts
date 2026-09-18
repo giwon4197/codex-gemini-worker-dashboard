@@ -3,10 +3,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { appendRunCompletion, cancelRun, chatWithCore, getActiveRunSummary, getReviewSummary, getRunStatusText, getWorkGraph, restoreWorkspaceBindings, sanitizeUiError, syncWorkerSettings, toWebviewMessages, toWorkerView, withWorkspaceRoot } from './core-host.ts';
+import { appendRunCompletion, cancelRun, chatWithCore, forgetRepositoryMemory, getActiveRunSummary, getReviewSummary, getRunStatusText, getWorkGraph, mutateWorkspaceMemory, readRepositoryMemoryView, readWorkspaceMemory, rebuildRepositoryMemoryView, restoreWorkspaceBindings, sanitizeUiError, syncWorkerSettings, toWebviewMessages, toWorkerView, withWorkspaceRoot } from './core-host.ts';
 import { listCompactRuns, saveCompactRunState, saveConversationSession } from '../../packages/orchestrator-core/workspace-store.ts';
 import { CODEX_ABORTED_MESSAGE, defaultCodexRunner } from '../../packages/orchestrator-core/codex-conversation.ts';
 import { createEmptyConversationSession } from '../../packages/orchestrator-core/workspace-contract.ts';
+import { readRepositoryMemory } from '../../packages/orchestrator-core/repository-memory.ts';
+import { isBranchMerged } from './workspace-context.ts';
 
 void describe('vscode core host', () => {
   let repo: string;
@@ -63,6 +65,177 @@ void describe('vscode core host', () => {
     assert.equal(restored.status, 'idle');
     assert.equal(restored.runId, undefined);
     assert.equal(restored.sessionId, undefined);
+  });
+
+  void test('a reopened window resumes the stored selection and its linked run', async () => {
+    const session = createEmptyConversationSession();
+    session.linkedRunIds.push('20260101-120000-abcdef12');
+    await saveConversationSession(session, repo);
+    for (const [runId, status] of [
+      ['20260101-120000-abcdef12', 'awaiting_review'],
+      ['20260101-130000-beefcafe', 'running'],
+    ] as const) {
+      await saveCompactRunState(
+        {
+          runId,
+          prompt: '작업',
+          status,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:10:00.000Z',
+          requiresUserAction: status === 'awaiting_review',
+          tasksCount: 1,
+          activeWorkersCount: 0,
+          completedTasksCount: 0,
+        },
+        repo
+      );
+    }
+
+    // A window with nothing in workspaceState: resume state is the only source.
+    const restored = await restoreWorkspaceBindings(repo, {});
+    assert.equal(restored.sessionId, session.sessionId);
+    assert.equal(restored.runId, '20260101-120000-abcdef12');
+    // The newer run belongs to no resumed conversation, so it is never adopted.
+    assert.notEqual(restored.runId, '20260101-130000-beefcafe');
+    assert.equal(restored.status, 'action required');
+  });
+
+  void test('resume state written for another repository is ignored', async () => {
+    const session = createEmptyConversationSession();
+    await saveConversationSession(session, repo);
+    const statePath = path.join(repo, '.agent', 'dashboard-state', 'workspace', 'current.json');
+    const state = JSON.parse(fs.readFileSync(statePath, 'utf8')) as Record<string, unknown>;
+    fs.writeFileSync(statePath, JSON.stringify({ ...state, repositoryId: 'deadbeefdeadbeef' }), 'utf8');
+
+    const restored = await restoreWorkspaceBindings(repo, {});
+    assert.equal(restored.sessionId, undefined);
+    assert.equal(restored.runId, undefined);
+  });
+
+  void test('repository memory rows carry provenance and can be rebuilt or forgotten', async () => {
+    const runId = '20260101-120000-abcdef12';
+    fs.writeFileSync(path.join(repo, 'button.ts'), 'export const a = 1;\n', 'utf8');
+    await saveCompactRunState(
+      {
+        runId,
+        prompt: '버튼 오류 수정',
+        status: 'completed',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:10:00.000Z',
+        requiresUserAction: false,
+        tasksCount: 1,
+        activeWorkersCount: 0,
+        completedTasksCount: 1,
+      },
+      repo
+    );
+    const workerDir = path.join(repo, '.agent', 'runs', runId, 'workers');
+    fs.mkdirSync(workerDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(workerDir, 'TASK-1.json'),
+      JSON.stringify({
+        runId,
+        taskId: 'TASK-1',
+        task: '수정',
+        model: 'gemini',
+        status: 'completed',
+        startedAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:05:00.000Z',
+        elapsedSeconds: 300,
+        recentLogs: [],
+        changedFiles: ['button.ts'],
+        verification: { commands: [{ command: 'npm test', exitCode: 0, status: 'PASS' }] },
+      }),
+      'utf8'
+    );
+
+    assert.deepEqual((await readRepositoryMemoryView(repo)).rows, []);
+
+    const rebuilt = await rebuildRepositoryMemoryView(repo);
+    assert.equal(rebuilt.rows.length, 2, 'one task history row and one test mapping row');
+    assert.ok(rebuilt.rows.every(row => row.provenance.includes(runId)));
+    assert.equal(rebuilt.staleRecords, 0);
+
+    fs.writeFileSync(path.join(repo, 'button.ts'), 'export const a = 2;\n', 'utf8');
+    assert.equal((await readRepositoryMemoryView(repo)).staleRecords, 2);
+
+    await forgetRepositoryMemory(repo);
+    assert.deepEqual((await readRepositoryMemoryView(repo)).rows, []);
+  });
+
+  void test('isBranchMerged asks git only with a safe branch name and a real base', async () => {
+    const calls: string[][] = [];
+    const runner = (answers: Record<string, number>) => async (args: string[]) => {
+      calls.push(args);
+      return { stdout: '', exitCode: answers[args.join(' ')] ?? 1 };
+    };
+
+    assert.equal(
+      await isBranchMerged(repo, 'agent/run-1', runner({
+        'rev-parse --verify --quiet refs/heads/main': 0,
+        'merge-base --is-ancestor agent/run-1 main': 0,
+      })),
+      true
+    );
+    assert.equal(
+      await isBranchMerged(repo, 'agent/run-1', runner({
+        'rev-parse --verify --quiet refs/heads/master': 0,
+        'merge-base --is-ancestor agent/run-1 master': 1,
+      })),
+      false
+    );
+    // Neither default branch exists: unknown is reported as not merged.
+    assert.equal(await isBranchMerged(repo, 'agent/run-1', runner({})), false);
+
+    calls.length = 0;
+    assert.equal(await isBranchMerged(repo, '--upload-pack=x', runner({})), false);
+    assert.deepEqual(calls, [], 'an option-looking name never reaches git');
+  });
+
+  void test('a finished run is folded into the repository memory right away', async () => {
+    const runId = '20260101-120000-abcdef12';
+    const session = createEmptyConversationSession();
+    session.linkedRunIds.push(runId);
+    await saveConversationSession(session, repo);
+    fs.writeFileSync(path.join(repo, 'button.ts'), 'export const a = 1;', 'utf8');
+    await saveCompactRunState(
+      {
+        runId,
+        prompt: '버튼 오류 수정',
+        status: 'completed',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:10:00.000Z',
+        requiresUserAction: false,
+        tasksCount: 1,
+        activeWorkersCount: 0,
+        completedTasksCount: 1,
+      },
+      repo
+    );
+    const workerDir = path.join(repo, '.agent', 'runs', runId, 'workers');
+    fs.mkdirSync(workerDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(workerDir, 'TASK-1.json'),
+      JSON.stringify({
+        runId,
+        taskId: 'TASK-1',
+        task: '수정',
+        model: 'gemini',
+        status: 'completed',
+        startedAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:05:00.000Z',
+        elapsedSeconds: 300,
+        recentLogs: [],
+        changedFiles: ['button.ts'],
+      }),
+      'utf8'
+    );
+
+    const updated = await appendRunCompletion(repo, session.sessionId, runId);
+    assert.ok(updated?.messages.some(message => message.id === `run-summary-${runId}`));
+    const memory = await withWorkspaceRoot(repo, () => readRepositoryMemory({ repoRoot: repo }));
+    assert.equal(memory.taskHistory.length, 1);
+    assert.equal(memory.taskHistory[0].value.runId, runId);
   });
 
   void test('sanitizeUiError redacts repository paths', () => {
@@ -146,6 +319,44 @@ void describe('vscode core host settings', () => {
     const bad = await syncWorkerSettings(repo, { tier: 'nope' });
     assert.equal(bad.ok, false);
     assert.match(bad.error || '', /모델 등급/);
+  });
+
+  void test('workspace memory mutations stay explicit and keep worker settings', async () => {
+    await syncWorkerSettings(repo, { tier: 'reasoning' });
+    assert.deepEqual(await readWorkspaceMemory(repo), {
+      schemaVersion: 1,
+      enabled: true,
+      preferences: {},
+    });
+
+    const saved = await mutateWorkspaceMemory(repo, {
+      operation: 'setPreference',
+      key: 'responseLanguage',
+      value: 'ko',
+    });
+    assert.equal(saved.ok, true);
+    assert.equal(saved.memory?.preferences.responseLanguage?.value, 'ko');
+    assert.equal(saved.memory?.preferences.responseLanguage?.provenance, 'explicit_user');
+    assert.equal(
+      (JSON.parse(fs.readFileSync(path.join(repo, 'worker-settings.json'), 'utf8')) as { tier: string }).tier,
+      'reasoning'
+    );
+
+    const rejected = await mutateWorkspaceMemory(repo, {
+      operation: 'setPreference',
+      key: 'responseLanguage',
+      value: 'C:/Users/test/secret.txt',
+    });
+    assert.equal(rejected.ok, false);
+    assert.doesNotMatch(rejected.error || '', /secret\.txt/);
+    assert.equal((await readWorkspaceMemory(repo)).preferences.responseLanguage?.value, 'ko');
+
+    const removed = await mutateWorkspaceMemory(repo, {
+      operation: 'deletePreference',
+      key: 'responseLanguage',
+    });
+    assert.equal(removed.memory?.preferences.responseLanguage, undefined);
+    assert.equal(removed.memory?.enabled, true);
   });
 
   void test('toWorkerView flattens sanitized logs into display lines', () => {

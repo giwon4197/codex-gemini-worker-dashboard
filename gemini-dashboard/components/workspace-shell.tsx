@@ -10,12 +10,13 @@ import {
   X, 
   FolderGit2,
   Zap,
-  Activity
+  Activity,
+  Settings
 } from 'lucide-react';
 import type { ProjectSummary } from '../lib/workspace-contract';
 
 interface WorkspaceShellProps {
-  activeTab: 'workspace' | 'projects';
+  activeTab: 'workspace' | 'projects' | 'settings';
   children: React.ReactNode;
   projects?: ProjectSummary[];
   activeWorkersCount?: number;
@@ -150,6 +151,30 @@ export function WorkspaceShell({
               activeTab === 'projects' && (
                 <span className="h-1.5 w-1.5 rounded-full bg-cyan-400" aria-hidden="true" />
               )
+            )}
+          </Link>
+
+          <Link
+            href="/settings"
+            aria-current={activeTab === 'settings' ? 'page' : undefined}
+            onClick={() => setMobileMenuOpen(false)}
+            className={`group flex items-center justify-between rounded-lg px-3.5 py-2.5 text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-cyan-400 ${
+              activeTab === 'settings'
+                ? 'bg-cyan-500/15 text-cyan-300 ring-1 ring-cyan-500/30 font-semibold'
+                : 'text-slate-300 hover:bg-slate-800/70 hover:text-white'
+            }`}
+          >
+            <div className="flex items-center gap-3">
+              <Settings className={`h-4 w-4 ${activeTab === 'settings' ? 'text-cyan-400' : 'text-slate-400 group-hover:text-slate-200'}`} aria-hidden="true" />
+              <div className="flex flex-col text-left">
+                <span>메모리 설정</span>
+                <span className="text-[11px] font-normal text-slate-400">
+                  명시적 선호 및 재개 후보
+                </span>
+              </div>
+            </div>
+            {activeTab === 'settings' && (
+              <span className="h-1.5 w-1.5 rounded-full bg-cyan-400" aria-hidden="true" />
             )}
           </Link>
         </nav>
