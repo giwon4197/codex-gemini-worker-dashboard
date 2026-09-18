@@ -14,7 +14,14 @@ import {
   getRunStatusText,
   listSessionSummaries,
   loadSession,
+  MEMORY_PREFERENCES,
+  mutateWorkspaceMemory,
+  readRepositoryMemoryView,
+  readWorkspaceMemory,
+  rebuildRepositoryMemoryView,
+  forgetRepositoryMemory,
   refreshCodexUsageLine,
+  rememberActiveSession,
   refreshGeminiUsageLine,
   restoreWorkspaceBindings,
   sanitizeUiError,
@@ -36,6 +43,9 @@ import {
 } from '../workspace-context';
 import { ACTIVE_RUN_STATUSES } from '../graph-tree';
 import type { RunStatusBar } from '../status-bar';
+import type { MemoryMutation } from '../core-host';
+
+const MEMORY_OPERATIONS = new Set(['setEnabled', 'setPreference', 'deletePreference', 'reset']);
 
 export interface RunFollowUp {
   /** Shares the conversation webview so the Task Graph panel can render inside it. */
@@ -210,6 +220,37 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
       }
       if (message.type === 'cancel') {
         await this.cancel();
+        return;
+      }
+      if (message.type === 'memoryGet') {
+        await this.postMemory();
+        return;
+      }
+      if (message.type === 'memoryMutate') {
+        const root = this.requireRoot();
+        if (!root) return;
+        const operation = message.mutation?.operation;
+        if (!MEMORY_OPERATIONS.has(operation)) {
+          this.post({ type: 'error', message: '유효하지 않은 메모리 설정 요청입니다.' });
+          return;
+        }
+        const result = await mutateWorkspaceMemory(root, message.mutation as MemoryMutation);
+        if (!result.ok) this.post({ type: 'error', message: result.error || '메모리 설정을 저장하지 못했습니다.' });
+        await this.postMemory();
+        return;
+      }
+      if (message.type === 'repoMemoryRebuild') {
+        const root = this.requireRoot();
+        if (!root) return;
+        await rebuildRepositoryMemoryView(root);
+        await this.postMemory();
+        return;
+      }
+      if (message.type === 'repoMemoryClear') {
+        const root = this.requireRoot();
+        if (!root) return;
+        await forgetRepositoryMemory(root);
+        await this.postMemory();
       }
     } catch (error) {
       this.reportError(error);
@@ -226,7 +267,7 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
     // Decision 9: during a run every message is a question, so no second plan card appears.
     const forbidWorkers = options.forbidWorkers || this.runInProgress();
     this.setBusy(true, 'Codex에 요청하는 중 (Esc: 중단)');
-    const config = vscode.workspace.getConfiguration('codexGemini');
+    const config = vscode.workspace.getConfiguration('coxgem');
     let liveOutput = '';
     const abort = new AbortController();
     this.chatAbort = abort;
@@ -304,11 +345,16 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
     await this.postSessions();
   }
 
-  /** A freshly opened window starts a new conversation instead of resuming the last one. */
-  async startFreshWindow(): Promise<void> {
-    await this.startNewSession();
+  /** Reopening a window resumes the workspace selection; nothing is started over. */
+  async restoreWindow(): Promise<void> {
     if (this.view) await this.restoreFromDisk();
     else await this.syncRunState();
+  }
+
+  /** An explicit new conversation, or a different workspace folder, starts over. */
+  async startFreshWindow(): Promise<void> {
+    await this.startNewSession();
+    await this.restoreWindow();
   }
 
   private async switchSession(sessionId: string): Promise<void> {
@@ -321,6 +367,7 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
     }
     this.sessionId = session.sessionId;
     await this.context.workspaceState.update(SESSION_STATE_KEY, session.sessionId);
+    await rememberActiveSession(root, session);
     this.post({ type: 'session', sessionId: session.sessionId, messages: toWebviewMessages(session) });
     await this.refreshRunStatus(Boolean(session.pendingApproval));
     await this.syncGraphToSession(session);
@@ -464,6 +511,31 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
     await this.postSessions();
   }
 
+  /** Explicit preferences and repository memory, sent when the panel is opened or changed. */
+  private async postMemory(): Promise<void> {
+    const root = this.requireRoot();
+    if (!root) return;
+    const memory = await readWorkspaceMemory(root);
+    const repository = await readRepositoryMemoryView(root);
+    this.post({
+      type: 'memory',
+      enabled: memory.enabled,
+      preferences: MEMORY_PREFERENCES.map(preference => ({
+        key: preference.key,
+        label: preference.label,
+        values: preference.values,
+        value: memory.preferences[preference.key]?.value,
+        updatedAt: memory.preferences[preference.key]?.updatedAt,
+      })),
+      repository: {
+        updatedAt: repository.updatedAt,
+        staleAgainstHead: repository.staleAgainstHead,
+        staleRecords: repository.staleRecords,
+        rows: repository.rows,
+      },
+    });
+  }
+
   private postCachedUsage(): void {
     const cache = this.context.workspaceState.get<UsageCache>(USAGE_CACHE_KEY) || {};
     if (cache.codex) {
@@ -594,7 +666,39 @@ function renderConversationHtml(webview: vscode.Webview): string {
       outline-offset: 1px;
     }
     .row { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
-    .error { color: var(--vscode-errorForeground); min-height: 1.2em; white-space: pre-wrap; }
+    .tools { display: flex; align-items: center; gap: 2px; }
+    .menuWrap { position: relative; display: inline-flex; }
+    .panel.floating {
+      position: absolute; bottom: calc(100% + 4px); left: 0; z-index: 10;
+      min-width: min(232px, calc(100vw - 16px)); max-width: calc(100vw - 16px); margin: 0;
+      background: var(--vscode-editorWidget-background, var(--vscode-sideBar-background));
+      box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.36));
+    }
+    .iconBtn {
+      position: relative; display: inline-flex; align-items: center; justify-content: center;
+      width: 24px; height: 24px; padding: 0; margin: 4px 0 0; border-radius: 4px; opacity: 0.85;
+      background: transparent; color: var(--vscode-foreground); border: 1px solid transparent;
+    }
+    .iconBtn:hover { opacity: 1; background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2)); }
+    .iconBtn[aria-expanded="true"] { opacity: 1; background: var(--vscode-toolbar-activeBackground, rgba(128, 128, 128, 0.3)); }
+    .iconBtn.danger { color: var(--vscode-errorForeground); opacity: 1; }
+    .iconBtn svg { width: 16px; height: 16px; }
+    .iconBadge {
+      position: absolute; top: -2px; right: -2px; min-width: 13px; height: 13px; padding: 0 3px;
+      box-sizing: border-box; border-radius: 7px; font-size: 9px; line-height: 13px; text-align: center;
+      background: var(--vscode-errorForeground); color: var(--vscode-editor-background);
+    }
+    .panel {
+      margin: 6px 0 0; padding: 6px;
+      border: 1px solid var(--vscode-widget-border, var(--vscode-contrastBorder, transparent));
+      background: var(--vscode-editorWidget-background, transparent);
+    }
+    .panelHead { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; font-size: 11px; color: var(--vscode-descriptionForeground); }
+    .linkBtn { margin: 0; padding: 0; font-size: 11px; background: transparent; border: none; color: var(--vscode-textLink-foreground); }
+    .errorList { list-style: none; margin: 0; padding: 0; max-height: 120px; overflow: auto; }
+    .errorList li { padding: 3px 0; font-size: 11px; white-space: pre-wrap; color: var(--vscode-errorForeground); border-top: 1px solid var(--vscode-widget-border, transparent); }
+    .errorList li:first-child { border-top: none; }
+    .errorList time { margin-right: 6px; color: var(--vscode-descriptionForeground); }
     .toolbar { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; }
     .toolbar select { flex: 1; min-width: 0; font: inherit; background: var(--vscode-dropdown-background); color: var(--vscode-dropdown-foreground); border: 1px solid var(--vscode-dropdown-border, transparent); }
     .toolbar button { margin: 0; white-space: nowrap; }
@@ -622,13 +726,24 @@ function renderConversationHtml(webview: vscode.Webview): string {
     .hint { font-size: 11px; color: var(--vscode-descriptionForeground); margin: 4px 0 0; }
     .chip { display: inline-flex; align-items: center; gap: 4px; margin-top: 8px; cursor: pointer; }
     .chip input { margin: 0; }
+    .memoryRow { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin: 4px 0; }
+    .memoryRow > span:first-child { min-width: 96px; }
+    .memoryList { margin: 4px 0; padding-left: 16px; font-size: 12px; }
+    .memoryList li { margin-bottom: 4px; }
+    .memoryList .meta { white-space: normal; }
+    #memoryBody { max-height: 240px; overflow: auto; }
+    #memoryBody h3 { font-size: 12px; margin: 10px 0 4px; }
     .sendRow { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
     .sendRow button { margin: 4px 0 0; }
+    .sendRow .hint { flex: 1; min-width: 0; margin: 4px 0 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     #graphPanel { margin-bottom: 6px; border: 1px solid var(--vscode-widget-border, var(--vscode-contrastBorder, transparent)); border-radius: 3px; }
     #graphPanel > summary { cursor: pointer; padding: 4px 6px; font-weight: 600; user-select: none; }
     #graphPanel > summary:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
     #graphPanel > summary .meta { display: inline; margin: 0 0 0 6px; font-weight: 400; }
-    #graphPanel .body { padding: 4px 6px 6px; max-height: 45vh; overflow: auto; }
+    /* Drag the pane's bottom edge to trade height with the chat; the inline height a
+       drag writes outranks the :has() default below. */
+    #graphPanel .body { padding: 4px 6px 6px; overflow: auto; resize: vertical; min-height: 60px; max-height: 80vh; }
+    #graphPanel .body:has(#graph:not([hidden])) { height: 45vh; }
     #graphPanel button {
       margin: 0; padding: 2px 6px;
       background: var(--vscode-button-secondaryBackground, var(--vscode-button-background));
@@ -636,7 +751,7 @@ function renderConversationHtml(webview: vscode.Webview): string {
     }
     #graphPanel .head { display: flex; justify-content: space-between; gap: 8px; align-items: center; margin-bottom: 6px; }
     #graphPanel .head .prompt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
-    #graphPanel .empty { color: var(--vscode-descriptionForeground); margin: 0; }
+    #graphPanel .empty, .panel .empty { color: var(--vscode-descriptionForeground); margin: 0; }
     #graphPanel .graph { position: relative; }
     #graphPanel svg { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; }
     #graphPanel .rows { list-style: none; margin: 0; padding: 0; }
@@ -742,25 +857,59 @@ function renderConversationHtml(webview: vscode.Webview): string {
   <label class="hint chip"><input type="checkbox" id="attach" /> 현재 파일·선택 첨부</label>
   <textarea id="input" aria-label="메시지" placeholder="질문하거나 작업을 요청하세요" aria-describedby="sendHint"></textarea>
   <div class="sendRow">
+    <div class="tools">
+      <div class="menuWrap" id="usageMenu">
+        <button id="usageToggle" class="iconBtn" type="button" aria-expanded="false" aria-controls="usagePanel" aria-haspopup="true" aria-label="사용량" title="사용량">
+          <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="8" cy="8" r="5.6" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M8 8 11 5.6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="M8 2.4v1.4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+        </button>
+        <div class="panel usage floating" id="usagePanel" role="menu" hidden>
+          <div class="row">
+            <button id="codexUsage" type="button" aria-describedby="codexUsageText">Codex</button>
+            <span id="codexUsageText" class="usageText" aria-live="polite"></span>
+          </div>
+          <div class="row">
+            <button id="geminiUsage" type="button" aria-describedby="geminiUsageText">Gemini</button>
+            <span id="geminiUsageText" class="usageText" aria-live="polite"></span>
+          </div>
+        </div>
+      </div>
+      <button id="memoryToggle" class="iconBtn" type="button" aria-expanded="false" aria-controls="memoryPanel" aria-label="메모리" title="메모리">
+        <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><rect x="4.2" y="4.2" width="7.6" height="7.6" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M6.4 4.2V2.4M9.6 4.2V2.4M6.4 13.6v-1.8M9.6 13.6v-1.8M11.8 6.4h1.8M11.8 9.6h1.8M2.4 6.4h1.8M2.4 9.6h1.8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+      </button>
+      <button id="errorToggle" class="iconBtn danger" type="button" aria-expanded="false" aria-controls="errorPanel" aria-label="오류 로그" title="오류 로그" hidden>
+        <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 2.4 14.3 13.2H1.7Z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M8 6.6v2.9" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><circle cx="8" cy="11.3" r="0.8" fill="currentColor"/></svg>
+        <span id="errorCount" class="iconBadge">0</span>
+      </button>
+    </div>
     <p class="hint" id="sendHint">Ctrl+Enter 보내기 · Esc 중단</p>
     <button id="send" type="button">보내기</button>
   </div>
-  <p class="error" id="error" role="alert" hidden></p>
-  <div class="usage">
-    <div class="row">
-      <button id="codexUsage" type="button" aria-describedby="codexUsageText">Codex</button>
-      <span id="codexUsageText" class="usageText" aria-live="polite"></span>
+  <div class="panel" id="memoryPanel" hidden>
+    <div class="panelHead">
+      <span>메모리<span id="memorySummary" class="meta"></span></span>
     </div>
-    <div class="row">
-      <button id="geminiUsage" type="button" aria-describedby="geminiUsageText">Gemini</button>
-      <span id="geminiUsageText" class="usageText" aria-live="polite"></span>
+    <div id="memoryBody"><p class="empty">불러오는 중…</p></div>
+  </div>
+  <div class="panel" id="errorPanel" hidden>
+    <div class="panelHead">
+      <span>오류 로그</span>
+      <button id="errorClear" type="button" class="linkBtn">지우기</button>
     </div>
+    <ol id="errorList" class="errorList" role="log" aria-live="polite"></ol>
   </div>
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
     const messagesEl = document.getElementById('messages');
     const input = document.getElementById('input');
-    const errorEl = document.getElementById('error');
+    const errorList = document.getElementById('errorList');
+    const errorCountEl = document.getElementById('errorCount');
+    const errorToggle = document.getElementById('errorToggle');
+    const errorPanel = document.getElementById('errorPanel');
+    const errorClear = document.getElementById('errorClear');
+    const usageToggle = document.getElementById('usageToggle');
+    const usagePanel = document.getElementById('usagePanel');
+    const memoryToggle = document.getElementById('memoryToggle');
+    const memoryPanel = document.getElementById('memoryPanel');
     const statusEl = document.getElementById('status');
     const contextEl = document.getElementById('context');
     const codexBtn = document.getElementById('codexUsage');
@@ -824,9 +973,40 @@ function renderConversationHtml(webview: vscode.Webview): string {
       sessionsEl.value = activeId || '';
     }
     let lastRunStatus = 'idle';
+    // Only one panel fits above the composer, so opening one closes the others.
+    const composerPanels = [
+      [memoryPanel, memoryToggle],
+      [errorPanel, errorToggle],
+    ];
+    function openPanel(panel, toggle) {
+      const show = panel.hidden;
+      for (const [other, otherToggle] of composerPanels) {
+        other.hidden = true;
+        otherToggle.setAttribute('aria-expanded', 'false');
+      }
+      panel.hidden = !show;
+      toggle.setAttribute('aria-expanded', String(show));
+    }
     function setError(text) {
-      errorEl.hidden = !text;
-      errorEl.textContent = text || '';
+      if (!text) return;
+      const item = document.createElement('li');
+      const stamp = document.createElement('time');
+      const now = new Date();
+      stamp.textContent = now.toLocaleTimeString('ko-KR', { hour12: false });
+      stamp.dateTime = now.toISOString();
+      item.append(stamp, document.createTextNode(text));
+      errorList.prepend(item);
+      errorCountEl.textContent = String(errorList.childElementCount);
+      errorToggle.hidden = false;
+      // A hidden error is a missed error: surface the newest one right away.
+      if (errorPanel.hidden) openPanel(errorPanel, errorToggle);
+    }
+    function clearErrors() {
+      errorList.replaceChildren();
+      errorCountEl.textContent = '0';
+      errorToggle.hidden = true;
+      errorPanel.hidden = true;
+      errorToggle.setAttribute('aria-expanded', 'false');
     }
     function setBusy(active, reason) {
       busy = active;
@@ -892,8 +1072,92 @@ function renderConversationHtml(webview: vscode.Webview): string {
       }
       messagesEl.scrollTop = messagesEl.scrollHeight;
     }
+    const memoryBody = document.getElementById('memoryBody');
+    const memorySummary = document.getElementById('memorySummary');
+    let memoryLoaded = false;
+    // Git and disk reads happen only once the user actually opens the panel.
+    memoryToggle.addEventListener('click', () => {
+      openPanel(memoryPanel, memoryToggle);
+      if (!memoryPanel.hidden && !memoryLoaded) {
+        memoryLoaded = true;
+        vscode.postMessage({ type: 'memoryGet' });
+      }
+    });
+    function el(tag, text, cls) {
+      const node = document.createElement(tag);
+      if (text !== undefined) node.textContent = text;
+      if (cls) node.className = cls;
+      return node;
+    }
+    function button(label, onClick, disabled) {
+      const node = el('button', label);
+      node.type = 'button';
+      node.disabled = Boolean(disabled);
+      node.addEventListener('click', onClick);
+      return node;
+    }
+    function mutate(mutation) {
+      vscode.postMessage({ type: 'memoryMutate', mutation });
+    }
+    function renderMemory(data) {
+      memoryBody.replaceChildren();
+      const repo = data.repository;
+      memorySummary.textContent = (data.enabled ? ' · 켬' : ' · 끔') + ' · 저장소 기억 ' + repo.rows.length + '건';
+
+      const toggle = el('label', '', 'chip');
+      const box = document.createElement('input');
+      box.type = 'checkbox';
+      box.checked = data.enabled;
+      box.addEventListener('change', () => mutate({ operation: 'setEnabled', enabled: box.checked }));
+      toggle.append(box, ' 선호 메모리 사용 · 표시 선호만 저장하며 승인·정책에는 적용하지 않습니다');
+      memoryBody.append(toggle);
+
+      for (const pref of data.preferences) {
+        const row = el('div', '', 'memoryRow');
+        const select = document.createElement('select');
+        select.disabled = !data.enabled;
+        select.setAttribute('aria-label', pref.label);
+        select.append(new Option('선택 안 함', ''));
+        for (const value of pref.values) select.append(new Option(String(value), String(value)));
+        select.value = pref.value === undefined ? '' : String(pref.value);
+        select.addEventListener('change', () => {
+          if (!select.value) return;
+          const raw = pref.values.find(value => String(value) === select.value);
+          mutate({ operation: 'setPreference', key: pref.key, value: raw });
+        });
+        const stamp = pref.updatedAt
+          ? '명시적 사용자 · 확인됨 · ' + pref.updatedAt.slice(0, 16).replace('T', ' ')
+          : '저장되지 않음';
+        row.append(
+          el('span', pref.label),
+          select,
+          button('삭제', () => mutate({ operation: 'deletePreference', key: pref.key }), pref.value === undefined),
+          el('span', stamp, 'meta')
+        );
+        memoryBody.append(row);
+      }
+      memoryBody.append(button('선호 초기화', () => mutate({ operation: 'reset' })));
+
+      const head = repo.rows.length
+        ? '기억 ' + repo.rows.length + '건 · stale ' + repo.staleRecords + '건 · ' +
+          repo.updatedAt.slice(0, 16).replace('T', ' ') + (repo.staleAgainstHead ? ' · 다른 HEAD 기준' : '')
+        : '저장된 저장소 기억이 없습니다. 완료된 Run이 생기면 자동으로 채워집니다.';
+      const actions = el('div', '', 'memoryRow');
+      actions.append(
+        button('완료된 Run에서 다시 스캔', () => vscode.postMessage({ type: 'repoMemoryRebuild' })),
+        button('저장소 기억 삭제', () => vscode.postMessage({ type: 'repoMemoryClear' }), repo.rows.length === 0)
+      );
+      const list = el('ul', '', 'memoryList');
+      for (const row of repo.rows) {
+        const item = el('li', (row.stale ? '⚠ ' : '') + row.label);
+        item.append(el('div', row.provenance, 'meta'));
+        list.append(item);
+      }
+      memoryBody.append(el('h3', '저장소 기억'), el('p', head, 'meta'), actions, list);
+    }
     window.addEventListener('message', event => {
       const data = event.data;
+      if (data.type === 'memory') renderMemory(data);
       if (data.type === 'session') render(data.messages || []);
       if (data.type === 'sessions') renderSessions(data.items || [], data.activeSessionId);
       if (data.type === 'error') { clearPending(); setError(data.message); }
@@ -928,7 +1192,6 @@ function renderConversationHtml(webview: vscode.Webview): string {
     sendBtn.addEventListener('click', () => {
       const text = input.value.trim();
       if (!text || busy) return;
-      setError('');
       showPending(text);
       vscode.postMessage({ type: 'chat', text, attachContext: attachEl.checked });
       input.value = '';
@@ -943,6 +1206,27 @@ function renderConversationHtml(webview: vscode.Webview): string {
       event.preventDefault();
       vscode.postMessage({ type: 'cancel' });
     });
+    // Usage floats over the chat on hover; the fetch still happens only on a button click.
+    const usageMenu = document.getElementById('usageMenu');
+    function showUsage(open) {
+      usagePanel.hidden = !open;
+      usageToggle.setAttribute('aria-expanded', String(open));
+    }
+    usageMenu.addEventListener('mouseenter', () => showUsage(true));
+    usageMenu.addEventListener('mouseleave', () => showUsage(false));
+    usageMenu.addEventListener('focusin', () => showUsage(true));
+    usageMenu.addEventListener('focusout', event => {
+      if (!usageMenu.contains(event.relatedTarget)) showUsage(false);
+    });
+    usageToggle.addEventListener('click', () => showUsage(usagePanel.hidden));
+    usageMenu.addEventListener('keydown', event => {
+      if (event.key !== 'Escape' || usagePanel.hidden) return;
+      event.stopPropagation();
+      showUsage(false);
+      usageToggle.focus();
+    });
+    errorToggle.addEventListener('click', () => openPanel(errorPanel, errorToggle));
+    errorClear.addEventListener('click', clearErrors);
     codexBtn.addEventListener('click', () => {
       setUsage(codexBtn, codexText, '조회 중…');
       vscode.postMessage({ type: 'refreshUsage', provider: 'codex' });

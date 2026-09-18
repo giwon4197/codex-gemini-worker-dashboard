@@ -18,10 +18,10 @@ export class RunStatusBar {
     this.item.command = unlinkedActiveRuns > 0 ? COMMANDS.showActiveRun : COMMANDS.openWorkspace;
     this.item.tooltip =
       unlinkedActiveRuns > 0
-        ? `Codex × Gemini · Run: ${status} · 다른 창에서 시작한 Run ${unlinkedActiveRuns}개 진행 중 (클릭하여 표시)`
-        : `Codex × Gemini · Run: ${status}`;
+        ? `coXgem · Run: ${status} · 다른 창에서 시작한 Run ${unlinkedActiveRuns}개 진행 중 (클릭하여 표시)`
+        : `coXgem · Run: ${status}`;
     this.item.accessibilityInformation = {
-      label: `Codex × Gemini run status ${status}`,
+      label: `coXgem run status ${status}`,
       role: 'button',
     };
   }

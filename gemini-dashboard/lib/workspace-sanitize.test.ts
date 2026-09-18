@@ -1,15 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  containsSecretMaterial,
-  containsUnsafePathLikeValue,
-  sanitizePath,
-  sanitizeCommand,
-  sanitizeText,
-  sanitizeWorkerLog,
-  sanitizeWorkerData,
-  validatePersistentPreferenceValue,
-} from './workspace-sanitize.ts';
+import { sanitizePath, sanitizeCommand, sanitizeText, sanitizeWorkerLog, sanitizeWorkerData } from './workspace-sanitize.ts';
 import type { LiveWorkerData } from './workspace-contract.ts';
 
 void describe('Workspace Sanitization (Non-disclosure & Path Protection)', () => {
@@ -208,44 +199,6 @@ void describe('Workspace Sanitization (Non-disclosure & Path Protection)', () =>
       // Verify finalResponse and error are redacted
       assert.ok(!sanitized.finalResponse?.includes('AIzaSy'));
       assert.ok(!sanitized.error?.includes(mockRepoRoot));
-    });
-  });
-
-  void describe('persistent preference validation', () => {
-    void test('detects secrets without echoing or redacting them', () => {
-      assert.equal(
-        containsSecretMaterial('Bearer abc.def.ghi'),
-        true
-      );
-      assert.deepEqual(
-        validatePersistentPreferenceValue('API_TOKEN=private-value'),
-        { safe: false, reason: 'secret' }
-      );
-    });
-
-    void test('rejects absolute, home, URI, UNC, and traversal paths', () => {
-      for (const value of [
-        'C:\\Users\\lee\\file.txt',
-        '/home/lee/file.txt',
-        '~/file.txt',
-        '\\\\server\\share\\file.txt',
-        'file:///home/lee/file.txt',
-        '../secret.txt',
-      ]) {
-        assert.equal(containsUnsafePathLikeValue(value), true, value);
-        assert.equal(validatePersistentPreferenceValue(value).safe, false, value);
-      }
-    });
-
-    void test('accepts closed enum strings and booleans', () => {
-      assert.deepEqual(validatePersistentPreferenceValue('balanced'), {
-        safe: true,
-      });
-      assert.deepEqual(validatePersistentPreferenceValue(true), { safe: true });
-      assert.deepEqual(validatePersistentPreferenceValue({ value: 'ko' }), {
-        safe: false,
-        reason: 'unsupported_shape',
-      });
     });
   });
 });

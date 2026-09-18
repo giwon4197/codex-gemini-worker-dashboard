@@ -33,4 +33,5 @@ test_workspace_*/
 .agent/runs/*/cancel.requested
 gemini-dashboard/public/data/live-workers.json
 .agent/dashboard-state/
+.agent/memory/
 *.vsix

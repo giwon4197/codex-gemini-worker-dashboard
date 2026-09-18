@@ -22,3 +22,22 @@ void test('webview inline scripts still parse after template-literal escaping', 
     );
   }
 });
+
+/**
+ * The inline script and the HTML it drives sit in the same template literal, so a
+ * renamed or removed element leaves a `getElementById` returning null and the
+ * feature silently dead. Parsing alone does not catch that.
+ */
+void test('every element the webview script looks up exists in its markup', () => {
+  for (const view of VIEWS) {
+    const source = fs.readFileSync(path.join(process.cwd(), view), 'utf8');
+    const declared = new Set(
+      [...source.matchAll(/\bid="([A-Za-z][\w-]*)"/g)].map(match => match[1])
+    );
+    const looked = [...source.matchAll(/getElementById\('([^']+)'\)/g)].map(match => match[1]);
+    assert.ok(looked.length > 0, `${view}: no getElementById calls found`);
+    for (const id of looked) {
+      assert.ok(declared.has(id), `${view}: getElementById('${id}') has no matching id in the markup`);
+    }
+  }
+});

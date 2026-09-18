@@ -3,12 +3,18 @@ import path from 'node:path';
 import type { Plugin } from 'vite';
 import type { SpawnerFn } from './workspace-store.ts';
 import { validateSessionId, createEmptyConversationSession } from './workspace-contract.ts';
-import { getAllowedRepoRoot, validateRunId, validateRepository, validatePrompt, spawnRouterRun, retryRun, listCompactRuns, getRunDetails, getProjectWorkers, getConversationSession, listConversationSessions, saveConversationSession, approveConversationPlan } from './workspace-store.ts';
+import { getAllowedRepoRoot, validateRunId, validateRepository, validatePrompt, spawnRouterRun, retryRun, listCompactRuns, getRunDetails, getProjectWorkers, getConversationSession, listConversationSessions, saveConversationSession, approveConversationPlan, deriveWorkspaceResumeCandidate } from './workspace-store.ts';
 import { sanitizeText } from './workspace-sanitize.ts';
 import { evaluateCodexConversation } from './codex-conversation.ts';
 import type { CodexRunnerFn } from './codex-conversation.ts';
 import { handleCodexUsage, handleGeminiQuota } from './usage-handlers.ts';
-import { GET as getSettings, POST as saveSettings } from './worker-settings.ts';
+import {
+  GET as getSettings,
+  POST as saveSettings,
+  MEMORY_DELETE as deleteMemorySettings,
+  MEMORY_GET as getMemorySettings,
+  MEMORY_PATCH as patchMemorySettings,
+} from './worker-settings.ts';
 
 export interface WorkspaceBridgeOptions {
   repoRoot?: string;
@@ -606,6 +612,39 @@ export async function handleWorkspaceBridgeRequest(
     return Response.json({ ok: false, error: `지원하지 않는 HTTP 메서드입니다: ${method}` }, { status: 405, headers: JSON_HEADERS });
   }
 
+  if (pathname === '/api/settings/memory') {
+    if (method === 'GET') return getMemorySettings();
+    if (method === 'PATCH') return patchMemorySettings(request);
+    if (method === 'DELETE') return deleteMemorySettings();
+    return Response.json(
+      { ok: false, error: `지원하지 않는 HTTP 메서드입니다: ${method}` },
+      { status: 405, headers: JSON_HEADERS }
+    );
+  }
+
+  if (pathname === '/api/workspace/resume-candidate') {
+    if (method !== 'GET') {
+      return Response.json(
+        { ok: false, error: `지원하지 않는 HTTP 메서드입니다: ${method}` },
+        { status: 405, headers: JSON_HEADERS }
+      );
+    }
+    try {
+      const candidate = await deriveWorkspaceResumeCandidate(
+        getAllowedRepoRoot(activeOptions.repoRoot)
+      );
+      return Response.json(
+        { ok: true, candidate },
+        { status: 200, headers: JSON_HEADERS }
+      );
+    } catch {
+      return Response.json(
+        { ok: false, error: '재개 후보를 불러오지 못했습니다.' },
+        { status: 500, headers: JSON_HEADERS }
+      );
+    }
+  }
+
   // 10. GET /api/codex-usage
   if (pathname === '/api/codex-usage') {
     if (method !== 'GET') {
@@ -636,6 +675,8 @@ export async function handleWorkspaceBridgeRequest(
     pathname.startsWith('/api/projects/') ||
     pathname === '/api/conversations' ||
     pathname.startsWith('/api/conversations/') ||
+    pathname.startsWith('/api/settings') ||
+    pathname.startsWith('/api/workspace/') ||
     pathname === '/api/codex-usage' ||
     pathname === '/api/gemini-quota'
   ) {
@@ -678,7 +719,10 @@ export function createWorkspaceBridgeMiddleware(options?: WorkspaceBridgeOptions
       pathname === '/api/conversations' ||
       pathname.startsWith('/api/conversations/') ||
       pathname === '/api/codex-usage' ||
-      pathname === '/api/gemini-quota' || pathname === '/api/settings';
+      pathname === '/api/gemini-quota' ||
+      pathname === '/api/settings' ||
+      pathname.startsWith('/api/settings/') ||
+      pathname.startsWith('/api/workspace/');
 
     if (!isWorkspaceRoute) {
       return next();

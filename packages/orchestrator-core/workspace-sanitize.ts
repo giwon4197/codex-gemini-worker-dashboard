@@ -14,6 +14,56 @@ const CLI_FLAG_KEY_REGEX = /--(api-key|key|token|password|auth-token)(?:=|\s+)([
 const ENV_SECRET_REGEX = /\b[A-Za-z0-9_]*(KEY|TOKEN|SECRET|PASSWORD)\s*=\s*([^\s"']+)/gi;
 const USER_DIR_REGEX = /(?:[A-Za-z]:)?[/\\]Users[/\\][^/\\\s"']+[/\\]/gi;
 const HOME_DIR_REGEX = /\/(?:home|Users)\/[^/\s"']+\//g;
+const WINDOWS_ABSOLUTE_PATH_REGEX = /^[A-Za-z]:[\\/]/;
+const POSIX_ABSOLUTE_PATH_REGEX = /^\//;
+const UNC_PATH_REGEX = /^\\\\[^\\]+\\[^\\]+/;
+const HOME_PATH_REGEX = /^~[\\/]/;
+const FILE_URI_REGEX = /^file:\/\//i;
+
+export interface PersistentValueValidation {
+  safe: boolean;
+  reason?: 'secret' | 'absolute_path' | 'path_traversal' | 'unsupported_shape';
+}
+
+export function containsSecretMaterial(value: string): boolean {
+  const patterns = [
+    /AIza[0-9A-Za-z-_]{35}/,
+    /sk-[0-9A-Za-z-_]{20,}/,
+    /Bearer\s+[A-Za-z0-9._~+/-]+=*/i,
+    /--(?:api-key|key|token|password|auth-token)(?:=|\s+)\S+/i,
+    /\b[A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD)\s*=\s*\S+/i,
+  ];
+  return patterns.some(pattern => pattern.test(value));
+}
+
+export function containsUnsafePathLikeValue(value: string): boolean {
+  const trimmed = value.trim();
+  return (
+    WINDOWS_ABSOLUTE_PATH_REGEX.test(trimmed) ||
+    POSIX_ABSOLUTE_PATH_REGEX.test(trimmed) ||
+    UNC_PATH_REGEX.test(trimmed) ||
+    HOME_PATH_REGEX.test(trimmed) ||
+    FILE_URI_REGEX.test(trimmed) ||
+    /(^|[\\/])\.\.([\\/]|$)/.test(trimmed)
+  );
+}
+
+export function validatePersistentPreferenceValue(
+  value: unknown
+): PersistentValueValidation {
+  if (typeof value === 'boolean') return { safe: true };
+  if (typeof value !== 'string') {
+    return { safe: false, reason: 'unsupported_shape' };
+  }
+  if (containsSecretMaterial(value)) return { safe: false, reason: 'secret' };
+  if (/(^|[\\/])\.\.([\\/]|$)/.test(value.trim())) {
+    return { safe: false, reason: 'path_traversal' };
+  }
+  if (containsUnsafePathLikeValue(value)) {
+    return { safe: false, reason: 'absolute_path' };
+  }
+  return { safe: true };
+}
 
 /**
  * Normalizes Windows and POSIX separators to forward slash.

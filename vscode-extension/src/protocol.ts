@@ -8,8 +8,27 @@ export interface SessionSummary {
   updatedAt: string;
 }
 
+/** Everything the memory panel shows: explicit preferences plus repository memory rows. */
+export interface MemoryPanelState {
+  enabled: boolean;
+  preferences: Array<{
+    key: string;
+    label: string;
+    values: Array<string | boolean>;
+    value?: string | boolean;
+    updatedAt?: string;
+  }>;
+  repository: {
+    updatedAt: string;
+    staleAgainstHead: boolean;
+    staleRecords: number;
+    rows: Array<{ id: string; label: string; provenance: string; stale: boolean }>;
+  };
+}
+
 export type HostToWebview =
   | { type: 'session'; sessionId: string; messages: WebviewMessage[] }
+  | ({ type: 'memory' } & MemoryPanelState)
   | { type: 'sessions'; items: SessionSummary[]; activeSessionId?: string }
   | { type: 'error'; message: string }
   | { type: 'usage'; provider: UsageProvider; line: string; detail?: string }
@@ -30,7 +49,14 @@ export type WebviewToHost =
   | { type: 'loadSession'; sessionId: string }
   | { type: 'explainSelection' }
   | { type: 'planFixForSelection' }
-  | { type: 'cancel' };
+  | { type: 'cancel' }
+  | { type: 'memoryGet' }
+  | {
+      type: 'memoryMutate';
+      mutation: { operation: string; key?: string; value?: unknown; enabled?: boolean };
+    }
+  | { type: 'repoMemoryRebuild' }
+  | { type: 'repoMemoryClear' };
 
 export function busyStatusText(reason?: string): string {
   return reason?.trim() || '요청 처리 중…';

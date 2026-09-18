@@ -1,6 +1,8 @@
-# Codex × Gemini
+# coXgem
 
-로컬 Codex 대화와 Gemini worker 오케스트레이션을 VS Code Secondary Side Bar에서 사용합니다. VS Code 1.106 이상이 필요합니다.
+로컬 AI 대화와 백그라운드 worker 오케스트레이션을 VS Code Secondary Side Bar에서 사용합니다. VS Code 1.106 이상이 필요합니다.
+
+로컬에 설치된 `codex` · `gemini` CLI를 실행합니다. OpenAI · Google과 제휴 관계가 없습니다.
 
 ## 설치
 
@@ -15,11 +17,11 @@
 code --user-data-dir <empty-dir> --extensions-dir <empty-dir> --install-extension <file>.vsix
 ```
 
-실행 후 폴더를 연 다음 Secondary Side Bar(오른쪽)의 Codex × Gemini 컨테이너를 사용합니다. 보이지 않으면 `View: Toggle Secondary Side Bar`를 실행합니다. Extension Development Host에서 `파일 > 폴더 열기`를 하면 디버그 창이 종료됩니다.
+실행 후 폴더를 연 다음 Secondary Side Bar(오른쪽)의 coXgem 컨테이너를 사용합니다. 보이지 않으면 `View: Toggle Secondary Side Bar`를 실행합니다. Extension Development Host에서 `파일 > 폴더 열기`를 하면 디버그 창이 종료됩니다.
 
 ## 설정
 
-`codexGemini.*` 설정은 VS Code 설정 화면에서 바꿉니다.
+`coxgem.*` 설정은 VS Code 설정 화면에서 바꿉니다.
 
 - `workerTier`: Gemini 워커 등급(`fast`·`normal`·`advanced`·`reasoning`). 바꾸면 작업 폴더의 `worker-settings.json`에 저장되어 웹 대시보드와 공유됩니다.
 - `codexModel`: 계획·대화 단계의 `codex exec --model` 값. 비우면 `model-tiers.json`의 기본값을 씁니다.
@@ -62,3 +64,11 @@ VSIX 설치 후 다음을 확인합니다.
 ## 개발
 
 Core 모듈은 `packages/orchestrator-core`에 있으며 웹과 확장이 같은 파일을 import 합니다. `npm test`는 확장 테스트만 실행하고, Core 테스트는 `packages/orchestrator-core`에서 `npm test`로 실행합니다.
+
+## 라이선스
+
+MIT License. 전문은 [LICENSE](LICENSE)를 참고하세요.
+
+이 확장은 런타임 의존성이 없으며, 배포본(`dist/extension.js`)에는 이 저장소의 코드만 포함됩니다. 별도의 서드파티 고지 항목은 없습니다.
+
+`codex` · `gemini` CLI는 확장에 포함되지 않고 사용자의 로컬 설치본을 실행합니다. 각 CLI의 라이선스와 이용 약관은 해당 제공자를 따릅니다.

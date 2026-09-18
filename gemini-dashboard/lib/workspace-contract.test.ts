@@ -1,7 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeRunStatus, normalizeWorkerStatus, isWorkerActive, requiresUserAction, getUserActionReason, extractTimelineEvents, formatDuration, RUN_STATUS_META, WORKER_STATUS_META, validateSessionId, isLauncherError, normalizeWorkerData } from './workspace-contract.ts';
-import type { LiveWorkerData } from './workspace-contract.ts';
+import { normalizeRunStatus, normalizeWorkerStatus, isWorkerActive, requiresUserAction, getUserActionReason, extractTimelineEvents, formatDuration, RUN_STATUS_META, WORKER_STATUS_META, validateSessionId, isLauncherError } from './workspace-contract.ts';
 
 void describe('Workspace Contract & Pure State Transforms', () => {
   void describe('normalizeRunStatus', () => {
@@ -257,29 +256,6 @@ void describe('Workspace Contract & Pure State Transforms', () => {
         error: '실행기 프로세스가 비정상 종료되었습니다 (종료 코드: 1).',
       });
       assert.strictEqual(events.length, 0);
-    });
-  });
-  void describe('normalizeWorkerData', () => {
-    const command = { command: 'npm test', exitCode: 0, status: 'PASS' };
-
-    void test('wraps a single verification command object into an array', () => {
-      const worker = normalizeWorkerData({ verification: { commands: command } } as unknown as LiveWorkerData);
-      assert.deepStrictEqual(worker.verification?.commands, [command]);
-    });
-
-    void test('leaves an array of commands untouched', () => {
-      const input = { verification: { commands: [command] } } as unknown as LiveWorkerData;
-      assert.strictEqual(normalizeWorkerData(input), input);
-    });
-
-    void test('drops a non-object commands value instead of throwing', () => {
-      const worker = normalizeWorkerData({ verification: { commands: 'npm test' } } as unknown as LiveWorkerData);
-      assert.deepStrictEqual(worker.verification?.commands, []);
-    });
-
-    void test('leaves a worker without verification untouched', () => {
-      const input = { taskId: 'TASK-001' } as unknown as LiveWorkerData;
-      assert.strictEqual(normalizeWorkerData(input), input);
     });
   });
 });

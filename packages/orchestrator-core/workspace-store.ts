@@ -13,6 +13,8 @@ import type {
   ConversationApproval,
   LaunchMetadata,
   ProjectWorkGraphData,
+  WorkspaceResumeCandidate,
+  WorkspaceResumeState,
   LiveWorkerVerificationCommand,
 } from './workspace-contract.ts';
 import {
@@ -25,6 +27,7 @@ import {
   validateSessionId,
   isLauncherError,
   evaluateRunRetrySafety,
+  normalizeWorkerData,
 } from './workspace-contract.ts';
 import { buildProjectWorkGraph } from './project-event-graph.ts';
 import { sanitizeText, sanitizePath, sanitizeWorkerData, sanitizeGraphData } from './workspace-sanitize.ts';
@@ -408,6 +411,31 @@ export function generateRunId(): string {
 }
 
 /**
+ * Unlike POSIX, Windows refuses a rename onto a path another handle still holds
+ * open, so a concurrent reader, a virus scanner or the search indexer turns an
+ * atomic replace into EPERM. Those windows are short, so retry before failing.
+ */
+const TRANSIENT_FS_ERRORS = new Set(['EPERM', 'EACCES', 'EBUSY']);
+
+export async function retryTransientFsError<T>(
+  operation: () => Promise<T>,
+  options: { attempts?: number; delayMs?: number; sleep?: (ms: number) => Promise<void> } = {}
+): Promise<T> {
+  const attempts = options.attempts ?? 5;
+  const delayMs = options.delayMs ?? 25;
+  const sleep = options.sleep ?? (ms => new Promise<void>(resolve => setTimeout(resolve, ms)));
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException)?.code;
+      if (attempt >= attempts || !code || !TRANSIENT_FS_ERRORS.has(code)) throw error;
+      await sleep(delayMs * attempt);
+    }
+  }
+}
+
+/**
  * Atomic write helper using tmp file and rename.
  */
 async function atomicWriteJson(targetPath: string, data: unknown): Promise<void> {
@@ -420,7 +448,13 @@ async function atomicWriteJson(targetPath: string, data: unknown): Promise<void>
   const tmpFile = path.join(tmpDir, `${path.basename(targetPath)}.${process.pid}.${randSuffix}.tmp`);
 
   await fs.promises.writeFile(tmpFile, JSON.stringify(data, null, 2), 'utf8');
-  await fs.promises.rename(tmpFile, targetPath);
+  try {
+    await retryTransientFsError(() => fs.promises.rename(tmpFile, targetPath));
+  } catch (error) {
+    // A tmp file left behind never gets picked up again; drop it before surfacing.
+    await fs.promises.rm(tmpFile, { force: true }).catch(() => undefined);
+    throw error;
+  }
 }
 
 function getDashboardStateDir(repoRoot: string): string {
@@ -788,6 +822,73 @@ export async function settleRunState(
   return { compact, actualRunId: null, settled: false };
 }
 
+/** Identifies the repository a resume state belongs to, without storing its path. */
+export function getRepositoryId(repoRoot: string): string {
+  return crypto
+    .createHash('sha256')
+    .update(path.resolve(repoRoot).replace(/[\/]+$/, '').toLowerCase())
+    .digest('hex')
+    .slice(0, 16);
+}
+
+function getResumeStatePath(root: string): string {
+  return path.join(getDashboardStateDir(root), 'workspace', 'current.json');
+}
+
+/**
+ * Reads the persisted resume selection. A state written for another repository,
+ * an unknown schema, or an invalid id is ignored rather than repaired.
+ */
+export async function getWorkspaceResumeState(
+  repoRoot?: string
+): Promise<WorkspaceResumeState | null> {
+  const root = repoRoot || getAllowedRepoRoot();
+  let parsed: WorkspaceResumeState;
+  try {
+    parsed = parseJsonFileText<WorkspaceResumeState>(
+      await fs.promises.readFile(getResumeStatePath(root), 'utf8')
+    );
+  } catch {
+    return null;
+  }
+  if (parsed?.schemaVersion !== 1) return null;
+  if (parsed.repositoryId !== getRepositoryId(root)) return null;
+  if (parsed.activeSessionId && !validateSessionId(parsed.activeSessionId)) return null;
+  if (parsed.activeRunId && !validateRunId(parsed.activeRunId)) return null;
+  if (parsed.actualRunId && !validateRunId(parsed.actualRunId)) return null;
+  return parsed;
+}
+
+/**
+ * Merges a new selection into the resume state. Only ids the caller verified
+ * are stored; the run stores stay the authority for run state itself.
+ */
+export async function saveWorkspaceResumeState(
+  patch: Omit<WorkspaceResumeState, 'schemaVersion' | 'repositoryId' | 'updatedAt'>,
+  repoRoot?: string
+): Promise<WorkspaceResumeState> {
+  const root = repoRoot || getAllowedRepoRoot();
+  const current = await getWorkspaceResumeState(root);
+  const next: WorkspaceResumeState = {
+    schemaVersion: 1,
+    repositoryId: getRepositoryId(root),
+    ...current,
+    ...patch,
+    updatedAt: new Date().toISOString(),
+  };
+  for (const key of ['activeSessionId', 'activeRunId', 'actualRunId', 'lastMessageId'] as const) {
+    if (next[key] === undefined) delete next[key];
+  }
+  if (next.activeSessionId && !validateSessionId(next.activeSessionId)) {
+    throw new Error(`Invalid sessionId: ${next.activeSessionId}`);
+  }
+  if (next.activeRunId && !validateRunId(next.activeRunId)) {
+    throw new Error(`Invalid runId: ${next.activeRunId}`);
+  }
+  await atomicWriteJson(getResumeStatePath(root), next);
+  return next;
+}
+
 /**
  * Atomically saves a conversation session.
  */
@@ -801,6 +902,14 @@ export async function saveConversationSession(
   }
   const filePath = path.join(getDashboardStateDir(root), 'conversations', `${session.sessionId}.json`);
   await atomicWriteJson(filePath, session);
+  await saveWorkspaceResumeState(
+    {
+      activeSessionId: session.sessionId,
+      lastMessageId: session.messages.at(-1)?.id,
+      activeRunId: session.linkedRunIds.at(-1),
+    },
+    root
+  );
 }
 
 /**
@@ -851,6 +960,144 @@ export async function listConversationSessions(
 
   sessions.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
   return sessions;
+}
+
+async function listResumeCandidateRuns(
+  root: string
+): Promise<CompactRunState[]> {
+  const runs = new Map<string, CompactRunState>();
+  const compactDir = path.join(getDashboardStateDir(root), 'compact');
+  try {
+    for (const file of await fs.promises.readdir(compactDir)) {
+      if (!file.endsWith('.json')) continue;
+      const runId = file.slice(0, -5);
+      if (!validateRunId(runId)) continue;
+      try {
+        const compact = parseJsonFileText<CompactRunState>(
+          await fs.promises.readFile(path.join(compactDir, file), 'utf8')
+        );
+        runs.set(runId, compact);
+      } catch {
+        // Ignore corrupt compact state.
+      }
+    }
+  } catch {
+    // The compact state directory is optional.
+  }
+
+  const runsDir = path.join(root, '.agent', 'runs');
+  try {
+    for (const folder of await fs.promises.readdir(runsDir)) {
+      if (!validateRunId(folder)) continue;
+      try {
+        const manifest = parseJsonFileText<{
+          status?: string;
+          createdAt?: string;
+          updatedAt?: string;
+        }>(
+          await fs.promises.readFile(
+            path.join(runsDir, folder, 'run.json'),
+            'utf8'
+          )
+        );
+        const existing = runs.get(folder);
+        const status = normalizeRunStatus(manifest.status);
+        runs.set(folder, {
+          runId: folder,
+          actualRunId: folder,
+          prompt: existing?.prompt || `작업 실행 (${folder})`,
+          createdAt:
+            manifest.createdAt || existing?.createdAt || new Date(0).toISOString(),
+          updatedAt:
+            manifest.updatedAt || existing?.updatedAt || new Date(0).toISOString(),
+          status,
+          requiresUserAction: requiresUserAction(status),
+          tasksCount: existing?.tasksCount || 0,
+          activeWorkersCount: existing?.activeWorkersCount || 0,
+          completedTasksCount: existing?.completedTasksCount || 0,
+        });
+      } catch {
+        // Ignore unreadable manifests.
+      }
+    }
+  } catch {
+    // The runs directory is optional.
+  }
+
+  return [...runs.values()].sort(
+    (a, b) =>
+      new Date(b.updatedAt || b.createdAt).getTime() -
+      new Date(a.updatedAt || a.createdAt).getTime()
+  );
+}
+
+export async function deriveWorkspaceResumeCandidate(
+  repoRoot?: string
+): Promise<WorkspaceResumeCandidate> {
+  const root = repoRoot || getAllowedRepoRoot();
+  const [sessions, runs] = await Promise.all([
+    listConversationSessions(root),
+    listResumeCandidateRuns(root),
+  ]);
+  const latestSession = sessions[0];
+  const session = latestSession
+    ? {
+        sessionId: latestSession.sessionId,
+        updatedAt: latestSession.updatedAt,
+        lastMessageId: latestSession.messages.at(-1)?.id,
+        pendingApproval: Boolean(latestSession.pendingApproval),
+        linkedRunIds: [...latestSession.linkedRunIds],
+      }
+    : undefined;
+
+  if (latestSession) {
+    const linkedIds = new Set(latestSession.linkedRunIds);
+    const linkedRun = runs.find(
+      run => linkedIds.has(run.runId) || Boolean(run.actualRunId && linkedIds.has(run.actualRunId))
+    );
+    if (linkedRun) {
+      return {
+        schemaVersion: 1,
+        authoritative: false,
+        derivedAt: new Date().toISOString(),
+        session,
+        run: {
+          runId: linkedRun.runId,
+          actualRunId: linkedRun.actualRunId,
+          status: linkedRun.status,
+          updatedAt: linkedRun.updatedAt,
+          requiresUserAction: linkedRun.requiresUserAction,
+        },
+        reason: 'latest_session_with_linked_run',
+      };
+    }
+    return {
+      schemaVersion: 1,
+      authoritative: false,
+      derivedAt: new Date().toISOString(),
+      session,
+      reason: 'latest_session',
+    };
+  }
+
+  const latestRun = runs[0];
+  return {
+    schemaVersion: 1,
+    authoritative: false,
+    derivedAt: new Date().toISOString(),
+    ...(latestRun
+      ? {
+          run: {
+            runId: latestRun.runId,
+            actualRunId: latestRun.actualRunId,
+            status: latestRun.status,
+            updatedAt: latestRun.updatedAt,
+            requiresUserAction: latestRun.requiresUserAction,
+          },
+        }
+      : {}),
+    reason: latestRun ? 'latest_run' : 'none',
+  };
 }
 
 /**
@@ -1907,13 +2154,13 @@ export async function getRunDetails(
     try {
       const resFile = path.join(resultsDir, `${tid}-result.json`);
       const resRaw = await fs.promises.readFile(resFile, 'utf8');
-      workerData = parseJsonFileText<LiveWorkerData>(resRaw);
+      workerData = normalizeWorkerData(parseJsonFileText<LiveWorkerData>(resRaw));
     } catch {
       // Check workers dir (live worker state)
       try {
         const workerFile = path.join(workersDir, `${tid}.json`);
         const wRaw = await fs.promises.readFile(workerFile, 'utf8');
-        workerData = parseJsonFileText<LiveWorkerData>(wRaw);
+        workerData = normalizeWorkerData(parseJsonFileText<LiveWorkerData>(wRaw));
       } catch {
         // Fallback default worker data
         workerData = {
