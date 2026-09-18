@@ -411,6 +411,31 @@ export function generateRunId(): string {
 }
 
 /**
+ * Unlike POSIX, Windows refuses a rename onto a path another handle still holds
+ * open, so a concurrent reader, a virus scanner or the search indexer turns an
+ * atomic replace into EPERM. Those windows are short, so retry before failing.
+ */
+const TRANSIENT_FS_ERRORS = new Set(['EPERM', 'EACCES', 'EBUSY']);
+
+export async function retryTransientFsError<T>(
+  operation: () => Promise<T>,
+  options: { attempts?: number; delayMs?: number; sleep?: (ms: number) => Promise<void> } = {}
+): Promise<T> {
+  const attempts = options.attempts ?? 5;
+  const delayMs = options.delayMs ?? 25;
+  const sleep = options.sleep ?? (ms => new Promise<void>(resolve => setTimeout(resolve, ms)));
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException)?.code;
+      if (attempt >= attempts || !code || !TRANSIENT_FS_ERRORS.has(code)) throw error;
+      await sleep(delayMs * attempt);
+    }
+  }
+}
+
+/**
  * Atomic write helper using tmp file and rename.
  */
 async function atomicWriteJson(targetPath: string, data: unknown): Promise<void> {
@@ -423,7 +448,13 @@ async function atomicWriteJson(targetPath: string, data: unknown): Promise<void>
   const tmpFile = path.join(tmpDir, `${path.basename(targetPath)}.${process.pid}.${randSuffix}.tmp`);
 
   await fs.promises.writeFile(tmpFile, JSON.stringify(data, null, 2), 'utf8');
-  await fs.promises.rename(tmpFile, targetPath);
+  try {
+    await retryTransientFsError(() => fs.promises.rename(tmpFile, targetPath));
+  } catch (error) {
+    // A tmp file left behind never gets picked up again; drop it before surfacing.
+    await fs.promises.rm(tmpFile, { force: true }).catch(() => undefined);
+    throw error;
+  }
 }
 
 function getDashboardStateDir(repoRoot: string): string {

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { validateRunId, validateRepository, validatePrompt, generateRunId, spawnRouterRun, getCompactRunState, saveCompactRunState, listCompactRuns, getProjectWorkers, resolveRequiredTools, getRunDetails, getAliasRecord, findAndLinkActualRun, STALE_PROCESS_MISMATCH_REASON, getProjectWorkGraph } from './workspace-store.ts';
+import { validateRunId, validateRepository, validatePrompt, generateRunId, spawnRouterRun, getCompactRunState, saveCompactRunState, listCompactRuns, getProjectWorkers, resolveRequiredTools, getRunDetails, getAliasRecord, findAndLinkActualRun, STALE_PROCESS_MISMATCH_REASON, getProjectWorkGraph, retryTransientFsError } from './workspace-store.ts';
 import type { CompactRunState } from './workspace-contract.ts';
 
 void describe('Workspace Store (Idempotency, Path Traversal, & Recovery)', () => {
@@ -1048,5 +1048,55 @@ void describe('Workspace Store (Idempotency, Path Traversal, & Recovery)', () =>
       assert.strictEqual(projectWorkersRes.historyWorkers.length, 2);
       assert.strictEqual(projectWorkersRes.activeWorkers.length, 0);
     });
+  });
+});
+
+void describe('retryTransientFsError', () => {
+  const failWith = (code: string, times: number) => {
+    let calls = 0;
+    return async () => {
+      calls += 1;
+      if (calls <= times) {
+        const error: NodeJS.ErrnoException = new Error(code + ' simulated');
+        error.code = code;
+        throw error;
+      }
+      return calls;
+    };
+  };
+
+  void test('retries a Windows rename lock until it clears', async () => {
+    const calls = await retryTransientFsError(failWith('EPERM', 2), { delayMs: 0 });
+    assert.strictEqual(calls, 3);
+  });
+
+  void test('gives up after the final attempt and rethrows', async () => {
+    await assert.rejects(
+      retryTransientFsError(failWith('EBUSY', 99), { attempts: 3, delayMs: 0 }),
+      /EBUSY simulated/
+    );
+  });
+
+  void test('does not retry an error that will not clear on its own', async () => {
+    let calls = 0;
+    await assert.rejects(
+      retryTransientFsError(async () => {
+        calls += 1;
+        const error: NodeJS.ErrnoException = new Error('ENOSPC simulated');
+        error.code = 'ENOSPC';
+        throw error;
+      }, { delayMs: 0 }),
+      /ENOSPC simulated/
+    );
+    assert.strictEqual(calls, 1);
+  });
+
+  void test('waits longer on each successive attempt', async () => {
+    const waits: number[] = [];
+    await retryTransientFsError(failWith('EACCES', 2), {
+      delayMs: 10,
+      sleep: async ms => { waits.push(ms); },
+    });
+    assert.deepStrictEqual(waits, [10, 20]);
   });
 });
