@@ -110,6 +110,23 @@ export interface LiveWorkerVerification {
   verifiedAt?: string;
 }
 
+/**
+ * Worker JSON comes from the Gemini CLI, which emits `verification.commands` as a bare
+ * object when there is exactly one command. Every consumer treats it as an array, so the
+ * shape is normalized once here, at the point the file is read.
+ */
+export function normalizeWorkerData<T extends { verification?: LiveWorkerVerification }>(worker: T): T {
+  const commands = worker.verification?.commands as unknown;
+  if (!commands || Array.isArray(commands)) return worker;
+  return {
+    ...worker,
+    verification: {
+      ...worker.verification,
+      commands: typeof commands === 'object' ? [commands as LiveWorkerVerificationCommand] : [],
+    },
+  };
+}
+
 export interface LiveWorkerEscalation {
   requiresCodex?: boolean;
   category?: string;

@@ -27,6 +27,7 @@ import {
   validateSessionId,
   isLauncherError,
   evaluateRunRetrySafety,
+  normalizeWorkerData,
 } from './workspace-contract.ts';
 import { buildProjectWorkGraph } from './project-event-graph.ts';
 import { sanitizeText, sanitizePath, sanitizeWorkerData, sanitizeGraphData } from './workspace-sanitize.ts';
@@ -2122,13 +2123,13 @@ export async function getRunDetails(
     try {
       const resFile = path.join(resultsDir, `${tid}-result.json`);
       const resRaw = await fs.promises.readFile(resFile, 'utf8');
-      workerData = parseJsonFileText<LiveWorkerData>(resRaw);
+      workerData = normalizeWorkerData(parseJsonFileText<LiveWorkerData>(resRaw));
     } catch {
       // Check workers dir (live worker state)
       try {
         const workerFile = path.join(workersDir, `${tid}.json`);
         const wRaw = await fs.promises.readFile(workerFile, 'utf8');
-        workerData = parseJsonFileText<LiveWorkerData>(wRaw);
+        workerData = normalizeWorkerData(parseJsonFileText<LiveWorkerData>(wRaw));
       } catch {
         // Fallback default worker data
         workerData = {
