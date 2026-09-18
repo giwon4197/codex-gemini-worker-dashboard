@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { RotateCcw, Trash2 } from 'lucide-react';
 
 import type {
@@ -47,33 +47,52 @@ const booleanPreferences = [
   ['completionNotifications', '완료 알림'],
 ] as const;
 
+type MemoryApiResponse = {
+  ok: boolean;
+  error?: string;
+  memory: WorkerMemorySettings;
+};
+
+type CandidateApiResponse = {
+  ok: boolean;
+  error?: string;
+  candidate: WorkspaceResumeCandidate | null;
+};
+
 export function PreferencesPanel() {
   const [memory, setMemory] = useState<WorkerMemorySettings | null>(null);
   const [candidate, setCandidate] = useState<WorkspaceResumeCandidate | null>(null);
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
 
-  const load = useCallback(async () => {
-    try {
-      const [memoryResponse, candidateResponse] = await Promise.all([
-        fetch('/api/settings/memory', { cache: 'no-store' }),
-        fetch('/api/workspace/resume-candidate', { cache: 'no-store' }),
-      ]);
-      const memoryBody = await memoryResponse.json();
-      const candidateBody = await candidateResponse.json();
-      if (!memoryResponse.ok || !memoryBody.ok) throw new Error(memoryBody.error);
-      setMemory(memoryBody.memory);
-      if (candidateResponse.ok && candidateBody.ok) {
-        setCandidate(candidateBody.candidate);
-      }
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : '설정을 불러오지 못했습니다.');
-    }
-  }, []);
-
   useEffect(() => {
+    let cancelled = false;
+
+    async function load() {
+      try {
+        const [memoryResponse, candidateResponse] = await Promise.all([
+          fetch('/api/settings/memory', { cache: 'no-store' }),
+          fetch('/api/workspace/resume-candidate', { cache: 'no-store' }),
+        ]);
+        const memoryBody = (await memoryResponse.json()) as MemoryApiResponse;
+        const candidateBody = (await candidateResponse.json()) as CandidateApiResponse;
+        if (cancelled) return;
+        if (!memoryResponse.ok || !memoryBody.ok) throw new Error(memoryBody.error);
+        setMemory(memoryBody.memory);
+        if (candidateResponse.ok && candidateBody.ok) {
+          setCandidate(candidateBody.candidate);
+        }
+      } catch (cause) {
+        if (cancelled) return;
+        setError(cause instanceof Error ? cause.message : '설정을 불러오지 못했습니다.');
+      }
+    }
+
     void load();
-  }, [load]);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const mutate = async (body?: Record<string, unknown>, reset = false) => {
     setSaving(true);
@@ -84,7 +103,7 @@ export function PreferencesPanel() {
         headers: reset ? undefined : { 'Content-Type': 'application/json' },
         body: reset ? undefined : JSON.stringify(body),
       });
-      const result = await response.json();
+      const result = (await response.json()) as MemoryApiResponse;
       if (!response.ok || !result.ok) throw new Error(result.error);
       setMemory(result.memory);
     } catch (cause) {

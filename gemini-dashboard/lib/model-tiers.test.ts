@@ -2,7 +2,6 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
-// @ts-expect-error TS5097 allowed for test runner
 import { ALLOWED_TIERS, DEFAULT_TIER, loadModelTiers, modelForTier, parseModelTiers } from './model-tiers.ts';
 
 const valid = () => ({ default_tier: 'normal', tiers: [{ tier: 'normal', model: 'example', description: 'Example' }] });

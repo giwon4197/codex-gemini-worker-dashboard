@@ -1,8 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-// @ts-expect-error TS5097 allowed for test runner
 import { parseWorkerNDJSONLine, buildProjectWorkGraph, sortGraphNodesNewestFirst, sortGraphNodesOldestFirst, computeGraphLayoutGeometry, computeLaneX, computeNodeY, computeGraphSvgWidth, computeGraphSvgHeight, getLaneColor, GRAPH_LAYOUT_CONFIG, type ProjectGraphNode } from './project-event-graph.ts';
-// @ts-expect-error TS5097 allowed for test runner
 import { sanitizeGraphData } from './workspace-sanitize.ts';
 
 void describe('Project Work Graph & Defensive NDJSON Parser', () => {

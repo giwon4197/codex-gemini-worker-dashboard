@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-// @ts-expect-error TS5097 allowed for test runner
 import { validateRunId, validateRepository, validatePrompt, generateRunId, spawnRouterRun, getCompactRunState, saveCompactRunState, listCompactRuns, getProjectWorkers, resolveRequiredTools, getRunDetails, getAliasRecord, findAndLinkActualRun, STALE_PROCESS_MISMATCH_REASON, getProjectWorkGraph } from './workspace-store.ts';
 import type { CompactRunState } from './workspace-contract.ts';
 

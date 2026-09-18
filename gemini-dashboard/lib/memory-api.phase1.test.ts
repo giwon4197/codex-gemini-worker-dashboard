@@ -24,12 +24,17 @@ afterEach(() => {
   fs.rmSync(root, { recursive: true, force: true });
 });
 
-test('memory API supports read, explicit mutation, and reset', async () => {
+type MemoryResponse = {
+  memory: { preferences: Record<string, { value: string }> };
+};
+
+void test('memory API supports read, explicit mutation, and reset', async () => {
   const initial = await handleWorkspaceBridgeRequest(
     new Request('http://localhost/api/settings/memory')
   );
   assert.equal(initial.status, 200);
-  assert.deepEqual((await initial.json()).memory.preferences, {});
+  const initialBody = await initial.json() as MemoryResponse;
+  assert.deepEqual(initialBody.memory.preferences, {});
 
   const changed = await handleWorkspaceBridgeRequest(
     new Request('http://localhost/api/settings/memory', {
@@ -42,17 +47,20 @@ test('memory API supports read, explicit mutation, and reset', async () => {
     })
   );
   assert.equal(changed.status, 200);
-  assert.equal((await changed.json()).memory.preferences.responseLanguage.value, 'ko');
+  const changedBody = await changed.json() as MemoryResponse;
+  assert.equal(changedBody.memory.preferences.responseLanguage.value, 'ko');
 
   const reset = await handleWorkspaceBridgeRequest(
     new Request('http://localhost/api/settings/memory', { method: 'DELETE' })
   );
   assert.equal(reset.status, 200);
-  assert.deepEqual((await reset.json()).memory.preferences, {});
-  assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'worker-settings.json'), 'utf8')).tier, 'normal');
+  const resetBody = await reset.json() as MemoryResponse;
+  assert.deepEqual(resetBody.memory.preferences, {});
+  const settings = JSON.parse(fs.readFileSync(path.join(root, 'worker-settings.json'), 'utf8')) as { tier: string };
+  assert.equal(settings.tier, 'normal');
 });
 
-test('memory API rejects unknown values without echoing them', async () => {
+void test('memory API rejects unknown values without echoing them', async () => {
   const secret = 'sk-abcdefghijklmnopqrstuvwxyz123456';
   const response = await handleWorkspaceBridgeRequest(
     new Request('http://localhost/api/settings/memory', {

@@ -4,11 +4,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import type { SpawnOptions } from 'node:child_process';
-// @ts-expect-error TS5097 allowed for test runner
 import { evaluateCodexConversation } from './codex-conversation.ts';
-// @ts-expect-error TS5097 allowed for test runner
 import { getConversationSession, approveConversationPlan, saveCompactRunState, listCompactRuns } from './workspace-store.ts';
-// @ts-expect-error TS5097 allowed for test runner
 import { extractTimelineEvents } from './workspace-contract.ts';
 
 void describe('Codex Conversational Workspace & Decision Engine', () => {

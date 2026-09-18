@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-// @ts-expect-error TS5097 allowed for test runner
 import { normalizeQuotaData, parseQuotaTsv, sanitizeSafeString, getGeminiQuota, clearGeminiQuotaCache } from './gemini-quota.ts';
 
 void describe('Gemini Quota Reader and Normalizer', () => {
