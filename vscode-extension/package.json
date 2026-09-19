@@ -3,16 +3,16 @@
   "displayName": "coXgem",
   "description": "Local AI conversation and background worker orchestration inside VS Code. Works with the Codex and Gemini CLIs; not affiliated with OpenAI or Google.",
   "version": "0.1.0",
-  "publisher": "coxgem",
+  "publisher": "coXgem",
   "private": true,
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/onseoh/codex-gemini-worker-dashboard.git",
+    "url": "https://github.com/giwon4197/codex-gemini-worker-dashboard.git",
     "directory": "vscode-extension"
   },
   "bugs": {
-    "url": "https://github.com/onseoh/codex-gemini-worker-dashboard/issues"
+    "url": "https://github.com/giwon4197/codex-gemini-worker-dashboard/issues"
   },
   "icon": "media/icon.png",
   "engines": {
