@@ -24,7 +24,7 @@ code --user-data-dir <empty-dir> --extensions-dir <empty-dir> --install-extensio
 `coxgem.*` 설정은 VS Code 설정 화면에서 바꿉니다.
 
 - `workerTier`: Gemini 워커 등급(`fast`·`normal`·`advanced`·`reasoning`). 바꾸면 작업 폴더의 `worker-settings.json`에 저장되어 웹 대시보드와 공유됩니다.
-- `codexModel`: 계획·대화 단계의 `codex exec --model` 값. 비우면 `model-tiers.json`의 기본값을 씁니다.
+- `codexModel`: 계획·대화 단계의 `codex exec --model` 값. 비우면 Extension 요청은 로컬 Codex CLI 기본값을 따릅니다.
 - `codexChatModel`: 워커를 만들지 않는 Explain Selection 전용 모델. 비우면 `codexModel`을 따릅니다.
 
 ## 화면
@@ -38,6 +38,8 @@ Run이 멈추면(`awaiting_review` 등) Task Graph 패널에 `검토` 섹션이 
 계획 승인이나 검토 같은 Gate에 도달했을 때 대화 뷰가 보이지 않으면 뷰 배지가 켜지고, 뷰를 보면 꺼집니다. 토스트는 없습니다.
 
 사용량은 입력창 아래의 `Codex`·`Gemini` 버튼을 눌렀을 때만 조회합니다. 결과는 버튼 오른쪽에 `N% 남음 · HH:MM 초기화`로 나오고, 버튼이나 결과에 마우스를 올리거나 키보드 focus 하면 창별(5h·weekly) 상세가 툴팁으로 보입니다.
+
+입력창 아래의 selector는 Codex 모델과 Gemini worker tier를 바꿉니다. 인증은 Extension이 저장하거나 읽지 않고 로컬 공식 CLI 세션을 사용합니다. Codex 로그인은 Integrated Terminal의 `codex login`, Gemini 로그인은 `agy`의 interactive flow로 진행합니다. 모델 목록 표시는 계정 entitlement 보장이 아니며 실제 CLI 실행 결과가 최종 기준입니다. Run이 `planning`·`running`·`retrying`인 동안 selector는 잠깁니다.
 
 새 창은 현재 세션에 연결된 Run만 Task Graph에 복구합니다. 다른 창에서 시작한 Run이 진행 중이면 Status Bar에 `진행 중 Run N (연결 안 됨)`이 표시되고, 클릭하면 `Show Active Run`으로 이동합니다.
 
@@ -60,6 +62,23 @@ VSIX 설치 후 다음을 확인합니다.
 - [ ] 실패 노드의 `이 Run 재시도`가 실행 중에는 비활성화되고 정책 위반 실패에는 나타나지 않는다.
 - [ ] 라이트·다크·고대비 테마에서 버튼과 배지가 읽힌다.
 - [ ] 키보드만으로 그래프 행, 파일, 사용량 버튼에 접근할 수 있다.
+- [ ] Codex CLI 미설치 상태가 안전하게 표시된다.
+- [ ] Codex 미로그인 상태에서 로그인 필요 UI가 표시된다.
+- [ ] Codex 로그인 버튼이 Integrated Terminal에서 공식 로그인 command를 실행한다.
+- [ ] 로그인 후 다시 확인하면 연결 상태가 갱신된다.
+- [ ] Antigravity CLI 미설치 상태가 안전하게 표시된다.
+- [ ] Gemini 미로그인 상태에서 로그인 필요 UI가 표시된다.
+- [ ] Gemini 로그인 버튼이 Integrated Terminal에서 공식 CLI를 실행한다.
+- [ ] Gemini 로그인 후 다시 확인하면 연결 상태가 갱신된다.
+- [ ] Codex model selector가 보인다.
+- [ ] Gemini tier/model selector가 보인다.
+- [ ] Codex model 변경이 다음 Codex 요청에 반영된다.
+- [ ] Gemini tier 변경이 다음 worker Run에 반영된다.
+- [ ] Run 진행 중 selector 변경이 차단된다.
+- [ ] VS Code 재시작 후 선택값이 유지된다.
+- [ ] Web Dashboard와 Gemini tier 설정이 일치한다.
+- [ ] token/API key/password가 UI/log에 표시되지 않는다.
+- [ ] Light/Dark/High Contrast theme에서 읽을 수 있다.
 
 ## 개발
 
