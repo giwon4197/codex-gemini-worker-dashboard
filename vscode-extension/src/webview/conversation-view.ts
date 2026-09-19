@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { CONVERSATION_VIEW_ID, SESSION_STATE_KEY, TRACKED_RUN_KEY, USAGE_CACHE_KEY, type UsageCache } from '../ids';
-import { TERMINAL_RUN_STATUSES, busyStatusText, runProgressLines, tailProgressLines, type HostToWebview, type WebviewToHost } from '../protocol';
+import { TERMINAL_RUN_STATUSES, busyStatusText, runProgressLines, tailProgressLines, type AuthModelState, type HostToWebview, type WebviewToHost } from '../protocol';
 import type { ProjectWorkGraphData } from '../../../packages/orchestrator-core/project-event-graph.ts';
 import type { ConversationSession } from '../../../packages/orchestrator-core/workspace-contract.ts';
 import {
@@ -44,6 +44,8 @@ import {
 import { ACTIVE_RUN_STATUSES } from '../graph-tree';
 import type { RunStatusBar } from '../status-bar';
 import type { MemoryMutation } from '../core-host';
+import { isModelSelectionLocked, isValidGeminiTier, probeAuthModelState } from '../auth-model-state';
+import { isValidCodexModel } from '../../../packages/orchestrator-core/worker-settings.ts';
 
 const MEMORY_OPERATIONS = new Set(['setEnabled', 'setPreference', 'deletePreference', 'reset']);
 
@@ -63,6 +65,7 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
   private runFollowUp?: RunFollowUp;
   private chatAbort?: AbortController;
   private lastGraph: ProjectWorkGraphData | null = null;
+  private authModelState?: AuthModelState;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -222,6 +225,26 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
         await this.cancel();
         return;
       }
+      if (message.type === 'refreshAuthModelState') {
+        await this.refreshAuthModelState(true);
+        return;
+      }
+      if (message.type === 'loginCodex') {
+        this.openLoginTerminal('codex');
+        return;
+      }
+      if (message.type === 'loginGemini') {
+        this.openLoginTerminal('gemini');
+        return;
+      }
+      if (message.type === 'setCodexModel') {
+        await this.setCodexModel(message.model);
+        return;
+      }
+      if (message.type === 'setGeminiTier') {
+        await this.setGeminiTier(message.tier);
+        return;
+      }
       if (message.type === 'memoryGet') {
         await this.postMemory();
         return;
@@ -282,7 +305,7 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
           forbidWorkers,
           codexModel: config.get<string>('codexModel'),
           codexChatModel: config.get<string>('codexChatModel'),
-        }),
+        }) ?? null,
         onOutput: text => {
           liveOutput = (liveOutput + text).slice(-4000);
           this.post({ type: 'progress', source: 'codex', lines: tailProgressLines(liveOutput) });
@@ -399,6 +422,7 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
   /** Mirrors the tracked run's newest activity into the chat while it is in flight. */
   showRunProgress(graph: ProjectWorkGraphData | null, failure?: string[]): void {
     this.lastGraph = graph;
+    this.postAuthModelState();
     this.post({ type: 'inputMode', questionOnly: this.runInProgress() });
     const lines = runProgressLines(graph);
     if (failure?.length) {
@@ -491,6 +515,7 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
 
   /** Full restore for a ready webview: run state plus chat, usage cache, and session list. */
   async restoreFromDisk(): Promise<void> {
+    await this.refreshAuthModelState(true);
     const restored = await this.syncRunState();
     const root = getWorkspaceRoot();
     if (!restored || !root) {
@@ -564,6 +589,112 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
     const text = await getRunStatusText(root, hasPendingApproval, this.context.workspaceState.get<string>(TRACKED_RUN_KEY));
     this.statusBar.setStatus(text);
     this.post({ type: 'runStatus', text });
+  }
+
+  /** Re-probes only on activation/ready or an explicit refresh; setting changes reuse sanitized state. */
+  async refreshAuthModelState(probeProviders = true): Promise<void> {
+    const config = vscode.workspace.getConfiguration('coxgem');
+    if (probeProviders || !this.authModelState) {
+      this.authModelState = await probeAuthModelState({
+        selectedCodexModel: config.get<string>('codexModel'),
+        selectedGeminiTier: config.get<string>('workerTier'),
+        runStatus: this.lastGraph?.status,
+      });
+    }
+    this.postAuthModelState();
+  }
+
+  private postAuthModelState(): void {
+    if (!this.authModelState) return;
+    const config = vscode.workspace.getConfiguration('coxgem');
+    const codexModel = config.get<string>('codexModel')?.trim() || undefined;
+    const workerTier = config.get<string>('workerTier') || this.authModelState.gemini.selectedTier;
+    const tier = this.authModelState.gemini.tiers.find(item => item.tier === workerTier);
+    this.authModelState = {
+      ...this.authModelState,
+      selectorsDisabled: isModelSelectionLocked(this.lastGraph?.status),
+      codex: {
+        ...this.authModelState.codex,
+        selectedModel: codexModel,
+        modelOptions: Array.from(new Set([
+          codexModel,
+          ...this.authModelState.codex.modelOptions,
+        ].filter((value): value is string => Boolean(value)))),
+      },
+      gemini: {
+        ...this.authModelState.gemini,
+        selectedTier: tier?.tier || this.authModelState.gemini.selectedTier,
+        selectedModel: tier?.model || this.authModelState.gemini.selectedModel,
+      },
+    };
+    this.post({ type: 'authModelState', ...this.authModelState });
+  }
+
+  private modelSelectionLocked(): boolean {
+    return isModelSelectionLocked(this.lastGraph?.status);
+  }
+
+  private openLoginTerminal(provider: 'codex' | 'gemini'): void {
+    const terminal = vscode.window.createTerminal({
+      name: provider === 'codex' ? 'coXgem · Codex 로그인' : 'coXgem · Gemini 로그인',
+    });
+    terminal.show();
+    terminal.sendText(provider === 'codex' ? 'codex login' : 'agy', true);
+  }
+
+  private async setCodexModel(requested: string | null): Promise<void> {
+    if (this.modelSelectionLocked()) {
+      this.post({ type: 'error', message: '현재 Run이 끝난 뒤 변경할 수 있습니다.' });
+      this.postAuthModelState();
+      return;
+    }
+    let model = requested;
+    if (model === null) {
+      const customModel = await vscode.window.showInputBox({
+        title: 'Codex 모델 직접 입력',
+        prompt: 'Codex CLI에 전달할 model id를 입력하세요. 실제 사용 가능 여부는 CLI 실행 결과가 결정합니다.',
+        value: vscode.workspace.getConfiguration('coxgem').get<string>('codexModel') || '',
+        validateInput: value => !value.trim() || isValidCodexModel(value.trim())
+          ? undefined
+          : '유효한 Codex model id를 입력하세요.',
+      });
+      if (customModel === undefined) {
+        this.postAuthModelState();
+        return;
+      }
+      model = customModel;
+    }
+    const normalized = model.trim();
+    if (normalized && !isValidCodexModel(normalized)) {
+      this.post({ type: 'error', message: '유효하지 않은 Codex 모델 이름입니다.' });
+      this.postAuthModelState();
+      return;
+    }
+    await vscode.workspace.getConfiguration('coxgem').update(
+      'codexModel',
+      normalized,
+      vscode.ConfigurationTarget.Workspace
+    );
+    await this.refreshAuthModelState(false);
+  }
+
+  private async setGeminiTier(tier: string): Promise<void> {
+    if (this.modelSelectionLocked()) {
+      this.post({ type: 'error', message: '현재 Run이 끝난 뒤 변경할 수 있습니다.' });
+      this.postAuthModelState();
+      return;
+    }
+    if (!isValidGeminiTier(tier)) {
+      this.post({ type: 'error', message: '유효하지 않은 Gemini 모델 등급입니다.' });
+      this.postAuthModelState();
+      return;
+    }
+    await vscode.workspace.getConfiguration('coxgem').update(
+      'workerTier',
+      tier,
+      vscode.ConfigurationTarget.Workspace
+    );
+    await this.refreshAuthModelState(false);
   }
 
   async postContext(): Promise<void> {
@@ -661,7 +792,7 @@ function renderConversationHtml(webview: vscode.Webview): string {
       padding: 4px 8px;
       margin: 4px 4px 0 0;
     }
-    button:focus-visible, textarea:focus-visible {
+    button:focus-visible, textarea:focus-visible, select:focus-visible {
       outline: 1px solid var(--vscode-focusBorder);
       outline-offset: 1px;
     }
@@ -733,9 +864,29 @@ function renderConversationHtml(webview: vscode.Webview): string {
     .memoryList .meta { white-space: normal; }
     #memoryBody { max-height: 240px; overflow: auto; }
     #memoryBody h3 { font-size: 12px; margin: 10px 0 4px; }
-    .sendRow { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+    .sendRow { display: flex; justify-content: space-between; align-items: center; gap: 6px; flex-wrap: wrap; }
     .sendRow button { margin: 4px 0 0; }
     .sendRow .hint { flex: 1; min-width: 0; margin: 4px 0 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .authOnboarding {
+      margin: 0 0 6px; padding: 7px;
+      border: 1px solid var(--vscode-widget-border, var(--vscode-contrastBorder, transparent));
+      background: var(--vscode-editorWidget-background, transparent);
+    }
+    .authOnboarding h3 { margin: 0 0 5px; font-size: 12px; }
+    .authProvider { display: flex; align-items: center; gap: 6px; min-height: 24px; }
+    .authProvider strong { min-width: 52px; }
+    .authProvider .authText { flex: 1; min-width: 0; color: var(--vscode-descriptionForeground); }
+    .authProvider button, .authRefresh { margin: 0; padding: 2px 6px; }
+    .modelControls { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; min-width: 0; }
+    .modelSelect {
+      max-width: 210px; min-width: 0; height: 24px; padding: 1px 22px 1px 7px;
+      border-radius: 12px; font: inherit;
+      color: var(--vscode-dropdown-foreground);
+      background: var(--vscode-dropdown-background);
+      border: 1px solid var(--vscode-dropdown-border, var(--vscode-contrastBorder, transparent));
+    }
+    .modelSelect:disabled { opacity: 0.55; }
+    .authRefresh.iconBtn { margin: 0; }
     #graphPanel { margin-bottom: 6px; border: 1px solid var(--vscode-widget-border, var(--vscode-contrastBorder, transparent)); border-radius: 3px; }
     #graphPanel > summary { cursor: pointer; padding: 4px 6px; font-weight: 600; user-select: none; }
     #graphPanel > summary:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
@@ -852,6 +1003,18 @@ function renderConversationHtml(webview: vscode.Webview): string {
     </div>
   </details>
   <div class="meta"><span id="context">workspace 연결 대기</span> · <span id="status" role="status" aria-live="polite">idle</span></div>
+  <section id="authOnboarding" class="authOnboarding" aria-label="coXgem 준비 상태">
+    <h3>coXgem 준비</h3>
+    <div class="authProvider">
+      <strong>Codex</strong><span id="codexAuthText" class="authText">확인 중…</span>
+      <button id="codexLogin" type="button" hidden>ChatGPT로 로그인</button>
+    </div>
+    <div class="authProvider">
+      <strong>Gemini</strong><span id="geminiAuthText" class="authText">확인 중…</span>
+      <button id="geminiLogin" type="button" hidden>Google로 로그인</button>
+    </div>
+    <button id="authRefresh" class="authRefresh" type="button">다시 확인</button>
+  </section>
   <div class="messages" id="messages" aria-live="polite" aria-label="대화"></div>
   <pre class="runProgress" id="runProgress" aria-label="Run 진행 상황" hidden></pre>
   <label class="hint chip"><input type="checkbox" id="attach" /> 현재 파일·선택 첨부</label>
@@ -880,6 +1043,11 @@ function renderConversationHtml(webview: vscode.Webview): string {
         <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 2.4 14.3 13.2H1.7Z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M8 6.6v2.9" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><circle cx="8" cy="11.3" r="0.8" fill="currentColor"/></svg>
         <span id="errorCount" class="iconBadge">0</span>
       </button>
+    </div>
+    <div class="modelControls" aria-label="모델 선택">
+      <select id="codexModel" class="modelSelect" aria-label="Codex 모델" title="계획, 대화 및 검토에 사용하는 모델"></select>
+      <select id="geminiTier" class="modelSelect" aria-label="Gemini Worker 모델" title="승인 후 실제 코드를 구현하는 Worker 모델"></select>
+      <button id="modelRefresh" class="iconBtn authRefresh" type="button" aria-label="인증과 모델 상태 다시 확인" title="다시 확인">↻</button>
     </div>
     <p class="hint" id="sendHint">Ctrl+Enter 보내기 · Esc 중단</p>
     <button id="send" type="button">보내기</button>
@@ -927,6 +1095,15 @@ function renderConversationHtml(webview: vscode.Webview): string {
     const attachEl = document.getElementById('attach');
     const sessionsEl = document.getElementById('sessions');
     const runProgressEl = document.getElementById('runProgress');
+    const authOnboarding = document.getElementById('authOnboarding');
+    const codexAuthText = document.getElementById('codexAuthText');
+    const geminiAuthText = document.getElementById('geminiAuthText');
+    const codexLogin = document.getElementById('codexLogin');
+    const geminiLogin = document.getElementById('geminiLogin');
+    const authRefresh = document.getElementById('authRefresh');
+    const modelRefresh = document.getElementById('modelRefresh');
+    const codexModel = document.getElementById('codexModel');
+    const geminiTier = document.getElementById('geminiTier');
     let busy = false;
     let pendingEl = null;
     function bubble(sender, text, className) {
@@ -1015,6 +1192,58 @@ function renderConversationHtml(webview: vscode.Webview): string {
       sendBtn.disabled = active;
       for (const button of messagesEl.querySelectorAll('button')) button.disabled = active;
       statusEl.textContent = active ? reason : lastRunStatus;
+    }
+    function authSymbol(state) {
+      if (state === 'authenticated') return '●';
+      if (state === 'unauthenticated') return '○';
+      if (state === 'not_installed') return '!';
+      return '?';
+    }
+    function authText(provider, state, method) {
+      if (state === 'authenticated') return '● 연결됨' + (method ? ' · ' + method : '');
+      if (state === 'unauthenticated') return '○ 로그인 필요';
+      if (state === 'not_installed') return provider === 'Codex'
+        ? '! Codex CLI가 필요합니다.'
+        : '! Antigravity CLI가 필요합니다.';
+      return '? 상태를 확인할 수 없습니다.';
+    }
+    function titleCase(value) {
+      return value ? value.charAt(0).toUpperCase() + value.slice(1) : value;
+    }
+    function renderAuthModelState(data) {
+      const codexState = data.codex.authState;
+      const geminiState = data.gemini.authState;
+      codexAuthText.textContent = authText('Codex', codexState, data.codex.authMethod);
+      geminiAuthText.textContent = authText('Gemini', geminiState);
+      codexLogin.hidden = codexState !== 'unauthenticated';
+      geminiLogin.hidden = geminiState !== 'unauthenticated';
+      authOnboarding.hidden = codexState === 'authenticated' && geminiState === 'authenticated';
+
+      const codexPrefix = authSymbol(codexState) + ' Codex · ';
+      codexModel.replaceChildren();
+      codexModel.append(new Option(codexPrefix + 'Default / CLI 기본값', ''));
+      for (const model of data.codex.modelOptions || []) {
+        codexModel.append(new Option(codexPrefix + model, model));
+      }
+      codexModel.append(new Option(codexPrefix + '직접 입력…', '__custom__'));
+      codexModel.value = data.codex.selectedModel || '';
+
+      const geminiPrefix = authSymbol(geminiState) + ' Gemini · ';
+      geminiTier.replaceChildren();
+      for (const tier of data.gemini.tiers || []) {
+        const suffix = tier.available === false ? ' · 현재 계정에서 확인되지 않음' : '';
+        const option = new Option(geminiPrefix + titleCase(tier.tier) + ' · ' + tier.model + suffix, tier.tier);
+        option.disabled = tier.available === false && tier.tier !== data.gemini.selectedTier;
+        geminiTier.append(option);
+      }
+      geminiTier.value = data.gemini.selectedTier;
+
+      const locked = Boolean(data.selectorsDisabled);
+      const lockHint = '현재 Run이 끝난 뒤 변경할 수 있습니다.';
+      codexModel.disabled = locked;
+      geminiTier.disabled = locked;
+      codexModel.title = locked ? lockHint : '계획, 대화 및 검토에 사용하는 모델';
+      geminiTier.title = locked ? lockHint : '승인 후 실제 코드를 구현하는 Worker 모델';
     }
     function render(messages) {
       pendingEl = null;
@@ -1188,6 +1417,7 @@ function renderConversationHtml(webview: vscode.Webview): string {
         if (data.provider === 'codex') setUsage(codexBtn, codexText, data.line, data.detail);
         else setUsage(geminiBtn, geminiText, data.line, data.detail);
       }
+      if (data.type === 'authModelState') renderAuthModelState(data);
     });
     sendBtn.addEventListener('click', () => {
       const text = input.value.trim();
@@ -1234,6 +1464,20 @@ function renderConversationHtml(webview: vscode.Webview): string {
     geminiBtn.addEventListener('click', () => {
       setUsage(geminiBtn, geminiText, '조회 중…');
       vscode.postMessage({ type: 'refreshUsage', provider: 'gemini' });
+    });
+    const refreshAuthModels = () => vscode.postMessage({ type: 'refreshAuthModelState' });
+    authRefresh.addEventListener('click', refreshAuthModels);
+    modelRefresh.addEventListener('click', refreshAuthModels);
+    codexLogin.addEventListener('click', () => vscode.postMessage({ type: 'loginCodex' }));
+    geminiLogin.addEventListener('click', () => vscode.postMessage({ type: 'loginGemini' }));
+    codexModel.addEventListener('change', () => {
+      vscode.postMessage({
+        type: 'setCodexModel',
+        model: codexModel.value === '__custom__' ? null : codexModel.value,
+      });
+    });
+    geminiTier.addEventListener('change', () => {
+      vscode.postMessage({ type: 'setGeminiTier', tier: geminiTier.value });
     });
     document.getElementById('newSession').addEventListener('click', () => {
       if (busy) return;

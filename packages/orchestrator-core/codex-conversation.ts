@@ -57,7 +57,7 @@ export type CodexRunnerFn = (params: CodexRunnerParams) => Promise<CodexRunnerRe
 
 export const CODEX_ABORTED_MESSAGE = '사용자가 요청을 중단했습니다.';
 
-function resolveCodexExecutable(options: EvaluateConversationOptions): string | null {
+export function resolveCodexExecutable(options: Pick<EvaluateConversationOptions, 'env' | 'toolOverrides'> = {}): string | null {
   const env = options.env || process.env;
   const candidates: string[] = [];
   const add = (value: string | undefined) => {
@@ -124,6 +124,9 @@ function resolveCodexExecutable(options: EvaluateConversationOptions): string | 
  * the Codex CLI keeps using the model from ~/.codex/config.toml.
  */
 function resolveCodexModel(options: EvaluateConversationOptions): string | undefined {
+  // A caller can explicitly request the CLI default without changing the
+  // persisted v2.1 fallback used by the dashboard and other Core consumers.
+  if (options.codexModel === null) return undefined;
   const env = options.env || process.env;
   const candidates = [
     options.codexModel,
@@ -705,10 +708,10 @@ export interface EvaluateConversationOptions {
   env?: Record<string, string | undefined>;
   toolOverrides?: Partial<Record<'pwsh' | 'codex' | 'rg' | 'agy', string>>;
   /**
-   * Model passed to `codex exec --model`. Leaving it unset inherits whatever
-   * the user configured in ~/.codex/config.toml, which is the old behaviour.
+   * Model passed to `codex exec --model`. Undefined follows the existing Core
+   * fallback chain; null explicitly inherits ~/.codex/config.toml.
    */
-  codexModel?: string;
+  codexModel?: string | null;
   timeoutMs?: number;
   /**
    * When true, never create a plan approval or worker. Explain/chat commands

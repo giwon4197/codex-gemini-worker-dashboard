@@ -333,8 +333,8 @@ export async function chatWithCore(options: {
   repoRoot: string;
   sessionId?: string;
   forbidWorkers?: boolean;
-  /** Overrides the model for this call; unset falls back to the saved settings. */
-  codexModel?: string;
+  /** Overrides the model; null keeps the CLI default and undefined uses Core fallback. */
+  codexModel?: string | null;
   codexRunner?: CodexRunnerFn;
   /** Receives sanitized Codex CLI output as it streams. */
   onOutput?: (text: string) => void;

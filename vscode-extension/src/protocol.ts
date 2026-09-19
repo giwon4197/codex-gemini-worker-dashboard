@@ -1,6 +1,34 @@
 import type { ProjectWorkGraphData } from '../../packages/orchestrator-core/project-event-graph.ts';
 
 export type UsageProvider = 'codex' | 'gemini';
+export type AuthState = 'not_installed' | 'unauthenticated' | 'authenticated' | 'unknown';
+
+export interface GeminiTierOption {
+  tier: string;
+  model: string;
+  description: string;
+  available?: boolean;
+}
+
+/** Sanitized provider/model state. It intentionally has no raw CLI or credential fields. */
+export interface AuthModelState {
+  codex: {
+    installed: boolean;
+    authState: AuthState;
+    authMethod?: 'ChatGPT' | 'API key';
+    selectedModel?: string;
+    modelOptions: string[];
+  };
+  gemini: {
+    installed: boolean;
+    authState: AuthState;
+    selectedTier: string;
+    selectedModel?: string;
+    availableModels: string[];
+    tiers: GeminiTierOption[];
+  };
+  selectorsDisabled: boolean;
+}
 
 export interface SessionSummary {
   sessionId: string;
@@ -36,6 +64,7 @@ export type HostToWebview =
   | { type: 'context'; text: string }
   | { type: 'busy'; active: boolean; reason?: string }
   | { type: 'progress'; source: 'codex' | 'run'; lines: string[]; tone?: 'error' }
+  | ({ type: 'authModelState' } & AuthModelState)
   /** While a run is in flight every message is a question: no plan card can appear. */
   | { type: 'inputMode'; questionOnly: boolean };
 
@@ -56,7 +85,13 @@ export type WebviewToHost =
       mutation: { operation: string; key?: string; value?: unknown; enabled?: boolean };
     }
   | { type: 'repoMemoryRebuild' }
-  | { type: 'repoMemoryClear' };
+  | { type: 'repoMemoryClear' }
+  | { type: 'refreshAuthModelState' }
+  | { type: 'loginCodex' }
+  | { type: 'loginGemini' }
+  /** Empty string selects the Codex CLI default; null opens validated direct input. */
+  | { type: 'setCodexModel'; model: string | null }
+  | { type: 'setGeminiTier'; tier: string };
 
 export function busyStatusText(reason?: string): string {
   return reason?.trim() || '요청 처리 중…';

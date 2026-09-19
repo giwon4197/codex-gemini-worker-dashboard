@@ -56,6 +56,7 @@ export function activate(context: vscode.ExtensionContext): void {
           event.affectsConfiguration('coxgem.codexModel')
         ) {
           run(pushWorkerSettings)();
+          void provider.refreshAuthModelState(false);
         }
       }),
       vscode.commands.registerCommand(COMMANDS.openWorkspace, run(() => provider.openWorkspace())),

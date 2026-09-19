@@ -175,6 +175,20 @@ void describe('Codex Conversational Workspace & Decision Engine', () => {
       assert.equal(seenArgs[seenArgs.indexOf('--model') + 1], CODEX_DEFAULT_MODEL);
     });
 
+    void test('an explicit CLI-default selection omits --model without changing the saved fallback', async () => {
+      let seenArgs: string[] = [];
+      await evaluateCodexConversation({
+        message: 'CLI 기본 모델을 사용해줘',
+        repoRoot: testRepoDir,
+        codexModel: null,
+        codexRunner: async params => {
+          seenArgs = params.args;
+          return { stdout: JSON.stringify({ intent: 'chat', reply: 'ok' }), stderr: '', exitCode: 0 };
+        },
+      });
+      assert.equal(seenArgs.includes('--model'), false);
+    });
+
     void test('exec args omit --model unless one is chosen', () => {
       const inherited = buildCodexExecArgs({ prompt: 'hi', cwd: testRepoDir });
       assert.equal(inherited.includes('--model'), false);

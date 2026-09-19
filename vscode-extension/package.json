@@ -110,7 +110,7 @@
         "coxgem.codexModel": {
           "type": "string",
           "default": "",
-          "markdownDescription": "계획·대화 단계에서 `codex exec --model` 에 전달할 모델 id. 비워두면 `model-tiers.json` 의 `codex_default_model` 을 씁니다."
+          "markdownDescription": "계획·대화 단계에서 `codex exec --model` 에 전달할 모델 id. 비워두면 Extension 요청은 로컬 Codex CLI 기본값을 따릅니다."
         },
         "coxgem.codexChatModel": {
           "type": "string",
@@ -131,7 +131,7 @@
     "typecheck": "tsc --noEmit -p .",
     "vscode:prepublish": "npm run compile",
     "package": "vsce package --no-dependencies",
-    "test": "node --experimental-strip-types --test src/workspace-context.test.ts src/core-host.test.ts src/ids.test.ts src/graph-tree.test.ts src/restore-state.test.ts src/protocol.test.ts src/webview-script.test.ts"
+    "test": "node --experimental-strip-types --test src/workspace-context.test.ts src/core-host.test.ts src/auth-model-state.test.ts src/ids.test.ts src/graph-tree.test.ts src/restore-state.test.ts src/protocol.test.ts src/webview-script.test.ts"
   },
   "vsce": {
     "dependencies": false

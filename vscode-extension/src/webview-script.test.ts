@@ -41,3 +41,23 @@ void test('every element the webview script looks up exists in its markup', () =
     }
   }
 });
+
+void test('auth onboarding and both model selectors keep their compact accessible contract', () => {
+  const source = fs.readFileSync(path.join(process.cwd(), VIEWS[0]), 'utf8');
+  for (const id of [
+    'authOnboarding',
+    'codexAuthText',
+    'geminiAuthText',
+    'authRefresh',
+    'codexLogin',
+    'geminiLogin',
+    'codexModel',
+    'geminiTier',
+  ]) {
+    assert.match(source, new RegExp(`id="${id}"`));
+  }
+  assert.match(source, /계획, 대화 및 검토에 사용하는 모델/);
+  assert.match(source, /승인 후 실제 코드를 구현하는 Worker 모델/);
+  assert.match(source, /현재 Run이 끝난 뒤 변경할 수 있습니다/);
+  assert.match(source, /flex-wrap: wrap/);
+});

@@ -316,6 +316,16 @@ void describe('vscode core host settings', () => {
     assert.equal(saved.tier, 'reasoning');
     assert.equal(saved.model, 'gemini-3.1-pro-high');
     assert.equal(saved.codexModel, 'gpt-x');
+    const cleared = await syncWorkerSettings(repo, { tier: 'fast' });
+    assert.deepEqual(cleared, { ok: true });
+    const defaulted = JSON.parse(fs.readFileSync(path.join(repo, 'worker-settings.json'), 'utf8')) as {
+      tier: string;
+      model: string;
+      codexModel?: string;
+    };
+    assert.equal(defaulted.tier, 'fast');
+    assert.equal(defaulted.model, 'gemini-3.8-flash-low');
+    assert.equal(Object.hasOwn(defaulted, 'codexModel'), false);
     const bad = await syncWorkerSettings(repo, { tier: 'nope' });
     assert.equal(bad.ok, false);
     assert.match(bad.error || '', /모델 등급/);
