@@ -2,7 +2,7 @@
   "name": "coxgem",
   "displayName": "coXgem",
   "description": "Local AI conversation and background worker orchestration inside VS Code. Works with the Codex and Gemini CLIs; not affiliated with OpenAI or Google.",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "publisher": "coXgem",
   "private": true,
   "license": "MIT",
