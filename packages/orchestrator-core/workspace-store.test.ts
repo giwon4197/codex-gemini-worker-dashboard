@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { validateRunId, validateRepository, validatePrompt, generateRunId, spawnRouterRun, getCompactRunState, saveCompactRunState, listCompactRuns, getProjectWorkers, resolveRequiredTools, getRunDetails, getAliasRecord, findAndLinkActualRun, STALE_PROCESS_MISMATCH_REASON, getProjectWorkGraph, retryTransientFsError } from './workspace-store.ts';
+import { validateRunId, validateRepository, validatePrompt, generateRunId, spawnRouterRun, getCompactRunState, saveCompactRunState, listCompactRuns, getProjectWorkers, resolveRequiredTools, getRunDetails, getAliasRecord, findAndLinkActualRun, STALE_PROCESS_MISMATCH_REASON, getProjectWorkGraph, retryRun, retryTransientFsError } from './workspace-store.ts';
 import type { CompactRunState } from './workspace-contract.ts';
 
 void describe('Workspace Store (Idempotency, Path Traversal, & Recovery)', () => {
@@ -138,6 +138,10 @@ void describe('Workspace Store (Idempotency, Path Traversal, & Recovery)', () =>
       const inputData = JSON.parse(fs.readFileSync(inputPath, 'utf8')) as { prompt: string; repoRoot: string };
       assert.strictEqual(inputData.prompt, prompt);
       assert.strictEqual(path.resolve(inputData.repoRoot), path.resolve(testTempDir));
+      assert.strictEqual(
+        path.resolve(call.args[call.args.indexOf('-File') + 1]),
+        path.resolve(testTempDir, 'gemini-dashboard', 'scripts', 'router-bootstrap.ps1')
+      );
 
       // 2nd duplicate submission with SAME idempotency key
       const second = await spawnRouterRun({
@@ -151,6 +155,123 @@ void describe('Workspace Store (Idempotency, Path Traversal, & Recovery)', () =>
       assert.strictEqual(second.isDuplicate, true);
       assert.strictEqual(second.runId, first.runId);
       assert.strictEqual(spawnCalls.length, 1); // Spawner was NOT called a second time
+    });
+
+    void test('uses a bundled runtime without copying scripts into the target repository', async () => {
+      const runtimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'coxgem-runtime-'));
+      const bootstrap = path.join(runtimeRoot, 'gemini-dashboard', 'scripts', 'router-bootstrap.ps1');
+      fs.mkdirSync(path.dirname(bootstrap), { recursive: true });
+      fs.writeFileSync(path.join(runtimeRoot, 'codex-router.ps1'), '# router fixture\n');
+      fs.writeFileSync(bootstrap, '# bootstrap fixture\n');
+      const spawnCalls: Array<{ args: string[]; opts: unknown }> = [];
+      try {
+        const result = await spawnRouterRun({
+          prompt: 'bundled runtime test',
+          repoRoot: testTempDir,
+          runtimeRoot,
+          spawner: (_command, args, opts) => {
+            spawnCalls.push({ args, opts });
+            return { unref: () => {}, pid: 4242 };
+          },
+        });
+        assert.equal(result.status, 'running');
+        assert.equal(spawnCalls.length, 1);
+        const call = spawnCalls[0];
+        const spawnOptions = call.opts as { cwd?: string; env?: NodeJS.ProcessEnv };
+        assert.equal(path.resolve(call.args[call.args.indexOf('-File') + 1]), path.resolve(bootstrap));
+        const inputPath = call.args[call.args.indexOf('-InputFile') + 1];
+        const input = JSON.parse(fs.readFileSync(inputPath, 'utf8')) as {
+          repoRoot: string;
+          routerScript: string;
+        };
+        assert.equal(path.resolve(input.repoRoot), path.resolve(testTempDir));
+        assert.equal(path.resolve(input.routerScript), path.resolve(runtimeRoot, 'codex-router.ps1'));
+        assert.equal(path.resolve(spawnOptions.cwd || ''), path.resolve(testTempDir));
+        assert.equal(
+          path.resolve(spawnOptions.env?.CODEX_GEMINI_DATA_DIR || ''),
+          path.resolve(testTempDir, '.agent', 'dashboard-data')
+        );
+        assert.equal(fs.existsSync(path.join(testTempDir, 'codex-router.ps1')), false);
+        assert.equal(fs.existsSync(path.join(testTempDir, 'run-parallel-workers.ps1')), false);
+        assert.equal(fs.existsSync(path.join(testTempDir, 'gemini-dashboard')), false);
+        assert.equal(fs.existsSync(path.join(runtimeRoot, '.agent')), false);
+      } finally {
+        fs.rmSync(runtimeRoot, { recursive: true, force: true });
+      }
+    });
+
+    void test('rejects router overrides outside or beside the fixed runtime entrypoint', async () => {
+      const runtimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'coxgem-runtime-'));
+      const externalRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'coxgem-external-'));
+      const bootstrap = path.join(runtimeRoot, 'gemini-dashboard', 'scripts', 'router-bootstrap.ps1');
+      fs.mkdirSync(path.dirname(bootstrap), { recursive: true });
+      fs.writeFileSync(path.join(runtimeRoot, 'codex-router.ps1'), '# router fixture\n');
+      fs.writeFileSync(path.join(runtimeRoot, 'other-router.ps1'), '# other fixture\n');
+      fs.writeFileSync(bootstrap, '# bootstrap fixture\n');
+      const externalRouter = path.join(externalRoot, 'codex-router.ps1');
+      fs.writeFileSync(externalRouter, '# external fixture\n');
+      try {
+        await assert.rejects(
+          spawnRouterRun({
+            prompt: 'outside runtime', repoRoot: testTempDir, runtimeRoot,
+            routerScript: externalRouter, spawner: () => ({ unref: () => {} }),
+          }),
+          /runtimeRoot 밖/
+        );
+        await assert.rejects(
+          spawnRouterRun({
+            prompt: 'alternate runtime entry', repoRoot: testTempDir, runtimeRoot,
+            routerScript: 'other-router.ps1', spawner: () => ({ unref: () => {} }),
+          }),
+          /runtimeRoot 밖/
+        );
+      } finally {
+        fs.rmSync(runtimeRoot, { recursive: true, force: true });
+        fs.rmSync(externalRoot, { recursive: true, force: true });
+      }
+    });
+
+    void test('retry reuses the same bundled runtime root', async () => {
+      const runtimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'coxgem-runtime-'));
+      const bootstrap = path.join(runtimeRoot, 'gemini-dashboard', 'scripts', 'router-bootstrap.ps1');
+      fs.mkdirSync(path.dirname(bootstrap), { recursive: true });
+      fs.writeFileSync(path.join(runtimeRoot, 'codex-router.ps1'), '# router fixture\n');
+      fs.writeFileSync(bootstrap, '# bootstrap fixture\n');
+      const originalRunId = generateRunId();
+      const now = new Date().toISOString();
+      await saveCompactRunState({
+        runId: originalRunId,
+        prompt: 'retry bundled runtime',
+        createdAt: now,
+        updatedAt: now,
+        status: 'failed',
+        requiresUserAction: false,
+        retryable: true,
+        failureReason: 'transient worker failure',
+        tasksCount: 1,
+        activeWorkersCount: 0,
+        completedTasksCount: 0,
+      }, testTempDir);
+      const spawnCalls: string[][] = [];
+      try {
+        const retried = await retryRun({
+          runId: originalRunId,
+          repoRoot: testTempDir,
+          runtimeRoot,
+          spawner: (_command, args) => {
+            spawnCalls.push(args);
+            return { unref: () => {}, pid: 4343 };
+          },
+        });
+        assert.equal(retried.originalRunId, originalRunId);
+        assert.equal(spawnCalls.length, 1);
+        assert.equal(
+          path.resolve(spawnCalls[0][spawnCalls[0].indexOf('-File') + 1]),
+          path.resolve(bootstrap)
+        );
+      } finally {
+        fs.rmSync(runtimeRoot, { recursive: true, force: true });
+      }
     });
   });
 

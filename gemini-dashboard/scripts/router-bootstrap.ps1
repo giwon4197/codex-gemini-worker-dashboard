@@ -20,6 +20,16 @@ $promptText = $null
 $routerScript = $null
 $metaPath = $null
 $logPath = $null
+$runtimeRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
+
+function Test-PathWithinRoot([string]$Candidate, [string]$Root) {
+  $candidateFull = [System.IO.Path]::GetFullPath($Candidate)
+  $rootFull = [System.IO.Path]::GetFullPath($Root)
+  $separator = [System.IO.Path]::DirectorySeparatorChar.ToString()
+  if (-not $rootFull.EndsWith($separator)) { $rootFull += $separator }
+  return $candidateFull.Equals($rootFull.TrimEnd([System.IO.Path]::DirectorySeparatorChar), [System.StringComparison]::OrdinalIgnoreCase) -or
+    $candidateFull.StartsWith($rootFull, [System.StringComparison]::OrdinalIgnoreCase)
+}
 
 if ($InputFile) {
   if (-not (Test-Path -LiteralPath $InputFile)) {
@@ -37,7 +47,7 @@ if ($InputFile) {
 
   # Repository Confinement and Validation
   $resolvedInput = [System.IO.Path]::GetFullPath($InputFile)
-  if (-not $resolvedInput.StartsWith($repoRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+  if (-not (Test-PathWithinRoot -Candidate $resolvedInput -Root $repoRoot)) {
     throw "입력 파일이 저장소 경계 외부에 있습니다: $InputFile"
   }
 } else {
@@ -55,9 +65,14 @@ if (-not (Test-Path -LiteralPath $repoRoot)) {
   throw "저장소 디렉터리를 찾을 수 없습니다: $repoRoot"
 }
 
-# Router script confinement check
-if (-not $routerScript.StartsWith($repoRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
-  throw "라우터 스크립트가 저장소 경계 외부에 있습니다: $routerScript"
+# Router code is trusted only when it is a sibling asset of this bootstrap's
+# runtime root. repoRoot remains the independent target repository boundary.
+if (-not (Test-PathWithinRoot -Candidate $routerScript -Root $runtimeRoot)) {
+  throw "라우터 스크립트가 runtime 경계 외부에 있습니다: $routerScript"
+}
+$expectedRouterScript = [System.IO.Path]::Combine($runtimeRoot, 'codex-router.ps1')
+if (-not $routerScript.Equals($expectedRouterScript, [System.StringComparison]::OrdinalIgnoreCase)) {
+  throw "고정된 runtime 라우터만 실행할 수 있습니다: $routerScript"
 }
 
 if (-not (Test-Path -LiteralPath $routerScript)) {

@@ -1109,6 +1109,7 @@ export async function approveConversationPlan(options: {
   approvalId?: string;
   idempotencyKey?: string;
   repoRoot?: string;
+  runtimeRoot?: string;
   spawner?: SpawnerFn;
   env?: Record<string, string | undefined>;
   toolOverrides?: Partial<Record<'pwsh' | 'codex' | 'rg' | 'agy', string>>;
@@ -1189,6 +1190,7 @@ export async function approveConversationPlan(options: {
       prompt: targetApproval.prompt,
       idempotencyKey: key,
       repoRoot: root,
+      runtimeRoot: options.runtimeRoot,
       spawner: options.spawner,
       env: options.env,
       toolOverrides: options.toolOverrides,
@@ -1584,7 +1586,8 @@ export async function listCompactRuns(
  * Safely executes the fixed router entrypoint with an argument array.
  * Enforces:
  * 1. Safe argument array (NO shell string concatenation, NO arbitrary commands)
- * 2. Fixed router entrypoint (codex-router.ps1 inside allowed repository)
+ * 2. Fixed router entrypoint inside either the allowed repository (legacy) or
+ *    an explicitly trusted bundled runtime root
  * 3. Idempotency checking to prevent duplicate execution of same run
  * 4. Safe tool discovery: resolves PowerShell 7 and essential tools (codex, rg, agy)
  *    Transitions immediately to a sanitized failed state if tools are missing
@@ -1595,6 +1598,7 @@ export async function spawnRouterRun(options: {
   prompt: string;
   idempotencyKey?: string;
   repoRoot?: string;
+  runtimeRoot?: string;
   spawner?: SpawnerFn;
   env?: Record<string, string | undefined>;
   toolOverrides?: Partial<Record<'pwsh' | 'codex' | 'rg' | 'agy', string>>;
@@ -1687,16 +1691,36 @@ export async function spawnRouterRun(options: {
 
   const tools = toolResult.tools;
 
-  // Fixed router script path inside repository root
+  // The target repository and executable runtime are separate trust domains.
+  // Existing dashboard/direct users omit runtimeRoot and keep repo-local behavior.
+  const runtimeRoot = options.runtimeRoot ? path.resolve(options.runtimeRoot) : root;
+  const expectedRouterScript = path.join(runtimeRoot, 'codex-router.ps1');
   const routerScript = options.routerScript
-    ? path.resolve(root, options.routerScript)
-    : path.join(root, 'codex-router.ps1');
+    ? path.resolve(runtimeRoot, options.routerScript)
+    : expectedRouterScript;
+  const bootstrapScript = path.join(runtimeRoot, 'gemini-dashboard', 'scripts', 'router-bootstrap.ps1');
+  const isInsideRuntime = (candidate: string) => {
+    const relative = path.relative(runtimeRoot, candidate);
+    return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
+  };
+  const normalizedRouter = path.resolve(routerScript);
+  const normalizedExpectedRouter = path.resolve(expectedRouterScript);
+  const isExpectedRouter = process.platform === 'win32'
+    ? normalizedRouter.toLowerCase() === normalizedExpectedRouter.toLowerCase()
+    : normalizedRouter === normalizedExpectedRouter;
+  if (!isInsideRuntime(routerScript) || !isExpectedRouter) {
+    throw new Error('신뢰된 runtimeRoot 밖의 라우터 스크립트는 실행할 수 없습니다.');
+  }
 
-  // Fixed bootstrap script path inside repository root (Criterion 1)
-  const bootstrapScript = path.join(root, 'gemini-dashboard', 'scripts', 'router-bootstrap.ps1');
-
-  // Self-seed bootstrap script if running in temporary test repository
-  if (!fs.existsSync(bootstrapScript)) {
+  if (options.runtimeRoot) {
+    if (!fs.existsSync(routerScript) || !fs.statSync(routerScript).isFile()) {
+      throw new Error('Extension runtime에서 codex-router.ps1을 찾을 수 없습니다.');
+    }
+    if (!fs.existsSync(bootstrapScript) || !fs.statSync(bootstrapScript).isFile()) {
+      throw new Error('Extension runtime에서 router-bootstrap.ps1을 찾을 수 없습니다.');
+    }
+  } else if (!fs.existsSync(bootstrapScript)) {
+    // Preserve the existing test/legacy repo-local bootstrap behavior.
     const candidateSource = path.join(getAllowedRepoRoot(), 'gemini-dashboard', 'scripts', 'router-bootstrap.ps1');
     if (fs.existsSync(candidateSource) && candidateSource.toLowerCase() !== bootstrapScript.toLowerCase()) {
       await fs.promises.mkdir(path.dirname(bootstrapScript), { recursive: true });
@@ -1784,6 +1808,9 @@ export async function spawnRouterRun(options: {
     POWERSHELL_CLI_CONSOLE_ENCODING: 'utf-8',
     LANG: 'ko_KR.UTF-8',
     LC_ALL: 'ko_KR.UTF-8',
+    ...(options.runtimeRoot
+      ? { CODEX_GEMINI_DATA_DIR: path.join(root, '.agent', 'dashboard-data') }
+      : {}),
   });
 
   // Open persistent log file descriptor for direct stdout/stderr redirection (Criterion 2)
@@ -1871,6 +1898,7 @@ export async function retryRun(options: {
   runId: string;
   idempotencyKey?: string;
   repoRoot?: string;
+  runtimeRoot?: string;
   spawner?: SpawnerFn;
   env?: Record<string, string | undefined>;
   toolOverrides?: Partial<Record<'pwsh' | 'codex' | 'rg' | 'agy', string>>;
@@ -1963,6 +1991,7 @@ export async function retryRun(options: {
     prompt: originalCompact.prompt,
     idempotencyKey: stableIdempotencyKey,
     repoRoot: root,
+    runtimeRoot: options.runtimeRoot,
     spawner: options.spawner,
     env: options.env,
     toolOverrides: options.toolOverrides,
