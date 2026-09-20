@@ -22,11 +22,26 @@ function runnerFor(responses: Record<string, CliProbeResult>, calls: string[] = 
 
 void describe('sanitized CLI auth/model discovery', () => {
   void test('reports each missing CLI independently', async () => {
-    const state = await probeAuthModelState({}, {
+    const state = await probeAuthModelState({
+      selectedCodexModel: 'gpt-5.6-sol',
+      selectedCodexReasoningEffort: 'high',
+    }, {
       resolveCodex: () => null,
       resolveGemini: () => null,
     });
     assert.equal(state.codex.authState, 'not_installed');
+    assert.equal(state.codex.selectedReasoningEffort, 'high');
+    assert.deepEqual(
+      state.codex.presets.map(preset => [preset.model, preset.reasoningEffort]),
+      [
+        ['gpt-5.6-sol', 'low'],
+        ['gpt-5.6-sol', 'medium'],
+        ['gpt-5.6-sol', 'high'],
+        ['gpt-6-astra', 'low'],
+        ['gpt-6-astra', 'medium'],
+        ['gpt-6-astra', 'high'],
+      ]
+    );
     assert.equal(state.gemini.authState, 'not_installed');
   });
 

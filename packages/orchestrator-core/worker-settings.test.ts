@@ -35,6 +35,7 @@ test('normalizes missing memory without writing the legacy file', () => {
     tier: 'normal',
     model: 'gemini-3.8-flash-medium',
     codexModel: 'gpt-5.6-terra',
+    codexReasoningEffort: 'high',
   };
   fs.writeFileSync(settingsPath, JSON.stringify(legacy));
 
@@ -53,6 +54,7 @@ test('memory mutations preserve worker model settings and assign metadata', () =
       tier: 'reasoning',
       model: 'gemini-3.1-pro-high',
       codexModel: 'gpt-5.6-terra',
+      codexReasoningEffort: 'medium',
     })
   );
 
@@ -68,10 +70,12 @@ test('memory mutations preserve worker model settings and assign metadata', () =
     tier: string;
     model: string;
     codexModel: string;
+    codexReasoningEffort: string;
   };
   assert.equal(saved.tier, 'reasoning');
   assert.equal(saved.model, 'gemini-3.1-pro-high');
   assert.equal(saved.codexModel, 'gpt-5.6-terra');
+  assert.equal(saved.codexReasoningEffort, 'medium');
 });
 
 test('legacy worker settings save preserves valid memory', async () => {
@@ -79,7 +83,11 @@ test('legacy worker settings save preserves valid memory', async () => {
   const response = await POST(
     new Request('http://localhost/api/settings', {
       method: 'POST',
-      body: JSON.stringify({ tier: 'fast', codexModel: 'gpt-5.6-terra' }),
+      body: JSON.stringify({
+        tier: 'fast',
+        codexModel: 'gpt-5.6-sol',
+        codexReasoningEffort: 'high',
+      }),
     })
   );
   assert.equal(response.status, 200);
@@ -87,6 +95,23 @@ test('legacy worker settings save preserves valid memory', async () => {
     memory: ReturnType<typeof readWorkerMemory>;
   };
   assert.equal(body.memory.preferences.explanationDetail?.value, 'detailed');
+  const saved = JSON.parse(fs.readFileSync(settingsPath, 'utf8')) as {
+    codexModel: string;
+    codexReasoningEffort: string;
+  };
+  assert.equal(saved.codexModel, 'gpt-5.6-sol');
+  assert.equal(saved.codexReasoningEffort, 'high');
+});
+
+test('rejects invalid Codex reasoning effort without changing settings', async () => {
+  const response = await POST(
+    new Request('http://localhost/api/settings', {
+      method: 'POST',
+      body: JSON.stringify({ tier: 'normal', codexReasoningEffort: 'danger' }),
+    })
+  );
+  assert.equal(response.status, 400);
+  assert.equal(fs.existsSync(settingsPath), false);
 });
 
 test('supports enable, delete, and reset without changing enabled state', () => {

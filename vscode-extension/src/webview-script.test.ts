@@ -59,5 +59,6 @@ void test('auth onboarding and both model selectors keep their compact accessibl
   assert.match(source, /계획, 대화 및 검토에 사용하는 모델/);
   assert.match(source, /승인 후 실제 코드를 구현하는 Worker 모델/);
   assert.match(source, /현재 Run이 끝난 뒤 변경할 수 있습니다/);
+  assert.match(source, /selectedReasoningEffort/);
   assert.match(source, /flex-wrap: wrap/);
 });

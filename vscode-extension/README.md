@@ -25,6 +25,7 @@ code --user-data-dir <empty-dir> --extensions-dir <empty-dir> --install-extensio
 
 - `workerTier`: Gemini 워커 등급(`fast`·`normal`·`advanced`·`reasoning`). 바꾸면 작업 폴더의 `worker-settings.json`에 저장되어 웹 대시보드와 공유됩니다.
 - `codexModel`: 계획·대화 단계의 `codex exec --model` 값. 비우면 Extension 요청은 로컬 Codex CLI 기본값을 따릅니다.
+- `codexReasoningEffort`: Codex 추론 강도(`low`·`medium`·`high`·`xhigh`·`max`). 비우면 모델 또는 CLI 기본값을 따릅니다.
 - `codexChatModel`: 워커를 만들지 않는 Explain Selection 전용 모델. 비우면 `codexModel`을 따릅니다.
 
 ## 화면
@@ -39,7 +40,7 @@ Run이 멈추면(`awaiting_review` 등) Task Graph 패널에 `검토` 섹션이 
 
 사용량은 입력창 아래의 `Codex`·`Gemini` 버튼을 눌렀을 때만 조회합니다. 결과는 버튼 오른쪽에 `N% 남음 · HH:MM 초기화`로 나오고, 버튼이나 결과에 마우스를 올리거나 키보드 focus 하면 창별(5h·weekly) 상세가 툴팁으로 보입니다.
 
-입력창 아래의 selector는 Codex 모델과 Gemini worker tier를 바꿉니다. 인증은 Extension이 저장하거나 읽지 않고 로컬 공식 CLI 세션을 사용합니다. Codex 로그인은 Integrated Terminal의 `codex login`, Gemini 로그인은 `agy`의 interactive flow로 진행합니다. 모델 목록 표시는 계정 entitlement 보장이 아니며 실제 CLI 실행 결과가 최종 기준입니다. Run이 `planning`·`running`·`retrying`인 동안 selector는 잠깁니다.
+입력창 아래의 selector는 Codex 모델·추론 강도와 Gemini worker tier를 바꿉니다. Codex에는 GPT-5.6 Sol과 GPT-6 Astra의 Low·Medium·High preset이 있으며, 모델과 추론 강도는 별도 설정으로 저장됩니다. 인증은 Extension이 저장하거나 읽지 않고 로컬 공식 CLI 세션을 사용합니다. Codex 로그인은 Integrated Terminal의 `codex login`, Gemini 로그인은 `agy`의 interactive flow로 진행합니다. 모델 목록 표시는 계정 entitlement 보장이 아니며 실제 CLI 실행 결과가 최종 기준입니다. Run이 `planning`·`running`·`retrying`인 동안 selector는 잠깁니다.
 
 새 창은 현재 세션에 연결된 Run만 Task Graph에 복구합니다. 다른 창에서 시작한 Run이 진행 중이면 Status Bar에 `진행 중 Run N (연결 안 됨)`이 표시되고, 클릭하면 `Show Active Run`으로 이동합니다.
 
@@ -71,6 +72,7 @@ VSIX 설치 후 다음을 확인합니다.
 - [ ] Gemini 로그인 버튼이 Integrated Terminal에서 공식 CLI를 실행한다.
 - [ ] Gemini 로그인 후 다시 확인하면 연결 상태가 갱신된다.
 - [ ] Codex model selector가 보인다.
+- [ ] Codex selector에서 GPT-5.6 Sol과 GPT-6 Astra의 Low·Medium·High를 선택할 수 있다.
 - [ ] Gemini tier/model selector가 보인다.
 - [ ] Codex model 변경이 다음 Codex 요청에 반영된다.
 - [ ] Gemini tier 변경이 다음 worker Run에 반영된다.

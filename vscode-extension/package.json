@@ -112,6 +112,12 @@
           "default": "",
           "markdownDescription": "계획·대화 단계에서 `codex exec --model` 에 전달할 모델 id. 비워두면 Extension 요청은 로컬 Codex CLI 기본값을 따릅니다."
         },
+        "coxgem.codexReasoningEffort": {
+          "type": "string",
+          "enum": ["", "low", "medium", "high", "xhigh", "max"],
+          "default": "",
+          "markdownDescription": "Codex reasoning effort. 비워두면 선택한 모델 또는 로컬 Codex CLI의 기본값을 따릅니다."
+        },
         "coxgem.codexChatModel": {
           "type": "string",
           "default": "",

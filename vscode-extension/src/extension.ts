@@ -7,6 +7,7 @@ import { sanitizeUiError, syncWorkerSettings } from './core-host';
 import { getWorkspaceRoot } from './vscode-context';
 import fs from 'node:fs';
 import path from 'node:path';
+import type { CodexReasoningEffort } from '../../packages/orchestrator-core/worker-settings.ts';
 
 /** Pushes the VS Code tier/model settings into the workspace toolkit's worker-settings.json. */
 async function pushWorkerSettings(): Promise<void> {
@@ -20,6 +21,7 @@ async function pushWorkerSettings(): Promise<void> {
   const result = await syncWorkerSettings(root, {
     tier: config.get<string>('workerTier') || 'normal',
     codexModel: config.get<string>('codexModel'),
+    codexReasoningEffort: config.get<CodexReasoningEffort>('codexReasoningEffort'),
   });
   if (!result.ok) throw new Error(result.error);
 }
@@ -53,7 +55,8 @@ export function activate(context: vscode.ExtensionContext): void {
       vscode.workspace.onDidChangeConfiguration(event => {
         if (
           event.affectsConfiguration('coxgem.workerTier') ||
-          event.affectsConfiguration('coxgem.codexModel')
+          event.affectsConfiguration('coxgem.codexModel') ||
+          event.affectsConfiguration('coxgem.codexReasoningEffort')
         ) {
           run(pushWorkerSettings)();
           void provider.refreshAuthModelState(false);

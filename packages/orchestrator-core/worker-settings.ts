@@ -15,10 +15,18 @@ export const PLAN_PRESENTATIONS = [
   'step_by_step',
   'risk_focused',
 ] as const;
+export const CODEX_REASONING_EFFORTS = [
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+] as const;
 
 export type ResponseLanguage = (typeof RESPONSE_LANGUAGES)[number];
 export type ExplanationDetail = (typeof EXPLANATION_DETAILS)[number];
 export type PlanPresentation = (typeof PLAN_PRESENTATIONS)[number];
+export type CodexReasoningEffort = (typeof CODEX_REASONING_EFFORTS)[number];
 export type WorkerPreferenceKey =
   | 'responseLanguage'
   | 'explanationDetail'
@@ -57,6 +65,7 @@ export interface WorkerSettingsFile {
   tier?: string;
   model?: string;
   codexModel?: string;
+  codexReasoningEffort?: CodexReasoningEffort;
   updatedAt?: string | null;
   memory?: WorkerMemorySettings;
   [key: string]: unknown;
@@ -88,6 +97,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 export function isValidCodexModel(value: unknown): value is string {
   return typeof value === 'string' && CODEX_MODEL_PATTERN.test(value);
+}
+
+export function isValidCodexReasoningEffort(
+  value: unknown
+): value is CodexReasoningEffort {
+  return CODEX_REASONING_EFFORTS.includes(value as CodexReasoningEffort);
 }
 
 export function isWorkerPreferenceKey(
@@ -190,6 +205,9 @@ function normalizedSettings(current = readWorkerSettings()): WorkerSettingsFile 
       : current.codexModel === undefined
         ? undefined
         : CODEX_DEFAULT_MODEL,
+    codexReasoningEffort: isValidCodexReasoningEffort(current.codexReasoningEffort)
+      ? current.codexReasoningEffort
+      : undefined,
     updatedAt: current.updatedAt ?? null,
     ...(memory ? { memory } : { memory: defaultMemory() }),
   };
@@ -210,6 +228,9 @@ function persistMemory(memory: WorkerMemorySettings): WorkerSettingsFile {
       : current.codexModel === undefined
         ? undefined
         : CODEX_DEFAULT_MODEL,
+    codexReasoningEffort: isValidCodexReasoningEffort(current.codexReasoningEffort)
+      ? current.codexReasoningEffort
+      : undefined,
     memory,
     updatedAt: new Date().toISOString(),
   };
@@ -266,6 +287,9 @@ function recoverSettings(): WorkerSettingsFile {
     codexModel: isValidCodexModel(current.codexModel)
       ? current.codexModel
       : CODEX_DEFAULT_MODEL,
+    codexReasoningEffort: isValidCodexReasoningEffort(current.codexReasoningEffort)
+      ? current.codexReasoningEffort
+      : undefined,
     updatedAt: new Date().toISOString(),
   };
   if (memory) data.memory = memory;
@@ -320,12 +344,29 @@ async function handleSave(req: Request) {
       }
     }
 
+    let codexReasoningEffort = isValidCodexReasoningEffort(current.codexReasoningEffort)
+      ? current.codexReasoningEffort
+      : undefined;
+    if (body && Object.hasOwn(body, 'codexReasoningEffort')) {
+      if (body.codexReasoningEffort === null || body.codexReasoningEffort === '') {
+        codexReasoningEffort = undefined;
+      } else if (isValidCodexReasoningEffort(body.codexReasoningEffort)) {
+        codexReasoningEffort = body.codexReasoningEffort;
+      } else {
+        return Response.json(
+          { error: '유효하지 않은 Codex reasoning effort입니다.' },
+          { status: 400 }
+        );
+      }
+    }
+
     const memory = parseMemory(current.memory);
     const data: WorkerSettingsFile = {
       ...current,
       tier: requestedTier,
       model: TIER_MAP[requestedTier],
       codexModel,
+      codexReasoningEffort,
       updatedAt: new Date().toISOString(),
     };
     if (memory) data.memory = memory;

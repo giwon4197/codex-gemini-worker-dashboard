@@ -306,26 +306,34 @@ void describe('vscode core host settings', () => {
   });
 
   void test('syncWorkerSettings writes worker-settings.json next to the workspace router', async () => {
-    const ok = await syncWorkerSettings(repo, { tier: 'reasoning', codexModel: ' gpt-x ' });
+    const ok = await syncWorkerSettings(repo, {
+      tier: 'reasoning',
+      codexModel: ' gpt-x ',
+      codexReasoningEffort: 'high',
+    });
     assert.deepEqual(ok, { ok: true });
     const saved = JSON.parse(fs.readFileSync(path.join(repo, 'worker-settings.json'), 'utf8')) as {
       tier: string;
       model: string;
       codexModel: string;
+      codexReasoningEffort: string;
     };
     assert.equal(saved.tier, 'reasoning');
     assert.equal(saved.model, 'gemini-3.1-pro-high');
     assert.equal(saved.codexModel, 'gpt-x');
+    assert.equal(saved.codexReasoningEffort, 'high');
     const cleared = await syncWorkerSettings(repo, { tier: 'fast' });
     assert.deepEqual(cleared, { ok: true });
     const defaulted = JSON.parse(fs.readFileSync(path.join(repo, 'worker-settings.json'), 'utf8')) as {
       tier: string;
       model: string;
       codexModel?: string;
+      codexReasoningEffort?: string;
     };
     assert.equal(defaulted.tier, 'fast');
     assert.equal(defaulted.model, 'gemini-3.8-flash-low');
     assert.equal(Object.hasOwn(defaulted, 'codexModel'), false);
+    assert.equal(Object.hasOwn(defaulted, 'codexReasoningEffort'), false);
     const bad = await syncWorkerSettings(repo, { tier: 'nope' });
     assert.equal(bad.ok, false);
     assert.match(bad.error || '', /모델 등급/);

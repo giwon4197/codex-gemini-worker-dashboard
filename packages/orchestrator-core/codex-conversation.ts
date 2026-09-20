@@ -20,8 +20,10 @@ import { formatSessionSummary, selectRelatedSessions, summarizeSession } from '.
 import { sanitizeSpawnEnv } from './spawn-env.ts';
 import {
   isValidCodexModel,
+  isValidCodexReasoningEffort,
   readWorkerMemory,
   readWorkerSettings,
+  type CodexReasoningEffort,
   type WorkerMemorySettings,
 } from './worker-settings.ts';
 import { CODEX_DEFAULT_MODEL } from './model-tiers.ts';
@@ -141,6 +143,19 @@ function resolveCodexModel(options: EvaluateConversationOptions): string | undef
     return trimmed;
   }
   return undefined;
+}
+
+function resolveCodexReasoningEffort(
+  options: EvaluateConversationOptions
+): CodexReasoningEffort | undefined {
+  if (options.codexReasoningEffort === null) return undefined;
+  const env = options.env || process.env;
+  const candidates = [
+    options.codexReasoningEffort,
+    env.CODEX_REASONING_EFFORT,
+    readWorkerSettings().codexReasoningEffort,
+  ];
+  return candidates.find(isValidCodexReasoningEffort);
 }
 
 /**
@@ -526,6 +541,7 @@ export function buildCodexExecArgs(options: {
   cwd: string;
   lastMessagePath?: string;
   model?: string;
+  reasoningEffort?: CodexReasoningEffort;
 }): string[] {
   const args = [
     'exec',
@@ -540,6 +556,9 @@ export function buildCodexExecArgs(options: {
   ];
   if (options.model) {
     args.push('--model', options.model);
+  }
+  if (options.reasoningEffort) {
+    args.push('--config', `model_reasoning_effort="${options.reasoningEffort}"`);
   }
   if (options.lastMessagePath) {
     args.push('--output-last-message', options.lastMessagePath);
@@ -712,6 +731,8 @@ export interface EvaluateConversationOptions {
    * fallback chain; null explicitly inherits ~/.codex/config.toml.
    */
   codexModel?: string | null;
+  /** Reasoning effort passed through Codex's documented config override. */
+  codexReasoningEffort?: CodexReasoningEffort | null;
   timeoutMs?: number;
   /**
    * When true, never create a plan approval or worker. Explain/chat commands
@@ -817,6 +838,7 @@ export async function evaluateCodexConversation(
     cwd: root,
     lastMessagePath,
     model: resolveCodexModel(options),
+    reasoningEffort: resolveCodexReasoningEffort(options),
   });
 
   let rawOutput = '';

@@ -4,11 +4,24 @@ import { resolveCodexExecutable } from '../../packages/orchestrator-core/codex-c
 import { findAntigravityCliExecutable, getGeminiQuota } from '../../packages/orchestrator-core/gemini-quota.ts';
 import { loadModelTiers } from '../../packages/orchestrator-core/model-tiers.ts';
 import { sanitizeSpawnEnv } from '../../packages/orchestrator-core/spawn-env.ts';
-import type { AuthModelState, AuthState, GeminiTierOption } from './protocol.ts';
+import type { CodexReasoningEffort } from '../../packages/orchestrator-core/worker-settings.ts';
+import type { AuthModelState, AuthState, CodexModelPreset, GeminiTierOption } from './protocol.ts';
 
 const OUTPUT_LIMIT = 64 * 1024;
 const MODEL_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 const LOCKED_RUN_STATUSES = new Set(['planning', 'running', 'retrying']);
+const CODEX_MODEL_PRESETS: CodexModelPreset[] = [
+  ...(['low', 'medium', 'high'] as const).map(reasoningEffort => ({
+    model: 'gpt-5.6-sol',
+    reasoningEffort,
+    label: `GPT-5.6 Sol · ${reasoningEffort[0].toUpperCase()}${reasoningEffort.slice(1)}`,
+  })),
+  ...(['low', 'medium', 'high'] as const).map(reasoningEffort => ({
+    model: 'gpt-6-astra',
+    reasoningEffort,
+    label: `GPT-6 Astra · ${reasoningEffort[0].toUpperCase()}${reasoningEffort.slice(1)}`,
+  })),
+];
 
 export interface CliProbeResult {
   stdout: string;
@@ -24,6 +37,7 @@ export type CliProbeRunner = (
 
 export interface AuthModelProbeOptions {
   selectedCodexModel?: string;
+  selectedCodexReasoningEffort?: CodexReasoningEffort;
   selectedGeminiTier?: string;
   runStatus?: string;
 }
@@ -132,10 +146,12 @@ export async function probeAuthModelState(
     installed: Boolean(codexExecutable),
     authState: (codexExecutable ? 'unknown' : 'not_installed') as AuthState,
     selectedModel: options.selectedCodexModel?.trim() || undefined,
+    selectedReasoningEffort: options.selectedCodexReasoningEffort,
     modelOptions: Array.from(new Set([
       options.selectedCodexModel?.trim(),
       config.codex_default_model,
     ].filter((value): value is string => Boolean(value)))),
+    presets: CODEX_MODEL_PRESETS.map(preset => ({ ...preset })),
   };
   if (codexExecutable) {
     const help = await run(codexExecutable, ['login', '--help'], 8_000);

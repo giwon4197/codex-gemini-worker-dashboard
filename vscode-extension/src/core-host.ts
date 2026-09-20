@@ -24,6 +24,7 @@ import {
   setWorkerPreference,
 } from '../../packages/orchestrator-core/worker-settings.ts';
 import type {
+  CodexReasoningEffort,
   WorkerMemorySettings,
   WorkerPreferenceKey,
 } from '../../packages/orchestrator-core/worker-settings.ts';
@@ -119,13 +120,21 @@ export async function withWorkspaceRoot<T>(
 /** Persists the VS Code settings into the workspace worker-settings.json shared with the web UI. */
 export async function syncWorkerSettings(
   repoRoot: string,
-  settings: { tier: string; codexModel?: string }
+  settings: {
+    tier: string;
+    codexModel?: string;
+    codexReasoningEffort?: CodexReasoningEffort;
+  }
 ): Promise<{ ok: boolean; error?: string }> {
   return withWorkspaceRoot(repoRoot, async () => {
     const response = await saveWorkerSettingsRequest(
       new Request('http://localhost/api/settings', {
         method: 'POST',
-        body: JSON.stringify({ tier: settings.tier, codexModel: settings.codexModel?.trim() || null }),
+        body: JSON.stringify({
+          tier: settings.tier,
+          codexModel: settings.codexModel?.trim() || null,
+          codexReasoningEffort: settings.codexReasoningEffort || null,
+        }),
       })
     );
     if (response.ok) return { ok: true };
@@ -335,6 +344,7 @@ export async function chatWithCore(options: {
   forbidWorkers?: boolean;
   /** Overrides the model; null keeps the CLI default and undefined uses Core fallback. */
   codexModel?: string | null;
+  codexReasoningEffort?: CodexReasoningEffort | null;
   codexRunner?: CodexRunnerFn;
   /** Receives sanitized Codex CLI output as it streams. */
   onOutput?: (text: string) => void;
@@ -364,6 +374,7 @@ export async function chatWithCore(options: {
       sessionId: options.sessionId,
       forbidWorkers: options.forbidWorkers,
       codexModel: options.codexModel,
+      codexReasoningEffort: options.codexReasoningEffort,
       codexRunner,
     })
   );

@@ -45,7 +45,11 @@ import { ACTIVE_RUN_STATUSES } from '../graph-tree';
 import type { RunStatusBar } from '../status-bar';
 import type { MemoryMutation } from '../core-host';
 import { isModelSelectionLocked, isValidGeminiTier, probeAuthModelState } from '../auth-model-state';
-import { isValidCodexModel } from '../../../packages/orchestrator-core/worker-settings.ts';
+import {
+  isValidCodexModel,
+  isValidCodexReasoningEffort,
+  type CodexReasoningEffort,
+} from '../../../packages/orchestrator-core/worker-settings.ts';
 
 const MEMORY_OPERATIONS = new Set(['setEnabled', 'setPreference', 'deletePreference', 'reset']);
 
@@ -238,7 +242,7 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
         return;
       }
       if (message.type === 'setCodexModel') {
-        await this.setCodexModel(message.model);
+        await this.setCodexModel(message.model, message.reasoningEffort);
         return;
       }
       if (message.type === 'setGeminiTier') {
@@ -306,6 +310,8 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
           codexModel: config.get<string>('codexModel'),
           codexChatModel: config.get<string>('codexChatModel'),
         }) ?? null,
+        codexReasoningEffort:
+          config.get<CodexReasoningEffort>('codexReasoningEffort') || null,
         onOutput: text => {
           liveOutput = (liveOutput + text).slice(-4000);
           this.post({ type: 'progress', source: 'codex', lines: tailProgressLines(liveOutput) });
@@ -597,6 +603,8 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
     if (probeProviders || !this.authModelState) {
       this.authModelState = await probeAuthModelState({
         selectedCodexModel: config.get<string>('codexModel'),
+        selectedCodexReasoningEffort:
+          config.get<CodexReasoningEffort>('codexReasoningEffort'),
         selectedGeminiTier: config.get<string>('workerTier'),
         runStatus: this.lastGraph?.status,
       });
@@ -608,6 +616,8 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
     if (!this.authModelState) return;
     const config = vscode.workspace.getConfiguration('coxgem');
     const codexModel = config.get<string>('codexModel')?.trim() || undefined;
+    const codexReasoningEffort =
+      config.get<CodexReasoningEffort>('codexReasoningEffort') || undefined;
     const workerTier = config.get<string>('workerTier') || this.authModelState.gemini.selectedTier;
     const tier = this.authModelState.gemini.tiers.find(item => item.tier === workerTier);
     this.authModelState = {
@@ -616,6 +626,7 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
       codex: {
         ...this.authModelState.codex,
         selectedModel: codexModel,
+        selectedReasoningEffort: codexReasoningEffort,
         modelOptions: Array.from(new Set([
           codexModel,
           ...this.authModelState.codex.modelOptions,
@@ -642,7 +653,10 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
     terminal.sendText(provider === 'codex' ? 'codex login' : 'agy', true);
   }
 
-  private async setCodexModel(requested: string | null): Promise<void> {
+  private async setCodexModel(
+    requested: string | null,
+    requestedReasoningEffort?: CodexReasoningEffort | null
+  ): Promise<void> {
     if (this.modelSelectionLocked()) {
       this.post({ type: 'error', message: '현재 Run이 끝난 뒤 변경할 수 있습니다.' });
       this.postAuthModelState();
@@ -670,9 +684,23 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
       this.postAuthModelState();
       return;
     }
+    if (
+      requestedReasoningEffort !== null &&
+      requestedReasoningEffort !== undefined &&
+      !isValidCodexReasoningEffort(requestedReasoningEffort)
+    ) {
+      this.post({ type: 'error', message: '유효하지 않은 Codex reasoning effort입니다.' });
+      this.postAuthModelState();
+      return;
+    }
     await vscode.workspace.getConfiguration('coxgem').update(
       'codexModel',
       normalized,
+      vscode.ConfigurationTarget.Workspace
+    );
+    await vscode.workspace.getConfiguration('coxgem').update(
+      'codexReasoningEffort',
+      requestedReasoningEffort || '',
       vscode.ConfigurationTarget.Workspace
     );
     await this.refreshAuthModelState(false);
@@ -1222,11 +1250,27 @@ function renderConversationHtml(webview: vscode.Webview): string {
       const codexPrefix = authSymbol(codexState) + ' Codex · ';
       codexModel.replaceChildren();
       codexModel.append(new Option(codexPrefix + 'Default / CLI 기본값', ''));
+      for (const preset of data.codex.presets || []) {
+        codexModel.append(new Option(
+          codexPrefix + preset.label,
+          preset.model + '|' + preset.reasoningEffort
+        ));
+      }
       for (const model of data.codex.modelOptions || []) {
-        codexModel.append(new Option(codexPrefix + model, model));
+        const effort = model === data.codex.selectedModel
+          ? data.codex.selectedReasoningEffort || ''
+          : '';
+        const value = model + '|' + effort;
+        const alreadyPresent = Array.from(codexModel.options).some(option => option.value === value);
+        if (!alreadyPresent) {
+          const suffix = effort ? ' · ' + titleCase(effort) : '';
+          codexModel.append(new Option(codexPrefix + model + suffix, value));
+        }
       }
       codexModel.append(new Option(codexPrefix + '직접 입력…', '__custom__'));
-      codexModel.value = data.codex.selectedModel || '';
+      codexModel.value = data.codex.selectedModel
+        ? data.codex.selectedModel + '|' + (data.codex.selectedReasoningEffort || '')
+        : '';
 
       const geminiPrefix = authSymbol(geminiState) + ' Gemini · ';
       geminiTier.replaceChildren();
@@ -1471,9 +1515,12 @@ function renderConversationHtml(webview: vscode.Webview): string {
     codexLogin.addEventListener('click', () => vscode.postMessage({ type: 'loginCodex' }));
     geminiLogin.addEventListener('click', () => vscode.postMessage({ type: 'loginGemini' }));
     codexModel.addEventListener('change', () => {
+      const custom = codexModel.value === '__custom__';
+      const parts = custom || !codexModel.value ? [] : codexModel.value.split('|');
       vscode.postMessage({
         type: 'setCodexModel',
-        model: codexModel.value === '__custom__' ? null : codexModel.value,
+        model: custom ? null : (parts[0] || ''),
+        reasoningEffort: custom ? null : (parts[1] || null),
       });
     });
     geminiTier.addEventListener('change', () => {

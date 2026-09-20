@@ -198,6 +198,32 @@ void describe('Codex Conversational Workspace & Decision Engine', () => {
       assert.equal(pinned.at(-1), '-');
     });
 
+    void test('exec args pass model reasoning effort as a fixed config argv', () => {
+      const args = buildCodexExecArgs({
+        prompt: 'hi',
+        cwd: testRepoDir,
+        model: 'gpt-5.6-sol',
+        reasoningEffort: 'high',
+      });
+      assert.equal(args[args.indexOf('--model') + 1], 'gpt-5.6-sol');
+      assert.equal(args[args.indexOf('--config') + 1], 'model_reasoning_effort="high"');
+    });
+
+    void test('an explicit reasoning effort reaches the next Codex invocation', async () => {
+      let seenArgs: string[] = [];
+      await evaluateCodexConversation({
+        message: '깊게 검토해줘',
+        repoRoot: testRepoDir,
+        codexModel: 'gpt-6-astra',
+        codexReasoningEffort: 'medium',
+        codexRunner: async params => {
+          seenArgs = params.args;
+          return { stdout: JSON.stringify({ intent: 'chat', reply: 'ok' }), stderr: '', exitCode: 0 };
+        },
+      });
+      assert.equal(seenArgs[seenArgs.indexOf('--config') + 1], 'model_reasoning_effort="medium"');
+    });
+
     void test('an explicit model beats the environment so a workflow stage can switch it', async () => {
       let seenArgs: string[] = [];
       const capture = async (params: { args: string[] }) => {

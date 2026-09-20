@@ -1,4 +1,5 @@
 import type { ProjectWorkGraphData } from '../../packages/orchestrator-core/project-event-graph.ts';
+import type { CodexReasoningEffort } from '../../packages/orchestrator-core/worker-settings.ts';
 
 export type UsageProvider = 'codex' | 'gemini';
 export type AuthState = 'not_installed' | 'unauthenticated' | 'authenticated' | 'unknown';
@@ -10,6 +11,12 @@ export interface GeminiTierOption {
   available?: boolean;
 }
 
+export interface CodexModelPreset {
+  model: string;
+  reasoningEffort: CodexReasoningEffort;
+  label: string;
+}
+
 /** Sanitized provider/model state. It intentionally has no raw CLI or credential fields. */
 export interface AuthModelState {
   codex: {
@@ -17,7 +24,9 @@ export interface AuthModelState {
     authState: AuthState;
     authMethod?: 'ChatGPT' | 'API key';
     selectedModel?: string;
+    selectedReasoningEffort?: CodexReasoningEffort;
     modelOptions: string[];
+    presets: CodexModelPreset[];
   };
   gemini: {
     installed: boolean;
@@ -90,7 +99,11 @@ export type WebviewToHost =
   | { type: 'loginCodex' }
   | { type: 'loginGemini' }
   /** Empty string selects the Codex CLI default; null opens validated direct input. */
-  | { type: 'setCodexModel'; model: string | null }
+  | {
+      type: 'setCodexModel';
+      model: string | null;
+      reasoningEffort?: CodexReasoningEffort | null;
+    }
   | { type: 'setGeminiTier'; tier: string };
 
 export function busyStatusText(reason?: string): string {
