@@ -2,7 +2,7 @@
   "name": "coxgem",
   "displayName": "coXgem",
   "description": "Local AI conversation and background worker orchestration inside VS Code. Works with the Codex and Gemini CLIs; not affiliated with OpenAI or Google.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publisher": "coXgem",
   "private": true,
   "license": "MIT",
@@ -133,11 +133,12 @@
     }
   },
   "scripts": {
-    "compile": "node esbuild.mjs",
+    "prepare:runtime": "node prepare-runtime.mjs",
+    "compile": "npm run prepare:runtime && node esbuild.mjs",
     "typecheck": "tsc --noEmit -p .",
     "vscode:prepublish": "npm run compile",
     "package": "vsce package --no-dependencies",
-    "test": "node --experimental-strip-types --test src/workspace-context.test.ts src/core-host.test.ts src/auth-model-state.test.ts src/ids.test.ts src/graph-tree.test.ts src/restore-state.test.ts src/protocol.test.ts src/webview-script.test.ts"
+    "test": "node --experimental-strip-types --test src/workspace-context.test.ts src/core-host.test.ts src/auth-model-state.test.ts src/ids.test.ts src/graph-tree.test.ts src/restore-state.test.ts src/protocol.test.ts src/webview-script.test.ts src/runtime-packaging.test.ts"
   },
   "vsce": {
     "dependencies": false

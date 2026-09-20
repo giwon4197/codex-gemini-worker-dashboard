@@ -471,6 +471,7 @@ export class ConversationViewProvider implements vscode.WebviewViewProvider {
       const result = await approvePlanWithCore({
         sessionId: this.sessionId,
         repoRoot: root,
+        runtimeRoot: vscode.Uri.joinPath(this.context.extensionUri, 'runtime').fsPath,
       });
       if (!result.ok) {
         this.post({

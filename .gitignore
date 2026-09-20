@@ -35,3 +35,4 @@ gemini-dashboard/public/data/live-workers.json
 .agent/dashboard-state/
 .agent/memory/
 *.vsix
+vscode-extension/runtime/

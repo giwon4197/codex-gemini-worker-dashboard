@@ -178,7 +178,11 @@ export class TaskGraphPanel {
         if (pick) await vscode.commands.executeCommand('workbench.view.scm');
         return;
       }
-      const result = await retryTrackedRun({ runId: this.model.runId, repoRoot: root });
+      const result = await retryTrackedRun({
+        runId: this.model.runId,
+        repoRoot: root,
+        runtimeRoot: vscode.Uri.joinPath(this.context.extensionUri, 'runtime').fsPath,
+      });
       if (!result.ok) {
         void vscode.window.showErrorMessage(sanitizeUiError(result.error || '재시도에 실패했습니다.', root));
         return;

@@ -9,12 +9,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { CodexReasoningEffort } from '../../packages/orchestrator-core/worker-settings.ts';
 
-/** Pushes the VS Code tier/model settings into the workspace toolkit's worker-settings.json. */
-async function pushWorkerSettings(): Promise<void> {
+/** Pushes VS Code settings into the workspace state shared with the web UI. */
+async function pushWorkerSettings(runtimeRoot: string): Promise<void> {
   const root = getWorkspaceRoot();
   if (!root) return;
-  if (!fs.existsSync(path.join(root, 'codex-router.ps1'))) {
-    void vscode.window.showWarningMessage('작업 폴더에 codex-router.ps1이 없어 워커 설정을 저장하지 않았습니다.');
+  if (!fs.existsSync(path.join(runtimeRoot, 'codex-router.ps1'))) {
+    void vscode.window.showWarningMessage('Extension에 bundled orchestration runtime이 없어 워커 설정을 저장하지 않았습니다.');
     return;
   }
   const config = vscode.workspace.getConfiguration('coxgem');
@@ -28,6 +28,7 @@ async function pushWorkerSettings(): Promise<void> {
 
 export function activate(context: vscode.ExtensionContext): void {
   try {
+    const runtimeRoot = vscode.Uri.joinPath(context.extensionUri, 'runtime').fsPath;
     const statusBar = new RunStatusBar();
     const provider = new ConversationViewProvider(context, statusBar);
     const taskGraph = registerTaskGraph(context, statusBar);
@@ -58,7 +59,7 @@ export function activate(context: vscode.ExtensionContext): void {
           event.affectsConfiguration('coxgem.codexModel') ||
           event.affectsConfiguration('coxgem.codexReasoningEffort')
         ) {
-          run(pushWorkerSettings)();
+          run(() => pushWorkerSettings(runtimeRoot))();
           void provider.refreshAuthModelState(false);
         }
       }),

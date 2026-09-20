@@ -394,6 +394,7 @@ export async function listSessionSummaries(repoRoot: string): Promise<SessionSum
 export async function approvePlanWithCore(options: {
   sessionId: string;
   repoRoot: string;
+  runtimeRoot?: string;
   spawner?: SpawnerFn;
 }): Promise<{
   ok: boolean;
@@ -405,6 +406,7 @@ export async function approvePlanWithCore(options: {
     approveConversationPlan({
       sessionId: options.sessionId,
       repoRoot: options.repoRoot,
+      runtimeRoot: options.runtimeRoot,
       spawner: options.spawner,
     })
   );
@@ -466,6 +468,7 @@ export async function getWorkGraph(
 export async function retryTrackedRun(options: {
   runId: string;
   repoRoot: string;
+  runtimeRoot?: string;
   spawner?: SpawnerFn;
 }): Promise<{ ok: boolean; runId?: string; error?: string; isDuplicate?: boolean }> {
   try {
@@ -473,6 +476,7 @@ export async function retryTrackedRun(options: {
       retryRun({
         runId: options.runId,
         repoRoot: options.repoRoot,
+        runtimeRoot: options.runtimeRoot,
         spawner: options.spawner,
       })
     );

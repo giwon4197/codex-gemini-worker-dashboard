@@ -32,6 +32,8 @@ code --user-data-dir <empty-dir> --extensions-dir <empty-dir> --install-extensio
 
 실행 후 폴더를 연 다음 Secondary Side Bar(오른쪽)의 coXgem 컨테이너를 사용합니다. 보이지 않으면 `View: Toggle Secondary Side Bar`를 실행합니다. Extension Development Host에서 `파일 > 폴더 열기`를 하면 디버그 창이 종료됩니다.
 
+VSIX에는 기존 v2.1 PowerShell orchestration runtime의 필수 파일만 포함됩니다. Extension은 설치 위치의 read-only runtime을 실행하고, 실제 소스와 Run 상태·로그·worktree는 사용자가 연 Git repository의 `.agent` 아래에 유지합니다. 사용자 프로젝트에 orchestration script를 복사하지 않습니다.
+
 ## 설정
 
 `coxgem.*` 설정은 VS Code 설정 화면에서 바꿉니다.

@@ -2,6 +2,7 @@
 src/**
 **/*.test.ts
 esbuild.mjs
+prepare-runtime.mjs
 tsconfig.json
 package-lock.json
 node_modules/**
