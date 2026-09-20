@@ -6,6 +6,19 @@
 
 ## 설치
 
+### Marketplace에서 설치
+
+1. VS Code의 Extensions 화면에서 `coXgem`을 검색합니다.
+2. **Install**을 누릅니다.
+3. Codex CLI를 설치하고 로그인합니다.
+4. Antigravity CLI를 설치하고 로그인합니다.
+5. Git 프로젝트 폴더를 엽니다.
+6. 오른쪽 Secondary Side Bar에서 coXgem을 실행합니다.
+
+### 소스에서 직접 빌드
+
+저장소의 `vscode-extension` 폴더에서 다음 명령을 실행합니다.
+
 1. `npm install`
 2. `npm run compile`
 3. `npm run package`
